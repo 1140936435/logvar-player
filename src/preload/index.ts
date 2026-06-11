@@ -18,12 +18,22 @@ const api = {
     }
   },
 
+  // 播放历史
+  history: {
+    save: (item: any) => ipcRenderer.invoke('history:save', item),
+    list: () => ipcRenderer.invoke('history:list'),
+    delete: (itemId: string) => ipcRenderer.invoke('history:delete', itemId),
+    clear: () => ipcRenderer.invoke('history:clear')
+  },
+
   // Jellyfin API
   jellyfin: {
     connect: (url: string, token: string) => ipcRenderer.invoke('jellyfin:connect', url, token),
     getLibraries: () => ipcRenderer.invoke('jellyfin:get-libraries'),
     getItems: (parentId: string, startIndex?: number, limit?: number) =>
       ipcRenderer.invoke('jellyfin:get-items', parentId, startIndex, limit),
+    getChildren: (parentId: string) =>
+      ipcRenderer.invoke('jellyfin:get-children', parentId),
     search: (query: string) => ipcRenderer.invoke('jellyfin:search', query),
     getItemDetails: (itemId: string) => ipcRenderer.invoke('jellyfin:get-item-details', itemId),
     getPlaybackUrl: (itemId: string) => ipcRenderer.invoke('jellyfin:get-playback-url', itemId),
@@ -36,8 +46,16 @@ const api = {
   danmaku: {
     match: (title: string) => ipcRenderer.invoke('danmaku:match', title),
     search: (keyword: string) => ipcRenderer.invoke('danmaku:search', keyword),
-    getComments: (commentId: string) => ipcRenderer.invoke('danmaku:get-comments', commentId),
-    getSegmentComments: (params: any) => ipcRenderer.invoke('danmaku:get-segment-comments', params)
+    getComments: (commentId: string, source?: string) =>
+      ipcRenderer.invoke('danmaku:get-comments', commentId, source),
+    getSegmentComments: (params: any) => ipcRenderer.invoke('danmaku:get-segment-comments', params),
+    prefetchSeries: (animeId: number) => ipcRenderer.invoke('danmaku:prefetch-series', animeId),
+    getConfig: () => ipcRenderer.invoke('danmaku:get-config'),
+    setConfig: (config: { primary?: string; mirrors?: string[] }) =>
+      ipcRenderer.invoke('danmaku:set-config', config),
+    testApi: (url: string) => ipcRenderer.invoke('danmaku:test-api', url),
+    parseLocalXml: (xmlPath: string) => ipcRenderer.invoke('danmaku:parse-local-xml', xmlPath),
+    findLocalXml: (videoPath: string) => ipcRenderer.invoke('danmaku:find-local-xml', videoPath)
   },
 
   // 本地文件
@@ -47,11 +65,30 @@ const api = {
     scanFolder: (folderPath: string) => ipcRenderer.invoke('file:scan-folder', folderPath)
   },
 
+  // 视频文件信息
+  video: {
+    getInfo: (filePath: string) => ipcRenderer.invoke('video:get-info', filePath)
+  },
+
   // 配置存储
   store: {
     get: (key: string) => ipcRenderer.invoke('store:get', key),
     set: (key: string, value: any) => ipcRenderer.invoke('store:set', key, value),
     delete: (key: string) => ipcRenderer.invoke('store:delete', key)
+  },
+
+  // 窗口控制
+  window: {
+    minimize: () => ipcRenderer.invoke('window:minimize'),
+    maximize: () => ipcRenderer.invoke('window:maximize'),
+    close: () => ipcRenderer.invoke('window:close')
+  },
+
+  // 日志
+  log: {
+    send: (level: string, source: string, ...args: any[]) =>
+      ipcRenderer.invoke('log:send', level, source, ...args),
+    toggleWindow: () => ipcRenderer.invoke('log:toggle')
   }
 }
 

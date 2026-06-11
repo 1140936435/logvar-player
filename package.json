@@ -1,9 +1,9 @@
 {
   "name": "logvar-player",
   "version": "1.0.0",
-  "description": "LogVar Media Player - Jellyfin + 本地文件 + 弹幕",
+  "description": "慢播 - Jellyfin + 本地文件 + 弹幕",
   "main": "./out/main/index.js",
-  "author": "LogVar",
+  "author": "慢播",
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
@@ -15,7 +15,9 @@
   },
   "dependencies": {
     "electron-store": "^8.2.0",
-    "node-mpv": "^2.0.0"
+    "framer-motion": "^12.40.0",
+    "lucide-react": "^1.17.0",
+    "node-mpv": "2.0.0-beta.2"
   },
   "devDependencies": {
     "@electron-toolkit/preload": "^3.0.1",
