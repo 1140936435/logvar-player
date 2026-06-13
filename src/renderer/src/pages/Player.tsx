@@ -710,8 +710,6 @@ function Player(): ReactElement {
             </div>
           </div>
         )}
-      </div>
-
       {/* 弹幕搜索面板 */}
       <AnimatePresence>
         {searchOpen && (
@@ -745,6 +743,7 @@ function Player(): ReactElement {
           </motion.div>
         )}
       </AnimatePresence>
+      </div>
 
       {/* 弹幕设置面板 */}
       <AnimatePresence>
