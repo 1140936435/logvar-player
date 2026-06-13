@@ -265,6 +265,20 @@ function Player(): ReactElement {
     }
     return () => { if (danmakuLoadingTimerRef.current) clearTimeout(danmakuLoadingTimerRef.current) }
   }, [danmakuLoading])
+
+  // 弹幕条数提示 5 秒后自动隐藏
+  const [danmakuCountVisible, setDanmakuCountVisible] = useState(false)
+  const danmakuCountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (danmakuCount > 0 && !danmakuLoading) {
+      setDanmakuCountVisible(true)
+      danmakuCountTimerRef.current = setTimeout(() => setDanmakuCountVisible(false), 5000)
+    } else {
+      setDanmakuCountVisible(false)
+    }
+    return () => { if (danmakuCountTimerRef.current) clearTimeout(danmakuCountTimerRef.current) }
+  }, [danmakuCount, danmakuLoading])
+
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchKeyword, setSearchKeyword] = useState('')
   const [searchResults, setSearchResults] = useState<DanmakuSearchResult[]>([])
@@ -656,8 +670,8 @@ function Player(): ReactElement {
             <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.6)' }}>匹配中</span>
           </div>
         )}
-        {danmakuCount > 0 && !danmakuLoading && (
-          <div className="absolute top-4 right-4 glass px-2.5 py-1 rounded-[var(--radius-sm)] text-[11px] text-[var(--text-tertiary)] z-20">{danmakuCount} 条弹幕</div>
+        {danmakuCountVisible && danmakuCount > 0 && !danmakuLoading && (
+          <div style={{ position: 'absolute', top: '16px', right: '16px', width: 'fit-content', maxWidth: '100px', padding: '4px 10px', borderRadius: '6px', zIndex: 20, fontSize: '10px', color: 'rgba(255,255,255,0.5)', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255,255,255,0.08)' }}>{danmakuCount} 条弹幕</div>
         )}
 
         {/* 倍速提示 */}
