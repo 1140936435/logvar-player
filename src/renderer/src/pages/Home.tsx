@@ -107,19 +107,19 @@ const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, commun
 
       {/* 评分角标 */}
       {communityRating != null && communityRating > 0 && (
-        <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-[var(--accent)]/90 text-white backdrop-blur-sm shadow-sm">
+        <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-[var(--accent)]/90 text-white backdrop-blur-sm shadow-sm z-10">
           ★ {communityRating.toFixed(1)}
         </div>
       )}
 
       {/* 底部标题条 */}
-      <div className="absolute inset-x-0 bottom-0 p-2.5 bg-gradient-to-t from-black/70 via-black/30 to-transparent opacity-60 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
+      <div className="absolute inset-x-0 bottom-0 p-2.5 bg-gradient-to-t from-black/70 via-black/30 to-transparent opacity-60 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-10">
         <p className="text-[11px] text-white/90 font-medium truncate drop-shadow-lg group-hover:text-white transition-colors duration-200">{displayName}</p>
       </div>
 
       {/* 文件夹角标 — 电视剧不显示 */}
       {isFolder && item.Type !== 'Series' && (
-        <div className="absolute top-2 left-2 px-2 py-0.5 bg-[var(--accent)]/90 backdrop-blur-sm rounded-md text-[10px] font-semibold text-white">
+        <div className="absolute top-2 left-2 px-2 py-0.5 bg-[var(--accent)]/90 backdrop-blur-sm rounded-md text-[10px] font-semibold text-white z-10">
           {item.ChildCount ? `${item.ChildCount}项` : '文件夹'}
         </div>
       )}

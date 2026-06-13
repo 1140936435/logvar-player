@@ -123,6 +123,8 @@ html {
 
 #root {
   min-height: 100vh;
+  border-radius: 12px;
+  overflow: hidden;
 }
 
 /* 亮色背景渐变 */

@@ -1729,7 +1729,7 @@ function createWindow(): void {
     minHeight: 600,
     icon: join(__dirname, '../../build/icon.png'),
     show: false,
-    backgroundColor: '#0d0d0d',
+    transparent: true,
     frame: false,
     hasShadow: false,
     webPreferences: {
