@@ -251,6 +251,20 @@ function Player(): ReactElement {
   const [danmakuLoading, setDanmakuLoading] = useState(false)
   const [danmakuCount, setDanmakuCount] = useState(0)
   const [danmakuError, setDanmakuError] = useState('')
+
+  // 弹幕匹配超时自动隐藏 (8秒)
+  const danmakuLoadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (danmakuLoading) {
+      danmakuLoadingTimerRef.current = setTimeout(() => {
+        setDanmakuLoading(false)
+      }, 8000)
+    } else if (danmakuLoadingTimerRef.current) {
+      clearTimeout(danmakuLoadingTimerRef.current)
+      danmakuLoadingTimerRef.current = null
+    }
+    return () => { if (danmakuLoadingTimerRef.current) clearTimeout(danmakuLoadingTimerRef.current) }
+  }, [danmakuLoading])
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchKeyword, setSearchKeyword] = useState('')
   const [searchResults, setSearchResults] = useState<DanmakuSearchResult[]>([])
@@ -637,9 +651,9 @@ function Player(): ReactElement {
 
         {/* 弹幕状态 */}
         {danmakuLoading && (
-          <div className="absolute top-5 right-5 glass px-3 py-1.5 rounded-[var(--radius-sm)] text-[12px] text-[var(--text-secondary)] z-20 flex items-center gap-2">
-            <Loader2 size={12} className="animate-spin text-[var(--accent)]" />
-            匹配弹幕
+          <div className="absolute top-5 right-5 glass px-2 py-1 rounded-[var(--radius-sm)] z-20 flex items-center gap-1.5">
+            <Loader2 size={11} className="animate-spin text-[var(--accent)]" />
+            <span className="text-[10px] text-[var(--text-secondary)]">匹配中</span>
           </div>
         )}
         {danmakuCount > 0 && !danmakuLoading && (
