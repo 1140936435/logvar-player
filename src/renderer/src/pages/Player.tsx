@@ -651,9 +651,9 @@ function Player(): ReactElement {
 
         {/* 弹幕状态 */}
         {danmakuLoading && (
-          <div className="absolute top-5 right-5 glass px-2 py-1 rounded-[var(--radius-sm)] z-20 flex items-center gap-1.5">
-            <Loader2 size={11} className="animate-spin text-[var(--accent)]" />
-            <span className="text-[10px] text-[var(--text-secondary)]">匹配中</span>
+          <div style={{ position: 'absolute', top: '20px', right: '20px', width: 'fit-content', maxWidth: '100px', padding: '4px 8px', borderRadius: '6px', zIndex: 20, display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <Loader2 size={10} className="animate-spin text-[var(--accent)]" />
+            <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.6)' }}>匹配中</span>
           </div>
         )}
         {danmakuCount > 0 && !danmakuLoading && (
