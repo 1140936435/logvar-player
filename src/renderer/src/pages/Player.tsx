@@ -258,7 +258,7 @@ function Player(): ReactElement {
     if (danmakuLoading) {
       danmakuLoadingTimerRef.current = setTimeout(() => {
         setDanmakuLoading(false)
-      }, 8000)
+      }, 16000)
     } else if (danmakuLoadingTimerRef.current) {
       clearTimeout(danmakuLoadingTimerRef.current)
       danmakuLoadingTimerRef.current = null
