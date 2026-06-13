@@ -252,20 +252,6 @@ function Player(): ReactElement {
   const [danmakuCount, setDanmakuCount] = useState(0)
   const [danmakuError, setDanmakuError] = useState('')
 
-  // 弹幕匹配超时自动隐藏 (8秒)
-  const danmakuLoadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => {
-    if (danmakuLoading) {
-      danmakuLoadingTimerRef.current = setTimeout(() => {
-        setDanmakuLoading(false)
-      }, 16000)
-    } else if (danmakuLoadingTimerRef.current) {
-      clearTimeout(danmakuLoadingTimerRef.current)
-      danmakuLoadingTimerRef.current = null
-    }
-    return () => { if (danmakuLoadingTimerRef.current) clearTimeout(danmakuLoadingTimerRef.current) }
-  }, [danmakuLoading])
-
   // 弹幕条数提示 5 秒后自动隐藏
   const [danmakuCountVisible, setDanmakuCountVisible] = useState(false)
   const danmakuCountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
