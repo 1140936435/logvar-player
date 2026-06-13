@@ -6,6 +6,7 @@ import { useState, useEffect, lazy, Suspense, type ReactElement } from 'react'
 /* 路由懒加载 — Player 最重，按需加载 */
 const Home = lazy(() => import('./pages/Home'))
 const Player = lazy(() => import('./pages/Player'))
+const Detail = lazy(() => import('./pages/Detail'))
 const SettingsPage = lazy(() => import('./pages/Settings'))
 
 function LoadingFallback(): ReactElement {
@@ -42,7 +43,7 @@ function NavItem({ to, icon: Icon, label, active }: { to: string; icon: React.El
   return (
     <Link
       to={to}
-      className="no-underline"
+      className="no-underline no-drag"
     >
       <motion.div
         className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[13px] font-medium transition-colors ${
@@ -66,14 +67,14 @@ function TopBar({ dark, toggleTheme }: { dark: boolean; toggleTheme: () => void 
 
   return (
     <header
-      className={`h-[52px] flex items-center px-5 shrink-0 z-50 relative ${
+      className={`h-[52px] flex items-center px-5 shrink-0 z-50 relative drag-region ${
         isPlayer
           ? 'absolute inset-x-0 top-0'
           : 'glass-thick'
       }`}
     >
       {/* Logo */}
-      <Link to="/" className="flex items-center gap-2.5 no-underline group">
+      <Link to="/" className="flex items-center gap-2.5 no-underline group no-drag">
         <div className="w-8 h-8 rounded-[var(--radius-sm)] bg-[var(--accent)] flex items-center justify-center shadow-sm">
           <Play size={14} fill="white" className="text-white ml-0.5" />
         </div>
@@ -84,7 +85,7 @@ function TopBar({ dark, toggleTheme }: { dark: boolean; toggleTheme: () => void 
 
       {/* Navigation */}
       {!isPlayer && (
-        <nav className="ml-4 flex items-center gap-1">
+        <nav className="ml-4 flex items-center gap-1 no-drag">
           <NavItem to="/" icon={HomeIcon} label="媒体库" active={location.pathname === '/'} />
           <NavItem to="/settings" icon={Settings} label="设置" active={location.pathname === '/settings'} />
         </nav>
@@ -97,7 +98,7 @@ function TopBar({ dark, toggleTheme }: { dark: boolean; toggleTheme: () => void 
       {!isPlayer && (
         <motion.button
           onClick={toggleTheme}
-          className="w-9 h-9 rounded-[var(--radius-md)] flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors mr-2"
+          className="w-9 h-9 rounded-[var(--radius-md)] flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors mr-2 no-drag"
           whileTap={{ scale: 0.9 }}
           aria-label={dark ? '切换亮色模式' : '切换暗色模式'}
         >
@@ -162,18 +163,43 @@ function useTheme(): { dark: boolean; toggle: () => void } {
   return { dark, toggle }
 }
 
+/* 应用 backdrop-filter 内联样式（绕过 Lightning CSS） */
+const GLASS_SELECTORS = '.glass, .glass-thick, .glass-card, .media-card'
+function applyGlassStyles() {
+  document.querySelectorAll(GLASS_SELECTORS).forEach((el) => {
+    const html = el as HTMLElement
+    const isDark = document.documentElement.classList.contains('dark')
+    if (el.classList.contains('glass')) {
+      html.style.backdropFilter = isDark ? 'blur(30px) saturate(180%)' : 'blur(24px) saturate(160%)'
+    } else if (el.classList.contains('glass-thick')) {
+      html.style.backdropFilter = isDark ? 'blur(50px) saturate(200%)' : 'blur(40px) saturate(180%)'
+    } else if (el.classList.contains('glass-card') || el.classList.contains('media-card')) {
+      html.style.backdropFilter = isDark ? 'blur(24px) saturate(160%)' : 'blur(20px) saturate(150%)'
+    }
+    html.style.webkitBackdropFilter = html.style.backdropFilter
+  })
+}
+
 /* Router 内部布局 — useLocation 必须在 BrowserRouter 内 */
 function AppLayout(): ReactElement {
   const location = useLocation()
   const { dark, toggle } = useTheme()
 
+  useEffect(() => {
+    applyGlassStyles()
+    const observer = new MutationObserver(() => applyGlassStyles())
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => observer.disconnect()
+  }, [location.pathname])
+
   return (
-    <div className="h-screen flex flex-col overflow-hidden relative bg-[var(--bg-page)]">
+    <div className="h-screen flex flex-col overflow-hidden relative" style={{ background: 'var(--bg-page)' }}>
       <TopBar dark={dark} toggleTheme={toggle} />
       <main className="flex-1 overflow-auto relative z-10">
         <AnimatePresence mode="wait">
           <Routes location={location} key={location.pathname}>
             <Route path="/" element={<PageTransition><Suspense fallback={<LoadingFallback />}><Home /></Suspense></PageTransition>} />
+            <Route path="/detail/:itemId" element={<PageTransition><Suspense fallback={<LoadingFallback />}><Detail /></Suspense></PageTransition>} />
             <Route path="/player" element={<PageTransition><Suspense fallback={<LoadingFallback />}><Player /></Suspense></PageTransition>} />
             <Route path="/settings" element={<PageTransition><Suspense fallback={<LoadingFallback />}><SettingsPage /></Suspense></PageTransition>} />
           </Routes>

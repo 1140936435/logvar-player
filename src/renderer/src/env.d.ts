@@ -93,6 +93,11 @@ interface WindowApi {
     getPlaybackUrl: (itemId: string) => Promise<ApiResponse>
     reportProgress: (itemId: string, position: number, isPaused: boolean) => Promise<ApiResponse>
     toggleFavorite: (itemId: string) => Promise<ApiResponse>
+    getEpisodes: (seriesId: string, seasonId?: string) => Promise<ApiResponse>
+  }
+  douban: {
+    getRating: (title: string) => Promise<{ success: boolean; data?: { rating: number; count: number } | null; error?: string }>
+    getRatingsBatch: (titles: string[]) => Promise<{ success: boolean; data?: Record<string, { rating: number; count: number } | null>; error?: string }>
   }
   danmaku: {
     match: (title: string) => Promise<ApiResponse>

@@ -13,6 +13,7 @@ import {
   safeStorage
 } from 'electron'
 import { join, extname, dirname } from 'path'
+import { platform } from 'os'
 import { readdirSync, createReadStream, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
@@ -293,7 +294,7 @@ ipcMain.handle('jellyfin:get-item-details', async (_event, itemId: string) => {
   try {
     const data = await jellyfinRequest(
       jellyfinAuth,
-      `/Users/${jellyfinAuth.userId}/Items/${itemId}?Fields=MediaSources,MediaStreams`
+      `/Users/${jellyfinAuth.userId}/Items/${itemId}?Fields=MediaSources,MediaStreams,People,Genres,Studios,OfficialRating,CommunityRating,VoteCount`
     )
     return { success: true, data }
   } catch (err) {
@@ -371,6 +372,94 @@ ipcMain.handle('jellyfin:toggle-favorite', async (_event, itemId: string) => {
     return { success: true, data: { isFavorite: !isFav } }
   } catch (err) {
     console.error(`jellyfin:toggle-favorite failed:`, err)
+    return { success: false, error: String(err) }
+  }
+})
+
+// ==================== IPC: 豆瓣评分 ====================
+// 使用 Jellyfin 的 CommunityRating，无需外部 API
+ipcMain.handle('douban:get-rating', async (_event, _title: string) => {
+  return { success: true, data: null }
+})
+
+ipcMain.handle('douban:get-ratings-batch', async (_event, _titles: string[]) => {
+  return { success: true, data: {} }
+})
+
+// ==================== IPC: 剧集列表 ====================
+
+ipcMain.handle('jellyfin:get-episodes', async (_event, seriesId: string, seasonId?: string) => {
+  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  try {
+    if (seasonId) {
+      const params = new URLSearchParams({
+        parentId: seasonId,
+        sortBy: 'IndexNumber',
+        sortOrder: 'Ascending',
+        recursive: 'false',
+        fields: 'Overview,MediaSources,IndexNumber,ParentIndexNumber',
+        limit: '500'
+      })
+      const data = await jellyfinRequest<{ Items: unknown[]; TotalRecordCount: number }>(
+        jellyfinAuth,
+        `/Users/${jellyfinAuth.userId}/Items?${params.toString()}`
+      )
+      return { success: true, data }
+    }
+
+    const seasonsParams = new URLSearchParams({
+      parentId: seriesId,
+      sortBy: 'IndexNumber',
+      sortOrder: 'Ascending',
+      recursive: 'false',
+      includeItemTypes: 'Season',
+      fields: 'ChildCount',
+      limit: '100'
+    })
+    const seasonsData = await jellyfinRequest<{ Items: Array<{ Id: string; Name: string; IndexNumber?: number; ChildCount?: number }> }>(
+      jellyfinAuth,
+      `/Users/${jellyfinAuth.userId}/Items?${seasonsParams.toString()}`
+    )
+
+    const seasons = seasonsData.Items || []
+    if (seasons.length === 0) {
+      const epsParams = new URLSearchParams({
+        parentId: seriesId,
+        sortBy: 'IndexNumber',
+        sortOrder: 'Ascending',
+        recursive: 'false',
+        fields: 'Overview,MediaSources,IndexNumber,ParentIndexNumber',
+        limit: '500'
+      })
+      const epsData = await jellyfinRequest<{ Items: unknown[] }>(
+        jellyfinAuth,
+        `/Users/${jellyfinAuth.userId}/Items?${epsParams.toString()}`
+      )
+      return { success: true, data: { seasons: [], episodes: epsData.Items || [] } }
+    }
+
+    const allEpisodes: unknown[] = []
+    for (const season of seasons) {
+      const epsParams = new URLSearchParams({
+        parentId: season.Id,
+        sortBy: 'IndexNumber',
+        sortOrder: 'Ascending',
+        recursive: 'false',
+        fields: 'Overview,MediaSources,IndexNumber,ParentIndexNumber',
+        limit: '500'
+      })
+      const epsData = await jellyfinRequest<{ Items: unknown[] }>(
+        jellyfinAuth,
+        `/Users/${jellyfinAuth.userId}/Items?${epsParams.toString()}`
+      )
+      for (const ep of (epsData.Items || [])) {
+        allEpisodes.push(ep)
+      }
+    }
+
+    return { success: true, data: { seasons, episodes: allEpisodes } }
+  } catch (err) {
+    console.error('jellyfin:get-episodes failed:', err)
     return { success: false, error: String(err) }
   }
 })
@@ -1600,13 +1689,11 @@ function createWindow(): void {
     height: 800,
     minWidth: 900,
     minHeight: 600,
+    icon: join(__dirname, '../../build/icon.png'),
     show: false,
-    backgroundColor: '#00000000',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: false,
-    transparent: true,
-    vibrancy: 'under-window',
-    backgroundMaterial: 'acrylic',
+    backgroundColor: '#0d0d0d',
+    frame: false,
+    hasShadow: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -1627,6 +1714,14 @@ function createWindow(): void {
   mainWindow.webContents.on('console-message', (_event, level, message) => {
     const levelMap: Record<number, LogEntry['level']> = { 0: 'debug', 1: 'info', 2: 'warn', 3: 'error' }
     addLog(levelMap[level] || 'info', 'renderer', message)
+  })
+
+  // 捕获渲染进程崩溃
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('Render process gone:', details.reason, details.exitCode)
+  })
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    console.error('Failed to load:', errorCode, errorDescription)
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -1693,6 +1788,17 @@ app.whenReady().then(() => {
 
   globalShortcut.register('CommandOrControl+Shift+L', () => {
     toggleLogWindow()
+  })
+
+  // F12 打开 DevTools（开发/调试用）
+  globalShortcut.register('F12', () => {
+    if (mainWindow) {
+      if (mainWindow.webContents.isDevToolsOpened()) {
+        mainWindow.webContents.closeDevTools()
+      } else {
+        mainWindow.webContents.openDevTools()
+      }
+    }
   })
 
   app.on('activate', function () {

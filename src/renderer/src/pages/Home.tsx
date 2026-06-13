@@ -1,4 +1,4 @@
-import { useNavigate, Link } from 'react-router-dom'
+﻿import { useNavigate, Link } from 'react-router-dom'
 import { useRef, useState, useEffect, useCallback, useMemo, memo, type ReactElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -51,10 +51,11 @@ interface DrillLevel {
 
 /* ==================== 子组件 ==================== */
 
-const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, onClick }: {
+const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, communityRating, onClick }: {
   item: MediaItem
   posterUrl: string | null
   displayName: string
+  communityRating?: number | null
   onClick: () => void
 }): ReactElement {
   const isFolder = item.IsFolder || (!!item.ChildCount && item.ChildCount > 0)
@@ -104,15 +105,22 @@ const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, onClic
         )}
       </div>
 
+      {/* 评分角标 */}
+      {communityRating != null && communityRating > 0 && (
+        <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-[var(--accent)]/90 text-white backdrop-blur-sm shadow-sm">
+          ★ {communityRating.toFixed(1)}
+        </div>
+      )}
+
       {/* 底部标题条 */}
-      <div className="absolute inset-x-0 bottom-0 p-2.5 bg-gradient-to-t from-black/80 to-transparent pointer-events-none">
-        <p className="text-[11px] text-white/80 font-medium truncate drop-shadow-lg">{displayName}</p>
+      <div className="absolute inset-x-0 bottom-0 p-2.5 bg-gradient-to-t from-black/70 via-black/30 to-transparent opacity-60 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
+        <p className="text-[11px] text-white/90 font-medium truncate drop-shadow-lg group-hover:text-white transition-colors duration-200">{displayName}</p>
       </div>
 
-      {/* 文件夹角标 */}
-      {isFolder && (
+      {/* 文件夹角标 — 电视剧不显示 */}
+      {isFolder && item.Type !== 'Series' && (
         <div className="absolute top-2 left-2 px-2 py-0.5 bg-[var(--accent)]/90 backdrop-blur-sm rounded-md text-[10px] font-semibold text-white">
-          {item.ChildCount ? `${item.ChildCount}集` : '文件夹'}
+          {item.ChildCount ? `${item.ChildCount}项` : '文件夹'}
         </div>
       )}
     </motion.div>
@@ -129,8 +137,7 @@ const HistoryCard = memo(function HistoryCard({ item, onClick, onDelete }: {
   return (
     <motion.div
       onClick={onClick}
-      className="flex-shrink-0 group cursor-pointer relative"
-      style={{ width: '200px' }}
+      className="flex-shrink-0 group cursor-pointer relative w-[180px] sm:w-[200px] lg:w-[240px]"
       whileHover={{ y: -2 }}
       whileTap={{ scale: 0.97 }}
       transition={{ type: 'spring', stiffness: 400, damping: 25 }}
@@ -395,10 +402,15 @@ function Home(): ReactElement {
   }
 
   const handleItemClick = (item: MediaItem): void => {
+    // 电视剧和电影直接进详情页
+    if (item.Type === 'Series' || item.Type === 'Movie') {
+      navigate(`/detail/${item.Id}`)
+      return
+    }
     if (isFolderItem(item)) {
       handleDrillDown(item)
     } else {
-      handlePlay(item)
+      navigate(`/detail/${item.Id}`)
     }
   }
 
@@ -511,7 +523,7 @@ function Home(): ReactElement {
   /* ==================== 主内容 ==================== */
   return (
     <div className="w-full flex justify-center">
-      <div className="max-w-6xl px-6 py-6 w-full">
+      <div className="px-4 sm:px-6 lg:px-8 py-6 w-full">
 
         {/* 面包屑导航 */}
         <AnimatePresence>
@@ -587,7 +599,7 @@ function Home(): ReactElement {
                 <p className="text-[13px] text-[var(--text-tertiary)] mb-4">
                   搜索 &quot;{searchQuery}&quot; — {searchResults.length} 个结果
                 </p>
-                <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))' }}>
+                <div className="responsive-grid">
                   {searchResults.map((item) => (
                     <MediaCard
                       key={item.Id}
@@ -598,6 +610,7 @@ function Home(): ReactElement {
                           ? `EP${String(item.IndexNumber).padStart(2, '0')} - ${item.Name}`
                           : item.Name
                       }
+                      communityRating={item.CommunityRating}
                       onClick={() => handleItemClick(item)}
                     />
                   ))}
@@ -623,13 +636,14 @@ function Home(): ReactElement {
                 </span>
               ))}
             </div>
-            <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))' }}>
+            <div className="responsive-grid">
               {currentDrill.items.map((item) => (
                 <MediaCard
                   key={item.Id}
                   item={item}
                   posterUrl={getPosterUrl(item)}
                   displayName={item.Name}
+                  communityRating={item.CommunityRating}
                   onClick={() => handleItemClick(item)}
                 />
               ))}
@@ -700,7 +714,7 @@ function Home(): ReactElement {
             ) : historyItems.length === 0 ? (
               <p className="text-[13px] text-[var(--text-quaternary)] py-8 text-center">暂无播放记录</p>
             ) : (
-              <div className="flex gap-4 overflow-x-auto pb-2 -mx-2 px-2">
+              <div className="flex gap-3 sm:gap-4 overflow-x-auto pb-2 -mx-2 px-2">
                 {historyItems.map((item) => (
                   <HistoryCard
                     key={item.itemId}
@@ -727,7 +741,7 @@ function Home(): ReactElement {
             {currentDrill.items.length === 0 ? (
               <p className="text-[15px] text-[var(--text-tertiary)] py-20 text-center">此文件夹中暂无内容</p>
             ) : (
-              <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))' }}>
+              <div className="responsive-grid">
                 {currentDrill.items.map((item) => (
                   <MediaCard
                     key={item.Id}
@@ -740,6 +754,7 @@ function Home(): ReactElement {
                           ? `${item.SeriesName} ${item.IndexNumber != null ? `S${String(item.IndexNumber).padStart(2, '0')}` : ''}`
                           : item.Name
                     }
+                    communityRating={item.CommunityRating}
                     onClick={() => handleItemClick(item)}
                   />
                 ))}
@@ -766,7 +781,7 @@ function Home(): ReactElement {
             return (
               <section key={lib.Id} className="mb-12">
                 <h2 className="section-title mb-4">{lib.Name}</h2>
-                <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))' }}>
+                <div className="responsive-grid">
                   {items.map((item) => (
                     <MediaCard
                       key={item.Id}
@@ -779,6 +794,7 @@ function Home(): ReactElement {
                             ? `${item.SeriesName} ${item.IndexNumber != null ? `S${String(item.IndexNumber).padStart(2, '0')}` : ''}`
                             : item.Name
                       }
+                      communityRating={item.CommunityRating}
                       onClick={() => handleItemClick(item)}
                     />
                   ))}

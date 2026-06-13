@@ -20,6 +20,22 @@ export default defineConfig({
             copyFileSync(src, dest)
             console.log('Copied log-window.html to out/main/')
           }
+          // 复制 disable-dwm.ps1
+          const psSrc = resolve(__dirname, 'disable-dwm.ps1')
+          const psDest = resolve(destDir, 'disable-dwm.ps1')
+          if (existsSync(psSrc)) {
+            copyFileSync(psSrc, psDest)
+            console.log('Copied disable-dwm.ps1 to out/main/')
+          }
+          // 复制 dwm-helper.exe
+          const exeSrc = resolve(__dirname, 'tools/dwm-helper.exe')
+          const exeDest = resolve(__dirname, 'out/tools/dwm-helper.exe')
+          if (existsSync(exeSrc)) {
+            const exeDir = resolve(__dirname, 'out/tools')
+            if (!existsSync(exeDir)) mkdirSync(exeDir, { recursive: true })
+            copyFileSync(exeSrc, exeDest)
+            console.log('Copied dwm-helper.exe to out/tools/')
+          }
         }
       }
     ]

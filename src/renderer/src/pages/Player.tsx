@@ -2,9 +2,9 @@ import { useRef, useState, useEffect, useCallback, type ReactElement } from 'rea
 import { useSearchParams, Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Play, Pause, Volume2, VolumeX, Maximize, Settings,
+  Play, Pause, Volume2, VolumeX, Volume1, Maximize, Settings,
   MessageSquare, Search, Loader2, ArrowLeft, Info,
-  ChevronRight, X as XIcon
+  ChevronRight, X as XIcon, Gauge
 } from 'lucide-react'
 
 // ==================== 弹幕类型 ====================
@@ -264,6 +264,8 @@ function Player(): ReactElement {
   const [danmakuArea, setDanmakuArea] = useState<'full' | 'top' | 'bottom'>('full')
   const [playbackRate, setPlaybackRate] = useState(1)
   const [speedToast, setSpeedToast] = useState('')
+  const [volumePopup, setVolumePopup] = useState(false)
+  const [speedPopup, setSpeedPopup] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; visible: boolean }>({ x: 0, y: 0, visible: false })
   const [infoOverlay, setInfoOverlay] = useState(false)
   const [itemInfo, setItemInfo] = useState<Record<string, unknown> | null>(null)
@@ -276,7 +278,7 @@ function Player(): ReactElement {
     if (!itemId && !localFile) return
     if (duration <= 0 || currentTime < 5) return
     try {
-      const posterUrl = localFile ? '' : `${baseUrl}/Items/${itemId}/Images/Primary?maxHeight=300`
+      const posterUrl = localFile ? '' : `${baseUrl.replace(/\/+$/, '')}/Items/${itemId}/Images/Primary?maxHeight=300`
       const historyName = seriesName && !itemName.startsWith(seriesName) ? `${seriesName} - ${itemName}` : itemName
       await window.api.history.save({
         itemId: itemId || `local:${localFile}`, name: historyName, duration, position: currentTime, posterUrl,
@@ -386,6 +388,20 @@ function Player(): ReactElement {
     } catch { showStatus('搜索弹幕失败') }
     setSearchLoading(false)
   }
+
+  // 点击其他地方关闭弹出面板
+  useEffect(() => {
+    if (!volumePopup && !speedPopup) return
+    const handleClick = (e: MouseEvent): void => {
+      const target = e.target as HTMLElement
+      if (!target.closest('.volume-popup') && !target.closest('.speed-popup')) {
+        setVolumePopup(false)
+        setSpeedPopup(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [volumePopup, speedPopup])
 
   // 弹幕搜索防抖：输入停止 400ms 后自动搜索
   const danmakuSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -901,30 +917,87 @@ function Player(): ReactElement {
         </span>
 
         {/* 倍速 */}
-        <button
-          onClick={() => {
-            const rates = [0.5, 0.75, 1, 1.25, 1.5, 2]
-            const idx = rates.indexOf(playbackRate)
-            handlePlaybackRateChange(rates[(idx + 1) % rates.length])
-          }}
-          className={`text-[12px] font-medium transition-colors px-2 py-1 rounded-[var(--radius-sm)] hover:bg-white/10 ${playbackRate !== 1 ? 'text-[var(--accent)]' : 'text-white/40 hover:text-white/60'}`}
-          title="切换倍速"
-        >
-          {playbackRate}x
-        </button>
+        <div className="relative speed-popup">
+          <button
+            onClick={() => { setSpeedPopup(!speedPopup); setVolumePopup(false) }}
+            className={`text-[12px] font-medium transition-colors px-2 py-1 rounded-[var(--radius-sm)] hover:bg-white/10 ${playbackRate !== 1 ? 'text-[var(--accent)]' : 'text-white/40 hover:text-white/60'}`}
+            title="播放速度"
+          >
+            <span className="flex items-center gap-1"><Gauge size={13} />{playbackRate}x</span>
+          </button>
+          <AnimatePresence>
+            {speedPopup && (
+              <motion.div
+                className="absolute bottom-full right-0 mb-2 glass-thick rounded-[var(--radius-lg)] py-2 min-w-[120px] z-30"
+                initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 8, scale: 0.95 }}
+                transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+              >
+                <div className="px-3 py-1 text-[11px] text-[var(--text-quaternary)] mb-1">播放速度</div>
+                {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3].map((rate) => (
+                  <button
+                    key={rate}
+                    onClick={() => { handlePlaybackRateChange(rate); setSpeedPopup(false) }}
+                    className={`w-full text-left px-3 py-1.5 text-[13px] transition-colors ${playbackRate === rate ? 'text-[var(--accent)] bg-[var(--accent-bg)]' : 'text-white/50 hover:bg-[var(--bg-hover)]'}`}
+                  >
+                    {rate === 1 ? '正常' : `${rate}x`}
+                    {playbackRate === rate && <span className="float-right text-[var(--accent)]">✓</span>}
+                  </button>
+                ))}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
 
         {/* 音量 */}
-        <motion.button
-          onClick={() => {
-            const video = videoRef.current; if (!video) return
-            const muted = !video.muted; video.muted = muted; setVolume(muted ? 0 : Math.round(video.volume * 100))
-          }}
-          className="w-9 h-9 rounded-[var(--radius-sm)] flex items-center justify-center text-white/50 hover:text-white/80 hover:bg-white/10 transition-colors"
-          title="静音"
-          whileTap={{ scale: 0.9 }}
-        >
-          {volume === 0 ? <VolumeX size={17} /> : <Volume2 size={17} />}
-        </motion.button>
+        <div className="relative volume-popup">
+          <motion.button
+            onClick={() => { setVolumePopup(!volumePopup); setSpeedPopup(false) }}
+            className="w-9 h-9 rounded-[var(--radius-sm)] flex items-center justify-center text-white/50 hover:text-white/80 hover:bg-white/10 transition-colors"
+            title="音量"
+            whileTap={{ scale: 0.9 }}
+          >
+            {volume === 0 ? <VolumeX size={17} /> : volume < 50 ? <Volume1 size={17} /> : <Volume2 size={17} />}
+          </motion.button>
+          <AnimatePresence>
+            {volumePopup && (
+              <motion.div
+                className="absolute bottom-full right-0 mb-2 glass-thick rounded-[var(--radius-lg)] p-3 z-30 w-52"
+                initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 8, scale: 0.95 }}
+                transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+              >
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      const video = videoRef.current; if (!video) return
+                      const muted = !video.muted; video.muted = muted
+                      setVolume(muted ? 0 : Math.round(video.volume * 100))
+                    }}
+                    className="w-7 h-7 flex items-center justify-center text-white/40 hover:text-white/70 transition-colors shrink-0"
+                  >
+                    {volume === 0 ? <VolumeX size={15} /> : <Volume1 size={15} />}
+                  </button>
+                  <input
+                    type="range"
+                    min="0" max="100" step="1"
+                    value={volume}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value)
+                      const video = videoRef.current
+                      if (video) { video.volume = v / 100; video.muted = v === 0 }
+                      setVolume(v)
+                    }}
+                    className="flex-1 volume-range"
+                  />
+                  <span className="text-[11px] text-[var(--text-quaternary)] w-8 text-right tabular-nums">{volume}%</span>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
 
         {/* 弹幕按钮 */}
         <motion.button

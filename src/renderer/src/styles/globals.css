@@ -11,11 +11,11 @@
 
 :root {
   /* ── 毛玻璃 ── */
-  --glass-bg: rgba(255, 255, 255, 0.55);
-  --glass-bg-thick: rgba(255, 255, 255, 0.72);
-  --glass-border: rgba(255, 255, 255, 0.35);
-  --glass-shadow: 0 2px 16px rgba(0, 0, 0, 0.06), 0 0 1px rgba(0, 0, 0, 0.08);
-  --glass-shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.10), 0 0 1px rgba(0, 0, 0, 0.08);
+  --glass-bg: rgba(235, 235, 245, 0.50);
+  --glass-bg-thick: rgba(228, 228, 240, 0.70);
+  --glass-border: rgba(255, 255, 255, 0.60);
+  --glass-shadow: 0 4px 24px rgba(80, 80, 140, 0.12), 0 0 1px rgba(0, 0, 0, 0.08);
+  --glass-shadow-lg: 0 12px 48px rgba(80, 80, 140, 0.18), 0 0 1px rgba(0, 0, 0, 0.08);
 
   /* ── 主题色 (Apple Blue) ── */
   --accent: #007AFF;
@@ -32,23 +32,23 @@
   --error-bg: rgba(255, 59, 48, 0.08);
 
   /* ── 文字层级 ── */
-  --text-primary: rgba(0, 0, 0, 0.88);
-  --text-secondary: rgba(0, 0, 0, 0.55);
-  --text-tertiary: rgba(0, 0, 0, 0.35);
-  --text-quaternary: rgba(0, 0, 0, 0.18);
+  --text-primary: rgba(30, 30, 40, 0.88);
+  --text-secondary: rgba(30, 30, 40, 0.52);
+  --text-tertiary: rgba(30, 30, 40, 0.32);
+  --text-quaternary: rgba(30, 30, 40, 0.16);
 
-  /* ── 背景层级 ── */
-  --bg-page: #F2F2F7;
-  --bg-elevated: #FFFFFF;
-  --bg-grouped: #FFFFFF;
-  --bg-input: rgba(118, 118, 128, 0.06);
-  --bg-input-focus: rgba(118, 118, 128, 0.10);
+  /* ── 背景层级 (磨砂质感) ── */
+  --bg-page: #D8D8E8;
+  --bg-elevated: rgba(248, 248, 255, 0.62);
+  --bg-grouped: rgba(242, 242, 252, 0.58);
+  --bg-input: rgba(100, 100, 130, 0.06);
+  --bg-input-focus: rgba(100, 100, 130, 0.10);
   --bg-hover: rgba(0, 0, 0, 0.03);
   --bg-active: rgba(0, 0, 0, 0.06);
 
   /* ── 分隔线 ── */
-  --separator: rgba(60, 60, 67, 0.10);
-  --separator-opaque: #C6C6C8;
+  --separator: rgba(60, 60, 80, 0.08);
+  --separator-opaque: #C8C8D0;
 
   /* ── 圆角 (iOS 8pt 栅格) ── */
   --radius-xs: 6px;
@@ -63,18 +63,20 @@
   --font-mono: "SF Mono", "Menlo", "Consolas", monospace;
 
   /* ── 阴影 ── */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 2px 12px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.10);
+  --shadow-sm: 0 1px 3px rgba(80, 80, 120, 0.06);
+  --shadow-md: 0 2px 16px rgba(80, 80, 120, 0.08);
+  --shadow-lg: 0 8px 32px rgba(80, 80, 120, 0.12);
 }
 
 /* ── 深色模式 ── */
 .dark {
-  --glass-bg: rgba(30, 30, 30, 0.60);
-  --glass-bg-thick: rgba(30, 30, 30, 0.78);
-  --glass-border: rgba(255, 255, 255, 0.08);
-  --glass-shadow: 0 2px 16px rgba(0, 0, 0, 0.20), 0 0 1px rgba(0, 0, 0, 0.15);
-  --glass-shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.35), 0 0 1px rgba(0, 0, 0, 0.15);
+  --glass-bg: rgba(22, 22, 30, 0.55);
+  --glass-bg-thick: rgba(20, 20, 28, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.10);
+  --glass-shadow: 0 4px 24px rgba(0, 0, 0, 0.30), 0 0 1px rgba(255, 255, 255, 0.04);
+  --glass-shadow-lg: 0 12px 48px rgba(0, 0, 0, 0.45), 0 0 1px rgba(255, 255, 255, 0.05);
+  --glass-glow: inset 0 1px 0 0 rgba(255,255,255,0.08), inset 0 -1px 0 0 rgba(255,255,255,0.02);
+  --glass-edge-light: 0 0 0 1px rgba(100, 140, 220, 0.06), 0 0 30px rgba(80, 120, 200, 0.04);
 
   --accent-bg: rgba(0, 122, 255, 0.15);
   --accent-bg-strong: rgba(0, 122, 255, 0.25);
@@ -84,20 +86,21 @@
   --text-tertiary: rgba(255, 255, 255, 0.35);
   --text-quaternary: rgba(255, 255, 255, 0.18);
 
-  --bg-page: #000000;
-  --bg-elevated: #1C1C1E;
-  --bg-grouped: #2C2C2E;
+  --bg-page: #08080e;
+  --bg-elevated: rgba(28, 28, 40, 0.60);
+  --bg-grouped: rgba(32, 32, 44, 0.55);
+  --bg-glass: rgba(30, 30, 45, 0.40);
   --bg-input: rgba(118, 118, 128, 0.18);
   --bg-input-focus: rgba(118, 118, 128, 0.24);
   --bg-hover: rgba(255, 255, 255, 0.04);
   --bg-active: rgba(255, 255, 255, 0.08);
 
-  --separator: rgba(84, 84, 88, 0.65);
-  --separator-opaque: #38383A;
+  --separator: rgba(84, 84, 110, 0.40);
+  --separator-opaque: #383848;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.16);
-  --shadow-md: 0 2px 12px rgba(0, 0, 0, 0.25);
-  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.40);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.20);
+  --shadow-md: 0 2px 16px rgba(0, 0, 0, 0.30), 0 0 2px rgba(100, 140, 220, 0.05);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.45), 0 0 4px rgba(100, 140, 220, 0.06);
 }
 
 /* =====================================================
@@ -105,46 +108,79 @@
    ===================================================== */
 
 body {
-  background-color: var(--bg-page);
   color: var(--text-primary);
   font-family: var(--font-system);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
+  margin: 0;
+}
+
+html {
+  overflow: hidden;
+  background: var(--bg-page);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* 亮色背景渐变 */
+#root {
+  background-image:
+    radial-gradient(ellipse at 10% 40%, rgba(100, 130, 210, 0.22) 0%, transparent 50%),
+    radial-gradient(ellipse at 90% 15%, rgba(180, 140, 220, 0.18) 0%, transparent 45%),
+    radial-gradient(ellipse at 50% 90%, rgba(130, 160, 210, 0.12) 0%, transparent 50%),
+    radial-gradient(ellipse at 60% 30%, rgba(200, 180, 230, 0.10) 0%, transparent 40%);
+}
+
+/* 暗色背景渐变 — 冷光漫反射 */
+.dark #root {
+  background-image:
+    radial-gradient(ellipse 60% 50% at 8% 35%, rgba(40, 70, 160, 0.18) 0%, transparent 100%),
+    radial-gradient(ellipse 50% 60% at 92% 12%, rgba(100, 60, 180, 0.14) 0%, transparent 100%),
+    radial-gradient(ellipse 70% 40% at 50% 85%, rgba(30, 80, 160, 0.10) 0%, transparent 100%),
+    radial-gradient(ellipse 40% 40% at 65% 25%, rgba(80, 100, 180, 0.08) 0%, transparent 100%),
+    radial-gradient(ellipse 30% 30% at 25% 70%, rgba(60, 90, 170, 0.06) 0%, transparent 100%);
 }
 
 /* ── 毛玻璃工具类 ── */
 
-.glass {
-  background: var(--glass-bg);
-  backdrop-filter: blur(40px) saturate(180%);
-  -webkit-backdrop-filter: blur(40px) saturate(180%);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow);
-  will-change: backdrop-filter;
-  contain: layout paint;
-}
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .glass {
+    background: var(--glass-bg);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow), var(--glass-glow, none);
+    will-change: backdrop-filter;
+    position: relative;
+  }
 
-.glass-thick {
-  background: var(--glass-bg-thick);
-  backdrop-filter: blur(60px) saturate(200%);
-  -webkit-backdrop-filter: blur(60px) saturate(200%);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow-lg);
-  will-change: backdrop-filter;
-  contain: layout paint;
-}
+  .glass-thick {
+    background: var(--glass-bg-thick);
+    backdrop-filter: blur(40px) saturate(180%);
+    -webkit-backdrop-filter: blur(40px) saturate(180%);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow-lg), var(--glass-glow, none);
+    will-change: backdrop-filter;
+    position: relative;
+  }
 
-.glass-card {
-  background: var(--bg-elevated);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-md);
-  transition: all 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-  border: 0.5px solid var(--separator);
-}
-.glass-card:hover {
-  box-shadow: var(--shadow-lg);
-  transform: translateY(-2px);
+  .glass-card {
+    background: var(--bg-elevated);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md), var(--glass-glow, none);
+    transition: all 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    border: 0.5px solid var(--glass-border);
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    position: relative;
+  }
+  .glass-card:hover {
+    box-shadow: var(--shadow-lg), var(--glass-glow, none);
+    transform: translateY(-2px);
+  }
 }
 
 /* =====================================================
@@ -379,21 +415,71 @@ input[type="range"]::-webkit-slider-thumb:active {
    媒体卡片
    ===================================================== */
 
-.media-card {
-  position: relative;
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  cursor: pointer;
-  transition: transform 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-sm);
-  border: 0.5px solid var(--separator);
-  will-change: transform;
-  contain: layout paint style;
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .media-card {
+    position: relative;
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    background: var(--bg-elevated);
+    box-shadow: var(--shadow-sm), var(--glass-glow, none);
+    border: 0.5px solid var(--glass-border);
+    will-change: transform;
+    contain: layout paint style;
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+  }
+  .media-card:hover {
+    transform: translateY(-3px) scale(1.02);
+    box-shadow: var(--shadow-lg), var(--glass-glow, none);
+  }
 }
-.media-card:hover {
-  transform: translateY(-3px) scale(1.02);
-  box-shadow: var(--shadow-lg);
+
+/* 暗色模式玻璃增强 */
+.dark .glass::after,
+.dark .glass-thick::after,
+.dark .glass-card::after,
+.dark .media-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.06'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 1;
+  mix-blend-mode: soft-light;
+}
+
+/* 暗色模式边缘冷光 */
+.dark .glass::before,
+.dark .glass-thick::before,
+.dark .glass-card::before,
+.dark .media-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgba(120, 160, 240, 0.08) 0%, transparent 35%, transparent 65%, rgba(140, 120, 220, 0.05) 100%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* 暗色模式顶边高光 */
+.dark .glass > *,
+.dark .glass-thick > *,
+.dark .glass-card > *,
+.dark .media-card > * {
+  position: relative;
+  z-index: 2;
+}
+
+/* 暗色模式 backdrop-filter 增强 */
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .dark .glass { backdrop-filter: blur(30px) saturate(180%); -webkit-backdrop-filter: blur(30px) saturate(180%); }
+  .dark .glass-thick { backdrop-filter: blur(50px) saturate(200%); -webkit-backdrop-filter: blur(50px) saturate(200%); }
+  .dark .glass-card { backdrop-filter: blur(24px) saturate(160%); -webkit-backdrop-filter: blur(24px) saturate(160%); }
+  .dark .media-card { backdrop-filter: blur(24px) saturate(160%); -webkit-backdrop-filter: blur(24px) saturate(160%); }
 }
 .media-card:hover .media-card-overlay {
   opacity: 1;
@@ -491,6 +577,7 @@ input[type="range"]::-webkit-slider-thumb:active {
 
 .drag-region { -webkit-app-region: drag; }
 .no-drag { -webkit-app-region: no-drag; }
+.no-drag { -webkit-app-region: no-drag; }
 
 /* =====================================================
    动画 (iOS 阻尼缓动)
@@ -534,20 +621,73 @@ input[type="range"]::-webkit-slider-thumb:active {
    滚动条 (极简)
    ===================================================== */
 
-::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.12);
-  border-radius: 2px;
+  background: rgba(100, 100, 140, 0.15);
+  border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(100, 100, 140, 0.28);
 }
 .dark ::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.10);
 }
 .dark ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.20);
+}
+
+/* =====================================================
+   响应式网格
+   ===================================================== */
+
+.responsive-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+}
+@media (min-width: 640px) {
+  .responsive-grid {
+    gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  }
+}
+@media (min-width: 1024px) {
+  .responsive-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+}
+
+/* =====================================================
+   播放器音量滑块
+   ===================================================== */
+
+.volume-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+.volume-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #FFFFFF;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+.volume-range::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+.volume-range::-webkit-slider-thumb:active {
+  transform: scale(0.92);
 }
 
 /* =====================================================

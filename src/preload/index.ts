@@ -39,7 +39,15 @@ const api = {
     getPlaybackUrl: (itemId: string) => ipcRenderer.invoke('jellyfin:get-playback-url', itemId),
     reportProgress: (itemId: string, position: number, isPaused: boolean) =>
       ipcRenderer.invoke('jellyfin:report-progress', itemId, position, isPaused),
-    toggleFavorite: (itemId: string) => ipcRenderer.invoke('jellyfin:toggle-favorite', itemId)
+    toggleFavorite: (itemId: string) => ipcRenderer.invoke('jellyfin:toggle-favorite', itemId),
+    getEpisodes: (seriesId: string, seasonId?: string) =>
+      ipcRenderer.invoke('jellyfin:get-episodes', seriesId, seasonId)
+  },
+
+  // 豆瓣评分
+  douban: {
+    getRating: (title: string) => ipcRenderer.invoke('douban:get-rating', title),
+    getRatingsBatch: (titles: string[]) => ipcRenderer.invoke('douban:get-ratings-batch', titles)
   },
 
   // 弹幕 API
