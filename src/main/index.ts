@@ -14,7 +14,7 @@ import {
 } from 'electron'
 import { join, extname, dirname } from 'path'
 import { platform } from 'os'
-import { readdirSync, createReadStream, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs'
+import { readdirSync, createReadStream, readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
 // ==================== 日志系统 ====================
@@ -30,6 +30,41 @@ const logHistory: LogEntry[] = []
 let logWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let mainWindow: BrowserWindow | null = null
+
+// 本地日志文件
+const logsDir = join(app.getPath('userData'), 'logs')
+if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true })
+
+function getLogFile(): string {
+  const now = new Date()
+  const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  return join(logsDir, `${dateStr}.log`)
+}
+
+function writeLogToFile(entry: LogEntry): void {
+  try {
+    const date = new Date(entry.timestamp)
+    const timeStr = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}.${String(date.getMilliseconds()).padStart(3, '0')}`
+    const line = `[${timeStr}] [${entry.level.toUpperCase()}] [${entry.source}] ${entry.message}\n`
+    appendFileSync(getLogFile(), line, 'utf-8')
+  } catch {}
+}
+
+// 清理 7 天前的日志文件
+function cleanOldLogs(): void {
+  try {
+    const now = Date.now()
+    const files = readdirSync(logsDir).filter(f => f.endsWith('.log')).sort()
+    for (const file of files) {
+      const dateStr = file.replace('.log', '')
+      const fileDate = new Date(dateStr).getTime()
+      if (now - fileDate > 7 * 24 * 60 * 60 * 1000) {
+        unlinkSync(join(logsDir, file))
+      }
+    }
+  } catch {}
+}
+cleanOldLogs()
 
 function addLog(level: LogEntry['level'], source: string, ...args: unknown[]): void {
   const rawMessage = args
@@ -48,6 +83,9 @@ function addLog(level: LogEntry['level'], source: string, ...args: unknown[]): v
   const entry: LogEntry = { timestamp: Date.now(), level, source, message }
   logHistory.push(entry)
   if (logHistory.length > 5000) logHistory.shift()
+
+  // 写入本地日志文件
+  writeLogToFile(entry)
 
   const nativeConsole = level === 'error' ? origConsole.error : level === 'warn' ? origConsole.warn : origConsole.log
   nativeConsole(`[${source}] ${message}`)
@@ -1810,6 +1848,14 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+// 全局异常捕获，写入日志文件
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason)
 })
 
 app.on('will-quit', () => {
