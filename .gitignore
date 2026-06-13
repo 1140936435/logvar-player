@@ -62,9 +62,7 @@ dist3/
 
 # 临时文件
 *.txt
-*.cmd
-*.bat
-*.sh
+*.py
 
 # DWM 辅助工具
 disable-dwm.ps1
