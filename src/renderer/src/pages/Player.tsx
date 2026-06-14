@@ -44,6 +44,9 @@ class DanmakuEngine {
   private speed = 120
   private displayArea: 'full' | 'top' | 'bottom' = 'full'
   private maxCount = 300
+  private timeDensity = 20 // 每秒最多显示条数
+  private lastAddTime = 0
+  private addedThisSecond = 0
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
@@ -89,6 +92,10 @@ class DanmakuEngine {
     this.maxCount = Math.max(50, Math.min(500, count))
   }
 
+  setTimeDensity(density: number): void {
+    this.timeDensity = Math.max(5, Math.min(50, density))
+  }
+
   private getTrackForScroll(): number {
     let best = 0
     let bestRight = Infinity
@@ -102,6 +109,18 @@ class DanmakuEngine {
   }
 
   private addComment(c: DanmakuComment, now: number): void {
+    // 时间密度控制 - 限制每秒显示的弹幕数
+    const elapsed = now - this.lastAddTime
+    if (elapsed >= 1000) {
+      // 新的一秒，重置计数
+      this.addedThisSecond = 0
+      this.lastAddTime = now
+    } else if (this.addedThisSecond >= this.timeDensity) {
+      // 超过每秒限制，跳过此弹幕
+      return
+    }
+    this.addedThisSecond++
+
     const colorStr = decToRgb(c.color)
     const font = `bold ${this.fontSize}px "Microsoft YaHei", sans-serif`
     this.ctx.font = font
@@ -316,6 +335,7 @@ function Player(): JSX.Element {
   const [danmakuEnabled, setDanmakuEnabled] = useState(true)
   const [danmakuLoading, setDanmakuLoading] = useState(false)
   const [danmakuCount, setDanmakuCount] = useState(0)
+  const [currentDanmakuCount, setCurrentDanmakuCount] = useState(0)
   const [danmakuCountVisible, setDanmakuCountVisible] = useState(false)
   const [danmakuError, setDanmakuError] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
@@ -330,6 +350,8 @@ function Player(): JSX.Element {
   const [danmakuSpeed, setDanmakuSpeed] = useState(120)
   const [danmakuArea, setDanmakuArea] = useState<'full' | 'top' | 'bottom'>('full')
   const [danmakuMaxCount, setDanmakuMaxCount] = useState(300)
+  const [danmakuSmartMode, setDanmakuSmartMode] = useState(false)
+  const [danmakuTimeDensity, setDanmakuTimeDensity] = useState(20) // 每秒最多显示条数
 
   const [playbackRate, setPlaybackRate] = useState(1)
   const [speedToast, setSpeedToast] = useState('')
@@ -835,22 +857,63 @@ function Player(): JSX.Element {
               <input type="range" min="60" max="300" step="10" value={danmakuSpeed} onChange={(e) => handleSpeedChange(parseInt(e.target.value))} className="w-full" />
             </div>
             <div>
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-[10px] text-[#666]">智能密度</span>
+                <button
+                  onClick={handleSmartModeToggle}
+                  className={`relative w-10 h-5 rounded-full transition-colors ${danmakuSmartMode ? 'bg-[#8b82f6]' : 'bg-[#333]'}`}
+                >
+                  <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${danmakuSmartMode ? 'left-5' : 'left-0.5'}`} />
+                </button>
+              </div>
+              {danmakuSmartMode && (
+                <div className="mb-3 px-2 py-1.5 bg-[#1a1a1a] rounded text-[9px] text-[#8b82f6]">
+                  已自动调节为 {danmakuMaxCount} 条（共 {currentDanmakuCount} 条）
+                </div>
+              )}
+              {!danmakuSmartMode && (
+                <>
+                  <div className="flex justify-between text-[10px] text-[#666] mb-1.5">
+                    <span>弹幕密度</span>
+                    <span>{danmakuMaxCount} 条</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="50"
+                    max="500"
+                    step="50"
+                    value={danmakuMaxCount}
+                    onChange={(e) => handleMaxCountChange(parseInt(e.target.value))}
+                    className="w-full"
+                  />
+                  <div className="flex justify-between text-[9px] text-[#555] mt-1">
+                    <span>稀疏 (50)</span>
+                    <span>密集 (500)</span>
+                  </div>
+                </>
+              )}
+            </div>
+            <div>
               <div className="flex justify-between text-[10px] text-[#666] mb-1.5">
-                <span>弹幕密度</span>
-                <span>{danmakuMaxCount} 条</span>
+                <span>时间密度</span>
+                <span>{danmakuTimeDensity} 条/秒</span>
               </div>
               <input
                 type="range"
-                min="50"
-                max="500"
-                step="50"
-                value={danmakuMaxCount}
-                onChange={(e) => handleMaxCountChange(parseInt(e.target.value))}
+                min="5"
+                max="50"
+                step="5"
+                value={danmakuTimeDensity}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value)
+                  setDanmakuTimeDensity(val)
+                  danmakuEngine?.setTimeDensity(val)
+                }}
                 className="w-full"
               />
               <div className="flex justify-between text-[9px] text-[#555] mt-1">
-                <span>稀疏 (50)</span>
-                <span>密集 (500)</span>
+                <span>流畅 (5)</span>
+                <span>密集 (50)</span>
               </div>
             </div>
             <div>
