@@ -1,8 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { Api } from '../shared/preload-types'
 import { electronAPI } from '@electron-toolkit/preload'
 
 // 自定义 API
-const api = {
+const api: Api = {
   // mpv 播放控制
   mpv: {
     play: (filePath: string) => ipcRenderer.invoke('mpv:play', filePath),
@@ -70,12 +71,24 @@ const api = {
   file: {
     openFile: () => ipcRenderer.invoke('file:open-file'),
     openFolder: () => ipcRenderer.invoke('file:open-folder'),
-    scanFolder: (folderPath: string) => ipcRenderer.invoke('file:scan-folder', folderPath)
+    scanFolder: (folderPath: string) => ipcRenderer.invoke('file:scan-folder', folderPath),
+    getLocalFileUrl: (filePath: string) => ipcRenderer.invoke('file:get-url', filePath)
   },
 
   // 视频文件信息
   video: {
     getInfo: (filePath: string) => ipcRenderer.invoke('video:get-info', filePath)
+  },
+
+  // 服务器管理
+  server: {
+    list: () => ipcRenderer.invoke('server:list'),
+    getActive: () => ipcRenderer.invoke('server:get-active'),
+    add: (params: { name: string; url: string; token: string }) => ipcRenderer.invoke('server:add', params),
+    update: (params: { id: string; name?: string; url?: string; token?: string }) => ipcRenderer.invoke('server:update', params),
+    remove: (id: string) => ipcRenderer.invoke('server:remove', id),
+    switch: (id: string) => ipcRenderer.invoke('server:switch', id),
+    test: (url: string, token: string) => ipcRenderer.invoke('server:test', url, token)
   },
 
   // 配置存储

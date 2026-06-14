@@ -4,75 +4,53 @@ import App from './App'
 import './styles/globals.css'
 
 // ==================== 日志转发到主进程 ====================
+// 只在生产模式下启用，开发模式使用原始 console 便于调试
 
-// 保存原始 console 方法，确保不丢失终端输出
-const _origConsole = {
-  log: console.log.bind(console),
-  warn: console.warn.bind(console),
-  error: console.error.bind(console),
-  debug: console.debug.bind(console)
-}
+const isProd = import.meta.env.PROD
 
-function forwardLog(
-  level: 'info' | 'warn' | 'error' | 'debug',
-  args: unknown[]
-): void {
-  // 保留原始输出
-  const orig = _origConsole[level === 'debug' ? 'log' : level]
-  orig(...args)
+if (isProd) {
+  // 保存原始 console 方法
+  const _origLog = console.log
+  const _origWarn = console.warn
+  const _origError = console.error
+  const _origDebug = console.debug
 
-  // 异步发送到主进程日志窗口
-  const message = args
-    .map((a) => {
-      if (a instanceof Error) return a.stack || a.message
-      if (typeof a === 'object') {
-        try {
-          return JSON.stringify(a)
-        } catch {
-          return String(a)
+  function forwardLog(
+    level: 'info' | 'warn' | 'error' | 'debug',
+    args: unknown[]
+  ): void {
+    // 使用原始函数
+    const orig = level === 'debug' ? _origLog : level === 'error' ? _origError : level === 'warn' ? _origWarn : _origLog
+    orig.apply(console, args)
+
+    // 异步发送到主进程日志窗口
+    const message = args
+      .map((a) => {
+        if (a instanceof Error) return a.stack || a.message
+        if (typeof a === 'object') {
+          try {
+            return JSON.stringify(a)
+          } catch {
+            return String(a)
+          }
         }
-      }
-      return String(a)
-    })
-    .join(' ')
+        return String(a)
+      })
+      .join(' ')
 
-  if (window.api?.log?.send) {
-    window.api.log.send(level, 'renderer', message).catch(() => {})
+    if (window.api?.log?.send) {
+      window.api.log.send(level, 'renderer', message).catch(() => {})
+    }
   }
+
+  console.log = (...args: unknown[]) => forwardLog('info', args)
+  console.warn = (...args: unknown[]) => forwardLog('warn', args)
+  console.error = (...args: unknown[]) => forwardLog('error', args)
+  console.debug = (...args: unknown[]) => forwardLog('debug', args)
 }
-
-console.log = (...args: unknown[]) => forwardLog('info', args)
-console.warn = (...args: unknown[]) => forwardLog('warn', args)
-console.error = (...args: unknown[]) => forwardLog('error', args)
-console.debug = (...args: unknown[]) => forwardLog('debug', args)
-
-// 全局未捕获错误
-window.addEventListener('error', (event) => {
-  _origConsole.error('Global error:', event.error || event.message)
-  if (window.api?.log?.send) {
-    window.api.log
-      .send('error', 'renderer', `Global error: ${event.error?.stack || event.message}`)
-      .catch(() => {})
-  }
-})
-
-window.addEventListener('unhandledrejection', (event) => {
-  _origConsole.error('Unhandled rejection:', event.reason)
-  if (window.api?.log?.send) {
-    window.api.log
-      .send(
-        'error',
-        'renderer',
-        `Unhandled rejection: ${event.reason?.stack || event.reason}`
-      )
-      .catch(() => {})
-  }
-})
-
-// ==================== React 渲染 ====================
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
-  </React.StrictMode>
+  </React.StrictMode>,
 )

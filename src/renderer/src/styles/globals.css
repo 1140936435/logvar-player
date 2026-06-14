@@ -118,13 +118,14 @@ body {
 
 html {
   overflow: hidden;
-  background: var(--bg-page);
+  background: transparent;
 }
 
 #root {
   min-height: 100vh;
   border-radius: 12px;
   overflow: hidden;
+  background: var(--bg-page);
 }
 
 /* 亮色背景渐变 */
@@ -428,7 +429,6 @@ input[type="range"]::-webkit-slider-thumb:active {
     box-shadow: var(--shadow-sm), var(--glass-glow, none);
     border: 0.5px solid var(--glass-border);
     will-change: transform;
-    contain: layout paint style;
     backdrop-filter: blur(20px) saturate(150%);
     -webkit-backdrop-filter: blur(20px) saturate(150%);
   }
@@ -474,6 +474,12 @@ input[type="range"]::-webkit-slider-thumb:active {
 .dark .media-card > * {
   position: relative;
   z-index: 2;
+}
+
+/* 暗色模式下恢复绝对定位子元素的定位方式 */
+.dark .media-card > .absolute {
+  position: absolute !important;
+  z-index: 10 !important;
 }
 
 /* 暗色模式 backdrop-filter 增强 */

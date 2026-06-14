@@ -95,6 +95,7 @@ function Detail(): ReactElement {
   const [expandedEpisode, setExpandedEpisode] = useState<string | null>(null)
 
   const [baseUrl, setBaseUrl] = useState('http://localhost:8096')
+  const [jellyfinToken, setJellyfinToken] = useState('')
 
   // 加载详情
   useEffect(() => {
@@ -105,6 +106,7 @@ function Detail(): ReactElement {
     // 先读取服务器地址
     window.api.store.get('jellyfin').then((saved: any) => {
       if (saved?.url) setBaseUrl(saved.url.replace(/\/+$/, ''))
+      if (saved?.token) setJellyfinToken(saved.token)
     }).catch(() => {})
 
     window.api.jellyfin.getItemDetails(itemId).then((result) => {
@@ -187,26 +189,31 @@ function Detail(): ReactElement {
         targetId = itemId || ''
       }
       const seriesName = detail?.SeriesName || detail?.Name || ''
-      navigate(`/player?itemId=${encodeURIComponent(targetId)}&name=${encodeURIComponent(targetName)}&base=${encodeURIComponent(serverUrl)}&seriesName=${encodeURIComponent(seriesName)}`)
+      const seriesId = detail?.SeriesId || ''
+      const seasonId = detail?.SeasonId || ''
+      navigate(`/player?itemId=${encodeURIComponent(targetId)}&name=${encodeURIComponent(targetName)}&base=${encodeURIComponent(serverUrl)}&seriesName=${encodeURIComponent(seriesName)}&seriesId=${encodeURIComponent(seriesId)}&seasonId=${encodeURIComponent(seasonId)}`)
     })
   }
 
   const getPosterUrl = (): string | null => {
     if (!detail?.ImageTags?.Primary || !itemId) return null
-    return `${baseUrl}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90`
+    const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
+    return `${baseUrl}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90${authParam}`
   }
 
   const getBackdropUrl = (): string | null => {
     if (!detail?.ImageTags?.Backdrop || !itemId) return null
-    return `${baseUrl}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85`
+    const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
+    return `${baseUrl}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85${authParam}`
   }
 
   const getPersonAvatar = (person: PersonInfo): string | null => {
     const tag = person.ImageTags?.Primary || person.PrimaryImageTag
+    const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
     if (person.Id) {
       return tag
-        ? `${baseUrl}/Items/${person.Id}/Images/Primary?maxHeight=100&tag=${tag}`
-        : `${baseUrl}/Items/${person.Id}/Images/Primary?maxHeight=100`
+        ? `${baseUrl}/Items/${person.Id}/Images/Primary?maxHeight=100&tag=${tag}${authParam}`
+        : `${baseUrl}/Items/${person.Id}/Images/Primary?maxHeight=100${authParam}`
     }
     return tag
       ? `${baseUrl}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100&tag=${tag}`
@@ -215,7 +222,8 @@ function Detail(): ReactElement {
 
   const getEpisodeThumbUrl = (ep: EpisodeInfo): string | null => {
     if (!ep.ImageTags?.Primary) return null
-    return `${baseUrl}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85`
+    const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
+    return `${baseUrl}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85${authParam}`
   }
 
   const isSeries = detail?.Type === 'Series' || detail?.CollectionType === 'tvshows'

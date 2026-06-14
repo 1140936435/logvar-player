@@ -1,9 +1,11 @@
-import { useState, useEffect, type FormEvent, type ReactElement } from 'react'
+import { useState, useEffect, useCallback, useMemo, type ReactElement } from 'react'
+import type { ServerConfig as ApiServerConfig, ServerInfo, ServerTestResult as ApiServerTestResult } from '../../shared/preload-types'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Server, Wifi, WifiOff, Save, Loader2, CheckCircle,
-  MessageSquare, TestTube, Monitor, Cpu, Palette,
-  ChevronDown, Key, Link as LinkIcon
+  Database, Plug, WifiOff, Save, Loader2, CheckCircle,
+  MessageCircleMore, Radar, MonitorPlay, Info, Eye,
+  ChevronDown, Key, Link as LinkIcon, CirclePlus, Trash2, Settings as SettingsIcon,
+  CircleDot
 } from 'lucide-react'
 
 /* ==================== 类型 ==================== */
@@ -23,6 +25,9 @@ interface JellyfinServerInfo {
   Id?: string
 }
 
+type ServerConfig = ApiServerConfig
+type ServerTestResult = ApiServerTestResult
+
 /* ==================== 毛玻璃亚克力卡片 ==================== */
 
 function GlassCard({ title, icon: Icon, children }: {
@@ -36,18 +41,13 @@ function GlassCard({ title, icon: Icon, children }: {
       whileHover={{ y: -2 }}
       transition={{ type: 'spring', stiffness: 400, damping: 30 }}
     >
-      {/* 卡片标题 */}
       <div className="flex items-center gap-3 px-7 pt-7 pb-4">
         <div className="w-9 h-9 rounded-[var(--radius-md)] bg-[var(--accent-bg)] flex items-center justify-center flex-shrink-0">
           <Icon size={18} className="text-[var(--accent)]" strokeWidth={1.5} />
         </div>
         <h2 className="text-[17px] font-semibold text-[var(--text-primary)] tracking-tight">{title}</h2>
       </div>
-
-      {/* 分隔线 */}
       <div className="mx-7 h-px bg-[var(--separator)]" />
-
-      {/* 内容 */}
       <div className="p-7 space-y-6">
         {children}
       </div>
@@ -138,15 +138,16 @@ function SliderRow({ label, value, unit, children }: { label: string; value: str
 /* ==================== Settings 主组件 ==================== */
 
 function Settings(): ReactElement {
-  // Jellyfin
-  const [serverUrl, setServerUrl] = useState('')
-  const [apiToken, setApiToken] = useState('')
-  const [connecting, setConnecting] = useState(false)
-  const [connectStatus, setConnectStatus] = useState<'idle' | 'success' | 'error'>('idle')
-  const [statusMessage, setStatusMessage] = useState('')
-  const [serverInfo, setServerInfo] = useState<JellyfinServerInfo | null>(null)
-  const [customServerName, setCustomServerName] = useState('')
-  const [displayServerName, setDisplayServerName] = useState('')
+  // 多服务器管理
+  const [servers, setServers] = useState<ServerConfig[]>([])
+  const [activeServerId, setActiveServerId] = useState<string | null>(null)
+  const [editingServer, setEditingServer] = useState<ServerConfig | null>(null)
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [serverForm, setServerForm] = useState({ name: '', url: '', token: '' })
+  const [serverConnecting, setServerConnecting] = useState(false)
+  const [serverTesting, setServerTesting] = useState(false)
+  const [serverTestResult, setServerTestResult] = useState<ServerTestResult | null>(null)
+  const [serverStatus, setServerStatus] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null)
 
   // 弹幕 API
   const [danmakuPrimary, setDanmakuPrimary] = useState('')
@@ -166,60 +167,112 @@ function Settings(): ReactElement {
   const [hardwareDecode, setHardwareDecode] = useState(true)
   const [hdrToneMapping, setHdrToneMapping] = useState(true)
 
-  const handleConnect = async (e: FormEvent): Promise<void> => {
-    e.preventDefault()
-    if (!serverUrl.trim()) { setConnectStatus('error'); setStatusMessage('请输入服务器地址'); return }
-    if (!apiToken.trim()) { setConnectStatus('error'); setStatusMessage('请输入 API Token'); return }
-
-    setConnecting(true)
-    setConnectStatus('idle')
-    setStatusMessage('正在连接...')
-
+  const loadServers = useCallback(async (): Promise<void> => {
     try {
-      const result = await window.api.jellyfin.connect(serverUrl.trim(), apiToken.trim())
-      if (result.success) {
-        setConnectStatus('success')
-        const info = result.data as JellyfinServerInfo
-        setServerInfo(info)
-        const autoName = info.ServerName || 'Jellyfin'
-        setDisplayServerName(autoName)
-        setStatusMessage(`连接成功 - ${autoName} v${info.Version || '?'}`)
-        await window.api.store.set('jellyfin', { url: serverUrl.trim(), token: apiToken.trim() })
-        const savedCustom = await window.api.store.get('serverDisplayName')
-        if (savedCustom) {
-          setCustomServerName(savedCustom as string)
-          setDisplayServerName(savedCustom as string)
-        } else {
-          await window.api.store.set('serverDisplayName', autoName)
-        }
+      const listResult = await window.api.server.list()
+      if (listResult.success && listResult.data) {
+        setServers(listResult.data as ServerConfig[])
+      }
+      const activeResult = await window.api.server.getActive()
+      if (activeResult.success && activeResult.data) {
+        const d = activeResult.data as ServerInfo
+        setActiveServerId(d.id)
+      }
+    } catch { /* ignore */ }
+  }, [])
+
+  const handleTestServer = useCallback(async (): Promise<void> => {
+    if (!serverForm.url.trim() || !serverForm.token.trim()) return
+    setServerTesting(true)
+    setServerTestResult(null)
+    try {
+      const result = await window.api.server.test(serverForm.url.trim(), serverForm.token.trim())
+      setServerTestResult(result as ServerTestResult)
+    } catch (err) { setServerTestResult({ success: false, error: err instanceof Error ? err.message : String(err), elapsed: 0 }) }
+    setServerTesting(false)
+  }, [serverForm.url, serverForm.token])
+
+  const handleSaveServer = useCallback(async (): Promise<void> => {
+    if (!serverForm.url.trim() || !serverForm.token.trim()) return
+    try {
+      if (editingServer) {
+        await window.api.server.update({
+          id: editingServer.id,
+          name: serverForm.name.trim() || 'Jellyfin',
+          url: serverForm.url.trim(),
+          token: serverForm.token.trim()
+        })
+        setServerStatus({ type: 'success', message: '服务器已更新' })
       } else {
-        setConnectStatus('error')
-        setStatusMessage(result.error || '连接失败')
+        const result = await window.api.server.add({
+          name: serverForm.name.trim() || 'Jellyfin',
+          url: serverForm.url.trim(),
+          token: serverForm.token.trim()
+        })
+        if (result.success && result.data) {
+          const newServer = result.data as ServerConfig
+          setServerStatus({ type: 'success', message: '服务器已添加' })
+          handleConnectServer(newServer.id)
+        }
+      }
+      setShowAddForm(false)
+      setEditingServer(null)
+      setServerForm({ name: '', url: '', token: '' })
+      setServerTestResult(null)
+      await loadServers()
+      setTimeout(() => setServerStatus(null), 3000)
+    } catch (err) {
+      setServerStatus({ type: 'error', message: err instanceof Error ? err.message : '操作失败' })
+    }
+  }, [serverForm, editingServer, loadServers])
+
+  const handleConnectServer = async (id: string): Promise<void> => {
+    setServerConnecting(true)
+    setServerStatus({ type: 'info', message: '正在连接...' })
+    try {
+      const result = await window.api.server.switch(id)
+      if (result.success) {
+        const info = result.data as JellyfinServerInfo
+        setActiveServerId(id)
+        const server = servers.find(s => s.id === id)
+        setServerStatus({ type: 'success', message: `已连接 - ${info.ServerName || server?.name || 'Jellyfin'}` })
+        await loadServers()
+      } else {
+        setServerStatus({ type: 'error', message: result.error || '连接失败' })
       }
     } catch (err) {
-      setConnectStatus('error')
-      setStatusMessage(err instanceof Error ? err.message : '发生未知错误')
-    } finally {
-      setConnecting(false)
+      setServerStatus({ type: 'error', message: err instanceof Error ? err.message : '连接失败' })
     }
+    setServerConnecting(false)
   }
 
-  useEffect(() => {
-    window.api.store.get('jellyfin').then((saved: { url?: string; token?: string } | null) => {
-      if (saved?.url) setServerUrl(saved.url)
-      if (saved?.token) setApiToken(saved.token)
-    }).catch(() => {})
+  const handleRemoveServer = useCallback(async (id: string): Promise<void> => {
+    if (!confirm('确定要删除此服务器吗？')) return
+    try {
+      await window.api.server.remove(id)
+      await loadServers()
+      if (activeServerId === id) {
+        setActiveServerId(null)
+        setServerStatus({ type: 'info', message: '已断开连接' })
+      }
+    } catch { /* ignore */ }
+  }, [activeServerId, loadServers])
 
-    window.api.store.get('serverDisplayName').then((name) => {
-      if (name) { setCustomServerName(name as string); setDisplayServerName(name as string) }
-    }).catch(() => {})
+  const handleEditServer = useCallback((server: ServerConfig): void => {
+    setEditingServer(server)
+    setServerForm({ name: server.name, url: server.url, token: server.token })
+    setShowAddForm(true)
+    setServerTestResult(null)
+  }, [])
+
+  useEffect(() => {
+    loadServers()
 
     window.api.danmaku.getConfig().then((cfg) => {
       setDanmakuPrimary(cfg.primary)
       setDanmakuMirrors(cfg.mirrors.join('\n'))
     }).catch(() => {})
 
-    // 加载弹幕显示设置
     Promise.all([
       window.api.store.get('danmakuFontSize'),
       window.api.store.get('danmakuDisplayArea'),
@@ -258,6 +311,8 @@ function Settings(): ReactElement {
     setTimeout(() => setDanmakuSaveMsg(''), 2000)
   }
 
+  const activeServer = useMemo(() => servers.find(s => s.id === activeServerId), [servers, activeServerId])
+
   return (
     <div className="w-full flex justify-center">
       <motion.div
@@ -276,97 +331,210 @@ function Settings(): ReactElement {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
 
           {/* ======== 左栏：Jellyfin 服务器 ======== */}
-          <GlassCard title="Jellyfin 服务器" icon={Server}>
+          <GlassCard title="Jellyfin 服务器" icon={Database}>
             {/* 连接状态 */}
-            {connectStatus !== 'idle' && (
-              <motion.div
-                className={`px-4 py-3 rounded-[var(--radius-md)] text-[13px] flex items-center gap-2.5 ${
-                  connectStatus === 'success' ? 'status-success' :
-                  connectStatus === 'error' ? 'status-error' :
-                  'status-info'
-                }`}
-                initial={{ opacity: 0, y: -4 }}
-                animate={{ opacity: 1, y: 0 }}
-              >
-                {connectStatus === 'success' ? <CheckCircle size={16} /> :
-                 connectStatus === 'error' ? <WifiOff size={16} /> :
-                 <Loader2 size={16} className="animate-spin" />}
-                {statusMessage}
-              </motion.div>
-            )}
+            <AnimatePresence>
+              {serverStatus && (
+                <motion.div
+                  className={`px-4 py-3 rounded-[var(--radius-md)] text-[13px] flex items-center gap-2.5 ${
+                    serverStatus.type === 'success' ? 'status-success' :
+                    serverStatus.type === 'error' ? 'status-error' :
+                    'status-info'
+                  }`}
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                >
+                  {serverStatus.type === 'success' ? <CheckCircle size={16} /> :
+                   serverStatus.type === 'error' ? <WifiOff size={16} /> :
+                   <Loader2 size={16} className="animate-spin" />}
+                  {serverStatus.message}
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-            <form onSubmit={handleConnect} className="space-y-5">
-              <Field label="服务器地址">
-                <div className="relative">
-                  <LinkIcon size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-quaternary)]" strokeWidth={1.5} />
-                  <input
-                    type="text"
-                    value={serverUrl}
-                    onChange={(e) => setServerUrl(e.target.value)}
-                    placeholder="http://192.168.1.100:8096"
-                    className="ios-input !pl-10"
-                  />
+            {/* 服务器列表 */}
+            <div className="space-y-3">
+              {servers.length === 0 && !showAddForm && (
+                <div className="text-center py-8">
+                  <Database size={32} className="mx-auto text-[var(--text-quaternary)] mb-3" />
+                  <p className="text-[14px] text-[var(--text-tertiary)] mb-1">还没有保存的服务器</p>
+                  <p className="text-[12px] text-[var(--text-quaternary)]">点击下方按钮添加你的第一个 Jellyfin 服务器</p>
                 </div>
-              </Field>
-
-              <Field label="API Token" hint="Jellyfin 控制台 → API 密钥">
-                <div className="relative">
-                  <Key size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-quaternary)]" strokeWidth={1.5} />
-                  <input
-                    type="password"
-                    value={apiToken}
-                    onChange={(e) => setApiToken(e.target.value)}
-                    placeholder="输入你的 API Token"
-                    className="ios-input !pl-10"
-                  />
-                </div>
-              </Field>
-
-              {connectStatus === 'success' && (
-                <Field label="自定义显示名称">
-                  <div className="flex gap-3">
-                    <input
-                      type="text"
-                      value={customServerName}
-                      onChange={(e) => setCustomServerName(e.target.value)}
-                      placeholder={serverInfo?.ServerName || 'Jellyfin'}
-                      className="ios-input flex-1"
-                    />
-                    <motion.button
-                      type="button"
-                      onClick={async () => {
-                        const name = customServerName.trim() || serverInfo?.ServerName || 'Jellyfin'
-                        setCustomServerName(name); setDisplayServerName(name)
-                        await window.api.store.set('serverDisplayName', name)
-                      }}
-                      className="ios-btn ios-btn-secondary !px-4"
-                      whileTap={{ scale: 0.96 }}
-                    >
-                      <Save size={15} strokeWidth={1.5} />
-                      保存
-                    </motion.button>
-                  </div>
-                </Field>
               )}
 
-              <motion.button
-                type="submit"
-                disabled={connecting}
-                className={connecting ? 'ios-btn ios-btn-primary opacity-40 cursor-not-allowed w-full' : 'ios-btn ios-btn-primary w-full'}
-                whileTap={connecting ? {} : { scale: 0.97 }}
-              >
-                {connecting ? <Loader2 size={16} className="animate-spin" strokeWidth={1.5} /> : <Wifi size={16} strokeWidth={1.5} />}
-                {connecting ? '连接中...' : '连接服务器'}
-              </motion.button>
-            </form>
+              {servers.map((server) => (
+                <div
+                  key={server.id}
+                  className={`p-4 rounded-[var(--radius-lg)] border transition-colors ${
+                    server.id === activeServerId
+                      ? 'border-[var(--accent)] bg-[var(--accent-bg)]/50'
+                      : 'border-[var(--separator)] bg-[var(--bg-elevated)]'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      {server.id === activeServerId ? (
+                        <CircleDot size={18} className="text-[var(--accent)] flex-shrink-0" />
+                      ) : (
+                        <Database size={18} className="text-[var(--text-quaternary)] flex-shrink-0" />
+                      )}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[14px] font-medium text-[var(--text-primary)] truncate">{server.name}</span>
+                          {server.id === activeServerId && (
+                            <span className="px-1.5 py-0.5 text-[10px] font-medium bg-[var(--accent)] text-white rounded-full">当前</span>
+                          )}
+                        </div>
+                        <p className="text-[12px] text-[var(--text-tertiary)] truncate mt-0.5">{server.url}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      {server.id !== activeServerId && (
+                        <motion.button
+                          onClick={() => handleConnectServer(server.id)}
+                          disabled={serverConnecting}
+                          className="p-1.5 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--accent)] disabled:opacity-40"
+                          whileTap={{ scale: 0.9 }}
+                          title="连接"
+                        >
+                          <Plug size={15} />
+                        </motion.button>
+                      )}
+                      <motion.button
+                        onClick={() => handleEditServer(server)}
+                        className="p-1.5 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-tertiary)]"
+                        whileTap={{ scale: 0.9 }}
+                        title="编辑"
+                      >
+                        <SettingsIcon size={14} />
+                      </motion.button>
+                      <motion.button
+                        onClick={() => handleRemoveServer(server.id)}
+                        className="p-1.5 rounded-lg hover:bg-[var(--error-bg)] text-[var(--text-quaternary)] hover:text-[var(--error)]"
+                        whileTap={{ scale: 0.9 }}
+                        title="删除"
+                      >
+                        <Trash2 size={14} />
+                      </motion.button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
 
-            {/* 连接成功状态 */}
-            {connectStatus === 'success' && (
-              <div className="flex items-center gap-3 pt-5 mt-5 border-t border-[var(--separator)]">
-                <span className="w-2.5 h-2.5 rounded-full bg-[var(--success)]" />
-                <span className="text-[13px] text-[var(--text-secondary)]">{displayServerName}</span>
-                {serverInfo?.Version && <span className="text-[12px] text-[var(--text-tertiary)]">v{serverInfo.Version}</span>}
-              </div>
+            {/* 添加/编辑表单 */}
+            <AnimatePresence>
+              {showAddForm && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  <div className="p-4 rounded-[var(--radius-lg)] border border-[var(--accent)]/30 bg-[var(--bg-elevated)] space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-[14px] font-medium text-[var(--text-primary)]">
+                        {editingServer ? '编辑服务器' : '添加服务器'}
+                      </h3>
+                      <button
+                        onClick={() => { setShowAddForm(false); setEditingServer(null); setServerForm({ name: '', url: '', token: '' }); setServerTestResult(null) }}
+                        className="text-[12px] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]"
+                      >
+                        取消
+                      </button>
+                    </div>
+
+                    <Field label="服务器名称" hint="可选">
+                      <input
+                        type="text"
+                        value={serverForm.name}
+                        onChange={(e) => setServerForm({ ...serverForm, name: e.target.value })}
+                        placeholder="我的 Jellyfin"
+                        className="ios-input"
+                      />
+                    </Field>
+
+                    <Field label="服务器地址">
+                      <div className="relative">
+                        <LinkIcon size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-quaternary)]" strokeWidth={1.5} />
+                        <input
+                          type="text"
+                          value={serverForm.url}
+                          onChange={(e) => setServerForm({ ...serverForm, url: e.target.value })}
+                          placeholder="http://192.168.1.100:8096"
+                          className="ios-input !pl-10"
+                        />
+                      </div>
+                    </Field>
+
+                    <Field label="API Token" hint="Jellyfin 控制台 → API 密钥">
+                      <div className="relative">
+                        <Key size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-quaternary)]" strokeWidth={1.5} />
+                        <input
+                          type="password"
+                          value={serverForm.token}
+                          onChange={(e) => setServerForm({ ...serverForm, token: e.target.value })}
+                          placeholder="输入你的 API Token"
+                          className="ios-input !pl-10"
+                        />
+                      </div>
+                    </Field>
+
+                    {/* 测试结果 */}
+                    {serverTestResult && (
+                      <div className={`px-4 py-3 rounded-[var(--radius-md)] text-[12px] ${
+                        serverTestResult.success ? 'status-success' : 'status-error'
+                      }`}>
+                        {serverTestResult.success ? (
+                          <div className="flex items-center gap-2">
+                            <CheckCircle size={14} />
+                            连接成功 — {serverTestResult.data?.ServerName} v{serverTestResult.data?.Version} ({serverTestResult.elapsed}ms)
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <WifiOff size={14} />
+                            {serverTestResult.error}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="flex gap-2">
+                      <motion.button
+                        onClick={handleTestServer}
+                        disabled={serverTesting || !serverForm.url.trim() || !serverForm.token.trim()}
+                        className="ios-btn ios-btn-secondary flex-1"
+                        whileTap={{ scale: 0.96 }}
+                      >
+                        {serverTesting ? <Loader2 size={15} className="animate-spin" strokeWidth={1.5} /> : <Radar size={15} strokeWidth={1.5} />}
+                        {serverTesting ? '测试中...' : '测试连接'}
+                      </motion.button>
+                      <motion.button
+                        onClick={handleSaveServer}
+                        disabled={!serverForm.url.trim() || !serverForm.token.trim()}
+                        className="ios-btn ios-btn-primary flex-1"
+                        whileTap={{ scale: 0.96 }}
+                      >
+                        <Save size={15} strokeWidth={1.5} />
+                        {editingServer ? '保存修改' : '添加服务器'}
+                      </motion.button>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* 添加按钮 */}
+            {!showAddForm && (
+              <motion.button
+                onClick={() => { setShowAddForm(true); setEditingServer(null); setServerForm({ name: '', url: '', token: '' }); setServerTestResult(null) }}
+                className="ios-btn ios-btn-secondary w-full"
+                whileTap={{ scale: 0.96 }}
+              >
+                <CirclePlus size={16} strokeWidth={1.5} />
+                添加服务器
+              </motion.button>
             )}
           </GlassCard>
 
@@ -374,12 +542,11 @@ function Settings(): ReactElement {
           <div className="space-y-8">
 
             {/* ---- 弹幕设置 ---- */}
-            <GlassCard title="弹幕" icon={MessageSquare}>
-              {/* 弹幕源 */}
+            <GlassCard title="弹幕" icon={MessageCircleMore}>
               <CollapseSection
                 title="弹幕源"
                 subtitle={danmakuPrimary || 'DandanPlay API'}
-                icon={MessageSquare}
+                icon={MessageCircleMore}
                 defaultOpen={false}
               >
                 <Field label="主 API 地址">
@@ -399,7 +566,7 @@ function Settings(): ReactElement {
                     className={danmakuTesting || !danmakuPrimary.trim() ? 'ios-btn ios-btn-secondary opacity-40 cursor-not-allowed' : 'ios-btn ios-btn-secondary'}
                     whileTap={(danmakuTesting || !danmakuPrimary.trim()) ? {} : { scale: 0.96 }}
                   >
-                    {danmakuTesting ? <Loader2 size={15} className="animate-spin" strokeWidth={1.5} /> : <TestTube size={15} strokeWidth={1.5} />}
+                    {danmakuTesting ? <Loader2 size={15} className="animate-spin" strokeWidth={1.5} /> : <Radar size={15} strokeWidth={1.5} />}
                     {danmakuTesting ? '测试中...' : '测试连接'}
                   </motion.button>
                   {danmakuTestResult && (
@@ -453,11 +620,10 @@ function Settings(): ReactElement {
                 )}
               </CollapseSection>
 
-              {/* 弹幕显示 */}
               <CollapseSection
                 title="弹幕显示"
                 subtitle="文字大小、透明度、滚动速度"
-                icon={Palette}
+                icon={Eye}
                 defaultOpen={true}
               >
                 <SliderRow label="文字大小" value={fontSize} unit="px">
@@ -495,8 +661,7 @@ function Settings(): ReactElement {
             </GlassCard>
 
             {/* ---- 播放器设置 ---- */}
-            <GlassCard title="播放器" icon={Monitor}>
-              {/* 硬件解码 */}
+            <GlassCard title="播放器" icon={MonitorPlay}>
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <div className="text-[15px] font-medium text-[var(--text-primary)]">启用硬件解码</div>
@@ -509,10 +674,8 @@ function Settings(): ReactElement {
                 />
               </div>
 
-              {/* 分隔线 */}
               <div className="h-px bg-[var(--separator)]" />
 
-              {/* HDR 色调映射 */}
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <div className="text-[15px] font-medium text-[var(--text-primary)]">自动 HDR 色调映射</div>
@@ -525,13 +688,11 @@ function Settings(): ReactElement {
                 />
               </div>
 
-              {/* 分隔线 */}
               <div className="h-px bg-[var(--separator)]" />
 
-              {/* 渲染器信息 */}
               <div className="flex items-center gap-3">
                 <div className="w-8 h-8 rounded-[var(--radius-sm)] bg-[var(--bg-input)] flex items-center justify-center flex-shrink-0">
-                  <Cpu size={15} className="text-[var(--text-tertiary)]" strokeWidth={1.5} />
+                  <Info size={15} className="text-[var(--text-tertiary)]" strokeWidth={1.5} />
                 </div>
                 <div>
                   <div className="text-[15px] font-medium text-[var(--text-tertiary)]">视频渲染器</div>
@@ -546,7 +707,6 @@ function Settings(): ReactElement {
         </div>
         {/* 双栏布局结束 */}
 
-        {/* 底部留白 */}
         <div className="h-16" />
       </motion.div>
     </div>

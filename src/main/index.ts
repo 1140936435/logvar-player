@@ -12,9 +12,13 @@ import {
   net,
   safeStorage
 } from 'electron'
-import { join, extname, dirname } from 'path'
+import { join, extname, dirname, resolve, relative, isAbsolute } from 'path'
+import { pathToFileURL } from 'url'
 import { platform } from 'os'
 import { readdirSync, createReadStream, readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'fs'
+import type { DanmakuComment, DanmakuCommentRaw, DanmakuCommentsResponse, DanmakuMatchResult, DanmakuSearchResponse } from '../shared/types'
+import * as http from 'http'
+import * as https from 'https'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
 // ==================== 日志系统 ====================
@@ -209,7 +213,9 @@ async function jellyfinRequest<T>(
 
   const contentType = response.headers.get('content-type') || ''
   if (contentType.includes('application/json')) {
-    return (await response.json()) as T
+    const buffer = await response.arrayBuffer()
+    const text = new TextDecoder('utf-8').decode(buffer)
+    return JSON.parse(text) as T
   }
   return (await response.text()) as unknown as T
 }
@@ -217,6 +223,101 @@ async function jellyfinRequest<T>(
 // ==================== IPC: Jellyfin ====================
 
 let jellyfinAuth: JellyfinAuth | null = null
+
+// ==================== 多服务器管理 ====================
+
+
+// 配置文件路径和数据（需要在函数定义前声明）
+let configPath = ''
+let configData: Record<string, unknown> = {}
+
+interface JellyfinServerConfig {
+  id: string
+  name: string
+  url: string
+  token: string
+  userId?: string
+}
+
+function getServers(): JellyfinServerConfig[] {
+  const raw = configData['jellyfin:servers']
+  if (Array.isArray(raw)) return raw as JellyfinServerConfig[]
+  return []
+}
+
+function saveServers(servers: JellyfinServerConfig[]): void {
+  configData['jellyfin:servers'] = servers
+  saveConfigFile()
+}
+
+function getActiveServerId(): string | null {
+  return (configData['jellyfin:activeServerId'] as string) || null
+}
+
+function setActiveServerId(id: string): void {
+  configData['jellyfin:activeServerId'] = id
+  saveConfigFile()
+}
+
+function generateServerId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+}
+
+/** 从旧的单服务器配置迁移 */
+function migrateLegacyConfig(): void {
+  const servers = getServers()
+  if (servers.length > 0) return // 已迁移过
+  const oldUrl = configData['jellyfin.url'] as string | undefined
+  const oldToken = configData['jellyfin.token'] as string | undefined
+  if (oldUrl && oldToken) {
+    const id = generateServerId()
+    const server: JellyfinServerConfig = {
+      id,
+      name: (configData['serverDisplayName'] as string) || 'Jellyfin',
+      url: oldUrl,
+      token: oldToken
+    }
+    saveServers([server])
+    setActiveServerId(id)
+    console.log(`[server] 已从旧配置迁移服务器: ${server.name}`)
+  }
+}
+
+/** 连接到指定服务器并更新 auth */
+async function connectToServer(id: string): Promise<{ success: boolean; data?: JellyfinServerInfo; error?: string }> {
+  const servers = getServers()
+  const server = servers.find(s => s.id === id)
+  if (!server) return { success: false, error: '服务器不存在' }
+
+  try {
+    const auth: JellyfinAuth = { url: server.url, token: server.token, userId: '' }
+    const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
+      auth, '/System/Info'
+    )
+    const users = await jellyfinRequest<{ Id: string; Name: string }[]>(auth, '/Users')
+    if (!Array.isArray(users) || users.length === 0) {
+      throw new Error('服务器上没有找到用户')
+    }
+    auth.userId = users[0].Id
+    jellyfinAuth = auth
+
+    // 更新 userId
+    server.userId = auth.userId
+    saveServers(servers)
+    setActiveServerId(id)
+
+    // 同步旧 key（兼容性）
+    configData['jellyfin'] = { url: server.url, token: server.token }
+    saveConfigFile()
+
+    console.log(`[server] 已连接: ${info.ServerName} v${info.Version}, userId=${auth.userId}`)
+    return { success: true, data: info }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[server] 连接失败 (${server.name}): ${msg}`)
+    return { success: false, error: msg }
+  }
+}
 
 ipcMain.handle('jellyfin:connect', async (_event, url: string, token: string) => {
   try {
@@ -244,6 +345,78 @@ ipcMain.handle('jellyfin:connect', async (_event, url: string, token: string) =>
     const msg = err instanceof Error ? err.message : String(err)
     console.error(`Jellyfin connect failed: ${msg}`)
     return { success: false, error: msg }
+  }
+})
+
+// ==================== 多服务器 IPC ====================
+
+ipcMain.handle('server:list', async () => {
+  return { success: true, data: getServers() }
+})
+
+ipcMain.handle('server:get-active', async () => {
+  const id = getActiveServerId()
+  const servers = getServers()
+  const active = servers.find(s => s.id === id) || null
+  return { success: true, data: { id, server: active } }
+})
+
+ipcMain.handle('server:add', async (_event, params: { name: string; url: string; token: string }) => {
+  const servers = getServers()
+  const id = generateServerId()
+  const server: JellyfinServerConfig = {
+    id,
+    name: params.name || 'Jellyfin',
+    url: params.url.replace(/\/+$/, ''),
+    token: params.token
+  }
+  servers.push(server)
+  saveServers(servers)
+  return { success: true, data: server }
+})
+
+ipcMain.handle('server:update', async (_event, params: { id: string; name?: string; url?: string; token?: string }) => {
+  const servers = getServers()
+  const server = servers.find(s => s.id === params.id)
+  if (!server) return { success: false, error: '服务器不存在' }
+  if (params.name !== undefined) server.name = params.name
+  if (params.url !== undefined) server.url = params.url.replace(/\/+$/, '')
+  if (params.token !== undefined) server.token = params.token
+  saveServers(servers)
+  return { success: true }
+})
+
+ipcMain.handle('server:remove', async (_event, id: string) => {
+  let servers = getServers()
+  servers = servers.filter(s => s.id !== id)
+  saveServers(servers)
+  if (getActiveServerId() === id) {
+    if (servers.length > 0) {
+      setActiveServerId(servers[0].id)
+    } else {
+      setActiveServerId('')
+      jellyfinAuth = null
+    }
+  }
+  return { success: true }
+})
+
+ipcMain.handle('server:switch', async (_event, id: string) => {
+  const result = await connectToServer(id)
+  return result
+})
+
+ipcMain.handle('server:test', async (_event, url: string, token: string) => {
+  const startTime = Date.now()
+  try {
+    const auth: JellyfinAuth = { url: url.replace(/\/+$/, ''), token, userId: '' }
+    const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
+      auth, '/System/Info'
+    )
+    const elapsed = Date.now() - startTime
+    return { success: true, data: info, elapsed }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err), elapsed: Date.now() - startTime }
   }
 })
 
@@ -504,9 +677,6 @@ ipcMain.handle('jellyfin:get-episodes', async (_event, seriesId: string, seasonI
 
 // ==================== IPC: Store ====================
 
-let configPath = ''
-let configData: Record<string, unknown> = {}
-
 // ==================== 敏感数据加密（safeStorage） ====================
 
 /** 需要加密存储的 key 列表 */
@@ -600,11 +770,24 @@ function loadConfigFile(): void {
     if (!configPath) {
       configPath = join(app.getPath('userData'), 'config.json')
     }
+    console.log('[Config] Loading from:', configPath)
     if (existsSync(configPath)) {
       const raw = readFileSync(configPath, 'utf-8')
       configData = decryptConfig(JSON.parse(raw))
+      console.log('[Config] Loaded successfully, keys:', Object.keys(configData))
+      console.log('[Config] jellyfin:servers exists?', 'jellyfin:servers' in configData)
+      if (configData['jellyfin:servers']) {
+        console.log('[Config] jellyfin:servers:', configData['jellyfin:servers'])
+      }
+      // 检查旧格式
+      if (configData['jellyfin.url'] && !configData['jellyfin:servers']) {
+        console.log('[Config] Found legacy format, will migrate')
+      }
+    } else {
+      console.log('[Config] Config file does not exist')
     }
-  } catch {
+  } catch (err) {
+    console.error('[Config] Failed to load:', err)
     configData = {}
   }
 }
@@ -623,6 +806,7 @@ function saveConfigFile(): void {
 
 // 初始化：加载已有配置
 loadConfigFile()
+migrateLegacyConfig()
 
 ipcMain.handle('store:get', async (_event, key: string) => {
   return configData[key] ?? null
@@ -730,6 +914,29 @@ const VIDEO_EXTENSIONS = new Set([
 
 // 静态正则：B站弹幕 XML 解析（避免每次调用重新编译）
 const DANMAKU_XML_REGEX = /<d\s+p="([^"]*)"[^>]*>(.*?)<\/d>/gs
+
+/**
+ * 解析 B 站格式 XML 弹幕
+ * @param xml XML 内容
+ * @returns 弹幕数组
+ */
+function parseBilibiliXml(xml: string): DanmakuComment[] {
+  DANMAKU_XML_REGEX.lastIndex = 0
+  const comments: DanmakuComment[] = []
+  let match: RegExpExecArray | null
+  while ((match = DANMAKU_XML_REGEX.exec(xml)) !== null) {
+    const pStr = match[1]
+    const text = match[2].trim()
+    const parts = pStr.split(',')
+    const time = parseFloat(parts[0]) || 0
+    const mode = parseInt(parts[1]) || 1
+    const color = parseInt(parts[3]) || 0xFFFFFF
+    if (text) {
+      comments.push({ time, mode, color, text })
+    }
+  }
+  return comments
+}
 
 async function scanVideoFolder(folderPath: string): Promise<{ success: boolean; data?: { files: string[]; folderPath: string }; error?: string }> {
   try {
@@ -876,6 +1083,17 @@ ipcMain.handle('file:scan-folder', async (_event, folderPath: string) => {
   return await scanVideoFolder(folderPath)
 })
 
+ipcMain.handle('file:get-url', async (_event, filePath: string) => {
+  try {
+    // 使用 pathToFileURL 处理 Windows 路径
+    const { pathToFileURL } = require('url')
+    const url = pathToFileURL(filePath).toString()
+    return { success: true, data: { url } }
+  } catch (err) {
+    return { success: false, error: String(err) }
+  }
+})
+
 // ==================== IPC: 弹幕 ====================
 
 // ==================== 弹幕 API（DandanPlay） ====================
@@ -908,10 +1126,9 @@ ipcMain.handle('danmaku:set-config', async (_event, config: { primary?: string; 
 ipcMain.handle('danmaku:test-api', async (_event, url: string) => {
   const startTime = Date.now()
   try {
-    const response = await net.fetch(
+    const response = await nodeFetch(
       `${url}/api/v2/search/episodes?anime=${encodeURIComponent('测试')}`,
       {
-        method: 'GET',
         headers: {
           'Accept': 'application/json',
           'User-Agent': 'LogVarPlayer/1.0 (Electron)'
@@ -921,12 +1138,12 @@ ipcMain.handle('danmaku:test-api', async (_event, url: string) => {
     const elapsed = Date.now() - startTime
 
     if (!response.ok) {
-      const bodyText = await response.text().catch(() => '')
+      const bodyText = await readResponseBody(response).catch(() => '')
       return { success: false, error: `HTTP ${response.status}`, detail: bodyText.slice(0, 300), elapsed }
     }
 
     const contentType = response.headers.get('content-type') || ''
-    const bodyText = await response.text()
+    const bodyText = await readResponseBody(response)
 
     if (!contentType.includes('application/json')) {
       return { success: false, error: '返回非 JSON', detail: bodyText.slice(0, 300), elapsed }
@@ -954,26 +1171,12 @@ ipcMain.handle('danmaku:parse-local-xml', async (_event, xmlPath: string) => {
   }
   try {
     const xml = readFileSync(xmlPath, 'utf-8')
-    // 解析 <d p="time,mode,size,color,ts,pool,user,rowid">text</d>
-    DANMAKU_XML_REGEX.lastIndex = 0
-    const comments: Array<{ time: number; mode: number; color: number; text: string }> = []
-
-    let match: RegExpExecArray | null
-    while ((match = DANMAKU_XML_REGEX.exec(xml)) !== null) {
-      const pStr = match[1]
-      const text = match[2].trim()
-      const parts = pStr.split(',')
-      const time = parseFloat(parts[0]) || 0
-      const mode = parseInt(parts[1]) || 1
-      const color = parseInt(parts[3]) || 0xFFFFFF
-
-      if (text) {
-        comments.push({ time, mode, color, text })
-      }
-    }
+    const comments = parseBilibiliXml(xml)
 
     const result = { count: comments.length, comments }
-    writeCachedComments(cid, result)
+    // 使用 XML 文件名作为 episodeId 缓存弹幕
+    const episodeId = parseInt(path.basename(xmlPath)) || Date.now()
+    writeCachedComments(episodeId, result)
     return { success: true, data: result }
   } catch (err) {
     return { success: false, error: `XML 解析失败: ${String(err)}` }
@@ -995,20 +1198,7 @@ ipcMain.handle('danmaku:find-local-xml', async (_event, videoPath: string) => {
     if (existsSync(xmlPath)) {
       try {
         const xml = readFileSync(xmlPath, 'utf-8')
-        DANMAKU_XML_REGEX.lastIndex = 0
-        const comments: Array<{ time: number; mode: number; color: number; text: string }> = []
-        let match: RegExpExecArray | null
-        while ((match = DANMAKU_XML_REGEX.exec(xml)) !== null) {
-          const pStr = match[1]
-          const text = match[2].trim()
-          const parts = pStr.split(',')
-          const time = parseFloat(parts[0]) || 0
-          const mode = parseInt(parts[1]) || 1
-          const color = parseInt(parts[3]) || 0xFFFFFF
-          if (text) {
-            comments.push({ time, mode, color, text })
-          }
-        }
+        const comments = parseBilibiliXml(xml)
         return { success: true, data: { count: comments.length, comments, source: xmlPath } }
       } catch (err) {
         return { success: false, error: `XML 解析失败: ${String(err)}` }
@@ -1019,7 +1209,39 @@ ipcMain.handle('danmaku:find-local-xml', async (_event, videoPath: string) => {
   return { success: false, error: '未找到本地弹幕 XML 文件' }
 })
 
-async function dandanRequest<T>(path: string): Promise<T> {
+function nodeFetch(url: string, options?: { headers?: Record<string, string>; timeoutMs?: number }): Promise<{ ok: boolean; status: number; headers: { get(name: string): string | null }; text(): Promise<string>; json<T>(): Promise<T> }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url)
+    const mod = parsed.protocol === 'https:' ? https : http
+    const timeout = options?.timeoutMs ?? 15000
+    const req = mod.get(parsed, { headers: options?.headers, timeout }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => {
+        const buffer = Buffer.concat(chunks)
+        const body = buffer.toString('utf-8')
+        resolve({
+          ok: res.statusCode! >= 200 && res.statusCode! < 300,
+          status: res.statusCode!,
+          headers: { get(name: string) { return res.headers[name.toLowerCase()] ?? null } },
+          text: async () => body,
+          json: async () => JSON.parse(body)
+        })
+      })
+      res.on('error', reject)
+    })
+    req.on('timeout', () => {
+      req.destroy(new Error(`Request timeout after ${timeout}ms`))
+    })
+    req.on('error', reject)
+  })
+}
+
+async function readResponseBody(response: { text(): Promise<string> }): Promise<string> {
+  return response.text()
+}
+
+async function dandanRequest<T>(path: string, retries = 2): Promise<T> {
   let lastError: Error | null = null
   const config = getDanmakuApiConfig()
   const allUrls = [config.primary, ...config.mirrors]
@@ -1027,51 +1249,62 @@ async function dandanRequest<T>(path: string): Promise<T> {
   console.log(`[danmaku] Using primary=${config.primary}, mirrors=${config.mirrors.join(',')}`)
 
   for (const baseUrl of allUrls) {
-    try {
-      const url = `${baseUrl}${path}`
-      console.log(`[danmaku] GET ${url}`)
-
-      const response = await net.fetch(url, {
-        method: 'GET',
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'LogVarPlayer/1.0 (Electron)'
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        if (attempt > 0) {
+          console.log(`[danmaku] 重试 ${baseUrl} (第${attempt}次)`)
+          await new Promise(r => setTimeout(r, 500 * attempt))
         }
-      })
+        const url = `${baseUrl}${path}`
+        console.log(`[danmaku] GET ${url}`)
 
-      console.log(`[danmaku] ${baseUrl} → HTTP ${response.status}, content-type=${response.headers.get('content-type')}`)
+        const response = await nodeFetch(url, {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'LogVarPlayer/1.0 (Electron)'
+          },
+          timeoutMs: 15000
+        })
 
-      if (!response.ok) {
-        const bodyText = await response.text().catch(() => '')
-        const detail = bodyText.slice(0, 500) || '(empty body)'
-        const msg = `DandanPlay ${baseUrl} 返回 HTTP ${response.status}: ${detail}`
-        console.error(`[danmaku] ${msg}`)
-        lastError = new Error(msg)
-        continue
+        console.log(`[danmaku] ${baseUrl} → HTTP ${response.status}, content-type=${response.headers.get('content-type')}`)
+
+        if (!response.ok) {
+          const bodyText = await readResponseBody(response).catch(() => '')
+          const detail = bodyText.slice(0, 500) || '(empty body)'
+          const msg = `DandanPlay ${baseUrl} 返回 HTTP ${response.status}: ${detail}`
+          console.error(`[danmaku] ${msg}`)
+          lastError = new Error(msg)
+          continue
+        }
+
+        const contentType = response.headers.get('content-type') || ''
+        const bodyText = await readResponseBody(response)
+
+        if (!contentType.includes('application/json')) {
+          const msg = `DandanPlay ${baseUrl} 返回非 JSON (Content-Type: ${contentType}): ${bodyText.slice(0, 500)}`
+          console.error(`[danmaku] ${msg}`)
+          lastError = new Error(msg)
+          continue
+        }
+
+        const data = JSON.parse(bodyText) as T
+        console.log(`[danmaku] ${baseUrl} 响应: ${bodyText.slice(0, 400)}`)
+        return data
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        const isRetryable = errMsg.includes('socket hang up') || errMsg.includes('timeout') || errMsg.includes('ECONNRESET')
+        if (isRetryable && attempt < retries) {
+          console.warn(`[danmaku] ${baseUrl} 可重试错误 (${errMsg})，准备重试...`)
+          continue
+        }
+        if (err instanceof SyntaxError) {
+          lastError = new Error(`DandanPlay JSON 解析失败: ${String(err)}`)
+        } else {
+          lastError = err instanceof Error ? err : new Error(String(err))
+        }
+        console.error(`[danmaku] ${baseUrl} 错误:`, lastError.message)
+        break // 跳出重试循环，尝试下一个 URL
       }
-
-      const contentType = response.headers.get('content-type') || ''
-      const bodyText = await response.text()
-
-      if (!contentType.includes('application/json')) {
-        const msg = `DandanPlay ${baseUrl} 返回非 JSON (Content-Type: ${contentType}): ${bodyText.slice(0, 500)}`
-        console.error(`[danmaku] ${msg}`)
-        lastError = new Error(msg)
-        continue
-      }
-
-      const data = JSON.parse(bodyText) as T
-      console.log(`[danmaku] ${baseUrl} 响应: ${bodyText.slice(0, 400)}`)
-      return data
-    } catch (err) {
-      if (err instanceof SyntaxError) {
-        lastError = new Error(`DandanPlay JSON 解析失败: ${String(err)}`)
-      } else if (err instanceof Error && err.message.includes('fetch')) {
-        lastError = new Error(`DandanPlay 网络请求失败: ${err.message}`)
-      } else {
-        lastError = err instanceof Error ? err : new Error(String(err))
-      }
-      console.error(`[danmaku] ${baseUrl} 错误:`, lastError.message)
     }
   }
 
@@ -1141,7 +1374,7 @@ async function bilibiliAutoMatch(title: string): Promise<{
 
   // Step 2: Search B站
   console.log(`Bilibili search: ${searchKey}`)
-  const searchResp = await net.fetch(
+  const searchResp = await nodeFetch(
     `https://api.bilibili.com/x/web-interface/wbi/search/type?search_type=media_bangumi&keyword=${encodeURIComponent(searchKey)}`,
     {
       headers: {
@@ -1168,7 +1401,7 @@ async function bilibiliAutoMatch(title: string): Promise<{
   const seasonId = firstResult.season_id
 
   // Step 3: Get episode list
-  const epResp = await net.fetch(
+  const epResp = await nodeFetch(
     `https://api.bilibili.com/pgc/web/season/section?season_id=${seasonId}`,
     {
       headers: {
@@ -1248,7 +1481,7 @@ ipcMain.handle('danmaku:bilibili-comments', async (_event, cid: number) => {
       return { success: true, data: cached }
     }
 
-    const response = await net.fetch(`https://comment.bilibili.com/${cid}.xml`, {
+    const response = await nodeFetch(`https://comment.bilibili.com/${cid}.xml`, {
       headers: {
         'User-Agent': 'LogVarPlayer/1.0',
         'Referer': 'https://www.bilibili.com/'
@@ -1257,19 +1490,8 @@ ipcMain.handle('danmaku:bilibili-comments', async (_event, cid: number) => {
     if (!response.ok) {
       return { success: false, error: `B站弹幕 HTTP ${response.status}` }
     }
-    const xml = await response.text()
-    DANMAKU_XML_REGEX.lastIndex = 0
-    const comments: Array<{ time: number; mode: number; color: number; text: string }> = []
-    let match: RegExpExecArray | null
-    while ((match = DANMAKU_XML_REGEX.exec(xml)) !== null) {
-      const pStr = match[1]
-      const text = match[2].trim()
-      const parts = pStr.split(',')
-      const time = parseFloat(parts[0]) || 0
-      const mode = parseInt(parts[1]) || 1
-      const color = parseInt(parts[3]) || 0xFFFFFF
-      if (text) comments.push({ time, mode, color, text })
-    }
+    const xml = await readResponseBody(response)
+    const comments = parseBilibiliXml(xml)
     return { success: true, data: { count: comments.length, comments } }
   } catch (err) {
     return { success: false, error: String(err) }
@@ -1464,17 +1686,6 @@ ipcMain.handle('danmaku:match', async (_event, title: string) => {
   }
 })
 
-interface DanmakuComment {
-  cid: number
-  p: string  // "time,mode,color,timestamp"
-  m: string  // 弹幕文本
-}
-
-interface DanmakuCommentsResponse {
-  count: number
-  comments: DanmakuComment[]
-}
-
 // ==================== 弹幕缓存系统 ====================
 
 function getDanmakuCacheDir(): string {
@@ -1517,7 +1728,7 @@ ipcMain.handle('danmaku:get-comments', async (_event, episodeId: string, source?
       if (cached) {
         return { success: true, data: cached }
       }
-      const response = await net.fetch(`https://comment.bilibili.com/${cid}.xml`, {
+      const response = await nodeFetch(`https://comment.bilibili.com/${cid}.xml`, {
         headers: {
           'User-Agent': 'LogVarPlayer/1.0',
           'Referer': 'https://www.bilibili.com/'
@@ -1526,25 +1737,18 @@ ipcMain.handle('danmaku:get-comments', async (_event, episodeId: string, source?
       if (!response.ok) {
         return { success: false, error: `B站弹幕 HTTP ${response.status}` }
       }
-      const xml = await response.text()
-      DANMAKU_XML_REGEX.lastIndex = 0
-      const comments: Array<{ time: number; mode: number; color: number; text: string }> = []
-      let match: RegExpExecArray | null
-      while ((match = DANMAKU_XML_REGEX.exec(xml)) !== null) {
-        const pStr = match[1]
-        const text = match[2].trim()
-        const parts = pStr.split(',')
-        const time = parseFloat(parts[0]) || 0
-        const mode = parseInt(parts[1]) || 1
-        const color = parseInt(parts[3]) || 0xFFFFFF
-        if (text) comments.push({ time, mode, color, text })
-      }
+      const xml = await readResponseBody(response)
+      const comments = parseBilibiliXml(xml)
+      // 使用 XML 文件名作为 episodeId 缓存弹幕
+      const episodeId = parseInt(path.basename(xmlPath)) || Date.now()
+
       const result = { count: comments.length, comments }
-      writeCachedComments(cid, result)
+      writeCachedComments(episodeId, result)
       return { success: true, data: result }
     } catch (err) {
-      console.error('danmaku:bilibili get-comments failed:', err)
-      return { success: false, error: String(err) }
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[danmaku:bilibili-comments] 获取弹幕失败 cid=${cid}:`, msg)
+      return { success: false, error: `B 站弹幕获取失败：${msg}` }
     }
   }
 
@@ -1675,6 +1879,7 @@ ipcMain.handle('danmaku:get-cached-comments', async (_event, episodeId: string) 
 
 // ==================== 自定义协议: local-file ====================
 
+
 const MIME_MAP: Record<string, string> = {
   '.mp4': 'video/mp4',
   '.mkv': 'video/x-matroska',
@@ -1690,21 +1895,34 @@ const MIME_MAP: Record<string, string> = {
 
 function registerLocalFileProtocol(): void {
   protocol.handle('local-file', (request) => {
-    // URL 格式: local-file:///C:/path/to/video.mp4
     const url = new URL(request.url)
     let filePath = decodeURIComponent(url.pathname)
-    // Windows: 去掉开头的 /
-    if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(filePath)) {
+    if (process.platform === 'win32' && filePath.length > 1 && filePath[0] === '/') {
       filePath = filePath.slice(1)
     }
-    const ext = extname(filePath).toLowerCase()
+    const ext = require('path').extname(filePath.toLowerCase()).toLowerCase()
     const mimeType = MIME_MAP[ext] || 'application/octet-stream'
 
     return new Promise((resolve) => {
       try {
+        const { existsSync, createReadStream } = require('fs')
+        if (!existsSync(filePath)) {
+          resolve(new Response('File not found', { status: 404 }))
+          return
+        }
         const stream = createReadStream(filePath)
+        const responseStream = new ReadableStream({
+          start(controller) {
+            stream.on('data', (chunk) => controller.enqueue(chunk))
+            stream.on('end', () => controller.close())
+            stream.on('error', (err) => controller.error(err))
+          },
+          cancel() {
+            stream.destroy()
+          }
+        })
         resolve(
-          new Response(stream as unknown as ReadableStream, {
+          new Response(responseStream, {
             status: 200,
             headers: {
               'content-type': mimeType,
@@ -1712,7 +1930,7 @@ function registerLocalFileProtocol(): void {
             }
           })
         )
-      } catch {
+      } catch (err) {
         resolve(new Response('File not found', { status: 404 }))
       }
     })
@@ -1736,7 +1954,9 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      webSecurity: false,
+      allowRunningInsecureContent: true
     }
   })
 
@@ -1823,6 +2043,14 @@ app.whenReady().then(() => {
 
   createWindow()
   createTray()
+
+  // 启动时自动连接上次活跃的服务器
+  const activeId = getActiveServerId()
+  if (activeId) {
+    connectToServer(activeId).catch(err => {
+      console.warn('[server] 启动时自动连接失败:', err)
+    })
+  }
 
   globalShortcut.register('CommandOrControl+Shift+L', () => {
     toggleLogWindow()

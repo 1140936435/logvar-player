@@ -2,8 +2,8 @@
 import { useRef, useState, useEffect, useCallback, useMemo, memo, type ReactElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Search, FolderOpen, FileVideo, ChevronRight, ArrowLeft,
-  Clock, Trash2, X, Loader2, Tv, Film, Folder
+  Search, FolderOpen, Video, ChevronRight, ArrowLeft,
+  Clock, Trash2, X, Loader2, TvMinimal, Film, Folder, Database, ChevronDown, CircleDot
 } from 'lucide-react'
 
 /* ==================== 类型 ==================== */
@@ -49,6 +49,18 @@ interface DrillLevel {
   items: MediaItem[]
 }
 
+interface ServerConfig {
+  id: string
+  name: string
+  url: string
+  token: string
+}
+
+interface ServerInfo {
+  id: string
+  server: ServerConfig | null
+}
+
 /* ==================== 子组件 ==================== */
 
 const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, communityRating, onClick }: {
@@ -64,7 +76,7 @@ const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, commun
   const isTv = anyItem.CollectionType === 'tvshows'
   const isMovie = anyItem.CollectionType === 'movies'
   const collectionIcon = isTv
-    ? <Tv size={28} className="text-[var(--text-quaternary)]" />
+    ? <TvMinimal size={28} className="text-[var(--text-quaternary)]" />
     : isMovie
       ? <Film size={28} className="text-[var(--text-quaternary)]" />
       : <Folder size={28} className="text-[var(--text-quaternary)]" />
@@ -152,7 +164,7 @@ const HistoryCard = memo(function HistoryCard({ item, onClick, onDelete }: {
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center">
-            <FileVideo size={24} className="text-[var(--text-quaternary)]" />
+            <Video size={24} className="text-[var(--text-quaternary)]" />
           </div>
         )}
 
@@ -211,6 +223,13 @@ function Home(): ReactElement {
   const [libraries, setLibraries] = useState<Library[]>([])
   const [libraryItems, setLibraryItems] = useState<Record<string, MediaItem[]>>({})
   const [connectedServer, setConnectedServer] = useState('')
+  const [jellyfinToken, setJellyfinToken] = useState('')
+
+  // 多服务器
+  const [servers, setServers] = useState<ServerConfig[]>([])
+  const [activeServerId, setActiveServerId] = useState<string | null>(null)
+  const [showServerDropdown, setShowServerDropdown] = useState(false)
+  const [switchingServer, setSwitchingServer] = useState(false)
 
   const [historyItems, setHistoryItems] = useState<PlayHistoryItem[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -283,8 +302,9 @@ function Home(): ReactElement {
       setLibraryItems(itemsMap)
 
       try {
-        const saved = await window.api.store.get('jellyfin') as { url?: string } | null
+        const saved = await window.api.store.get('jellyfin') as { url?: string; token?: string } | null
         if (saved?.url) setConnectedServer(saved.url.replace(/\/+$/, ''))
+        if (saved?.token) setJellyfinToken(saved.token)
       } catch { /* ignore */ }
 
       const hasItems = Object.values(itemsMap).some((items) => items.length > 0)
@@ -305,6 +325,42 @@ function Home(): ReactElement {
     } catch { /* ignore */ }
     setHistoryLoading(false)
   }, [])
+
+  const loadServers = useCallback(async (): Promise<void> => {
+    try {
+      const listResult = await window.api.server.list()
+      if (listResult.success && listResult.data) {
+        setServers(listResult.data as ServerConfig[])
+      }
+      const activeResult = await window.api.server.getActive()
+      if (activeResult.success && activeResult.data) {
+        const d = activeResult.data as ServerInfo
+        setActiveServerId(d.id)
+        if (d.server) {
+          setConnectedServer(d.server.url.replace(/\/+$/, ''))
+          setJellyfinToken(d.server.token)
+        }
+      }
+    } catch { /* ignore */ }
+  }, [])
+
+  const handleSwitchServer = useCallback(async (id: string): Promise<void> => {
+    setSwitchingServer(true)
+    setShowServerDropdown(false)
+    try {
+      const result = await window.api.server.switch(id)
+      if (result.success) {
+        await loadServers()
+        await loadMediaData()
+        await loadHistory()
+      }
+    } catch { /* ignore */ }
+    setSwitchingServer(false)
+  }, [loadServers, loadMediaData, loadHistory])
+
+  useEffect(() => {
+    loadServers()
+  }, [loadServers])
 
   useEffect(() => {
     loadMediaData()
@@ -346,7 +402,9 @@ function Home(): ReactElement {
         : item.Name
 
     const seriesName = item.SeriesName || ''
-    navigate(`/player?itemId=${encodeURIComponent(item.Id)}&name=${encodeURIComponent(displayName)}&base=${encodeURIComponent(base)}&seriesName=${encodeURIComponent(seriesName)}`)
+    const seriesId = item.SeriesId || ''
+    const seasonId = item.SeasonId || ''
+    navigate(`/player?itemId=${encodeURIComponent(item.Id)}&name=${encodeURIComponent(displayName)}&base=${encodeURIComponent(base)}&seriesName=${encodeURIComponent(seriesName)}&seriesId=${encodeURIComponent(seriesId)}&seasonId=${encodeURIComponent(seasonId)}`)
   }
 
   const handleSearch = async (): Promise<void> => {
@@ -382,7 +440,9 @@ function Home(): ReactElement {
     } else {
       const base = item.baseUrl || 'http://localhost:8096'
       const seriesName = item.seriesName || ''
-      navigate(`/player?itemId=${encodeURIComponent(item.itemId)}&name=${encodeURIComponent(item.name)}&base=${encodeURIComponent(base)}&seriesName=${encodeURIComponent(seriesName)}&position=${item.position}`)
+      const seriesId = item.seriesId || ''
+      const seasonId = item.seasonId || ''
+      navigate(`/player?itemId=${encodeURIComponent(item.itemId)}&name=${encodeURIComponent(item.name)}&base=${encodeURIComponent(base)}&seriesName=${encodeURIComponent(seriesName)}&seriesId=${encodeURIComponent(seriesId)}&seasonId=${encodeURIComponent(seasonId)}&position=${item.position}`)
     }
   }
 
@@ -401,7 +461,7 @@ function Home(): ReactElement {
     } catch { /* ignore */ }
   }
 
-  const handleItemClick = (item: MediaItem): void => {
+  const handleItemClick = useCallback((item: MediaItem): void => {
     // 电视剧和电影直接进详情页
     if (item.Type === 'Series' || item.Type === 'Movie') {
       navigate(`/detail/${item.Id}`)
@@ -412,13 +472,14 @@ function Home(): ReactElement {
     } else {
       navigate(`/detail/${item.Id}`)
     }
-  }
+  }, [navigate, handleDrillDown])
 
   const getPosterUrl = useCallback((item: MediaItem): string | null => {
     if (!item.ImageTags?.Primary) return null
     const base = connectedServer || 'http://localhost:8096'
-    return `${base}/Items/${item.Id}/Images/Primary?maxHeight=400&tag=${item.ImageTags.Primary}&quality=90`
-  }, [connectedServer])
+    const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
+    return `${base}/Items/${item.Id}/Images/Primary?maxHeight=400&tag=${item.ImageTags.Primary}&quality=90${authParam}`
+  }, [connectedServer, jellyfinToken])
 
   const breadcrumb = drillStack.map((d) => d.parentName)
   const currentDrill = drillStack.length > 0 ? drillStack[drillStack.length - 1] : null
@@ -447,7 +508,7 @@ function Home(): ReactElement {
             transition={{ type: 'spring', stiffness: 300, damping: 30 }}
           >
             <div className="w-16 h-16 mx-auto mb-6 rounded-[var(--radius-xl)] bg-[var(--accent-bg)] flex items-center justify-center">
-              <Tv size={28} className="text-[var(--accent)]" />
+              <TvMinimal size={28} className="text-[var(--accent)]" />
             </div>
             <h2 className="text-[20px] font-semibold text-[var(--text-primary)] mb-3">连接你的媒体服务器</h2>
             <p className="text-[15px] text-[var(--text-secondary)] mb-10 max-w-sm mx-auto">
@@ -475,7 +536,7 @@ function Home(): ReactElement {
                 className="ios-btn ios-btn-secondary"
                 whileTap={{ scale: 0.96 }}
               >
-                <FileVideo size={16} />
+                <Video size={16} />
                 打开文件
               </motion.button>
               <motion.button
@@ -550,10 +611,11 @@ function Home(): ReactElement {
           )}
         </AnimatePresence>
 
-        {/* 搜索栏 */}
+        {/* 顶栏：搜索 + 服务器切换 */}
         <div className="mb-10">
-          <div className="relative">
-            <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--text-quaternary)]" />
+          <div className="flex items-center gap-3">
+            <div className="relative flex-1">
+              <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--text-quaternary)]" />
             <input
               ref={searchInputRef}
               type="text"
@@ -579,6 +641,67 @@ function Home(): ReactElement {
               </motion.button>
             </div>
           </div>
+
+          {/* 服务器切换器 */}
+          {servers.length > 1 && (
+            <div className="relative flex-shrink-0">
+              <motion.button
+                onClick={() => setShowServerDropdown(!showServerDropdown)}
+                disabled={switchingServer}
+                className="ios-btn ios-btn-secondary !h-10 !px-3 flex items-center gap-2"
+                whileTap={{ scale: 0.96 }}
+              >
+                {switchingServer ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Database size={14} />
+                )}
+                <span className="text-[13px] truncate max-w-[120px]">
+                  {servers.find(s => s.id === activeServerId)?.name || '切换服务器'}
+                </span>
+                <ChevronDown size={14} className={`transition-transform ${showServerDropdown ? 'rotate-180' : ''}`} />
+              </motion.button>
+
+              <AnimatePresence>
+                {showServerDropdown && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowServerDropdown(false)} />
+                    <motion.div
+                      initial={{ opacity: 0, y: -4, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: -4, scale: 0.95 }}
+                      transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                      className="absolute right-0 top-full mt-2 w-56 rounded-[var(--radius-lg)] bg-[var(--bg-elevated)] border border-[var(--separator)] shadow-lg z-50 overflow-hidden"
+                    >
+                      <div className="p-1.5">
+                        {servers.map((server) => (
+                          <button
+                            key={server.id}
+                            onClick={() => handleSwitchServer(server.id)}
+                            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-[var(--radius-md)] text-left transition-colors ${
+                              server.id === activeServerId
+                                ? 'bg-[var(--accent-bg)] text-[var(--accent)]'
+                                : 'text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
+                            }`}
+                          >
+                            <Database size={14} className="flex-shrink-0" />
+                            <div className="min-w-0 flex-1">
+                              <div className="text-[13px] font-medium truncate">{server.name}</div>
+                              <div className="text-[11px] text-[var(--text-tertiary)] truncate">{server.url}</div>
+                            </div>
+                            {server.id === activeServerId && (
+                              <CircleDot size={12} className="text-[var(--accent)] flex-shrink-0" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </motion.div>
+                  </>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
+        </div>
         </div>
 
         {/* 搜索结果 */}
@@ -666,7 +789,7 @@ function Home(): ReactElement {
               className="ios-btn ios-btn-primary"
               whileTap={{ scale: 0.96 }}
             >
-              <FileVideo size={16} />
+              <Video size={16} />
               打开文件
             </motion.button>
             <motion.button

@@ -39,16 +39,38 @@ export interface DanmakuConfig {
   enabled: boolean
 }
 
+// 弹幕评论（渲染层使用）
 export interface DanmakuComment {
-  id: string
-  content: string
   time: number  // 秒
-  type: 'scroll' | 'top' | 'bottom'
-  color: number  // 颜色值
-  fontSize?: number
-  sender?: string
+  mode: number  // 1=滚动，4=顶部，5=底部
+  color: number  // 十进制颜色值
+  text: string  // 弹幕文本
 }
 
+// 弹幕 API 响应（主进程使用）
+export interface DanmakuCommentRaw {
+  cid: number  // 评论 ID
+  p: string  // "time,mode,color,timestamp"
+  m: string  // 弹幕文本
+}
+
+// 弹幕搜索结果
+export interface DanmakuSearchResult {
+  animeId: number
+  animeTitle: string
+  episodeId: number
+  episodeTitle: string
+  type: string
+  typeDescription: string
+}
+
+// 弹幕搜索响应
+export interface DanmakuSearchResponse {
+  hasMore: boolean
+  animes: Array<{ animeId: number; animeTitle: string; episodes: DanmakuSearchResult[] }>
+}
+
+// 弹幕匹配结果
 export interface DanmakuMatchResult {
   animeId: string
   animeTitle: string
@@ -56,6 +78,12 @@ export interface DanmakuMatchResult {
   episodeTitle: string
   commentId: string
   type: string
+}
+
+// 弹幕缓存响应
+export interface DanmakuCommentsResponse {
+  count: number
+  comments: DanmakuComment[]
 }
 
 // ===== 播放器 类型 =====
