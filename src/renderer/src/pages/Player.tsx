@@ -2,7 +2,7 @@ import { useRef, useState, useEffect, useCallback } from 'react'
 import type { DanmakuComment, DanmakuSearchResult, DanmakuSearchResponse, JellyfinItem } from '../../shared/types'
 import { useSearchParams, useNavigate, Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Volume2, VolumeX, Volume1, Gauge, List, X, ChevronLeft, ChevronRight, TvMinimalPlay } from 'lucide-react'
+import { Volume2, VolumeX, Volume1, Gauge, List, X, ChevronLeft, ChevronRight, TvMinimalPlay, ArrowLeft } from 'lucide-react'
 
 // ==================== 弹幕类型 ====================
 
@@ -325,6 +325,8 @@ function Player(): JSX.Element {
 
   const [playbackRate, setPlaybackRate] = useState(1)
   const [speedToast, setSpeedToast] = useState('')
+  const [showTopBar, setShowTopBar] = useState(false)
+  const [mouseTimer, setMouseTimer] = useState<NodeJS.Timeout | null>(null)
   const [volumePopup, setVolumePopup] = useState(false)
   const [speedPopup, setSpeedPopup] = useState(false)
 
@@ -620,6 +622,16 @@ function Player(): JSX.Element {
     setSpeedToast(`${rate}x`); setTimeout(() => setSpeedToast(''), 2000)
   }
 
+  // 顶部信息栏 - 鼠标移动检测
+  const handleMouseMove = (): void => {
+    setShowTopBar(true)
+    if (mouseTimer) clearTimeout(mouseTimer)
+    const timer = setTimeout(() => {
+      setShowTopBar(false)
+    }, 2500)
+    setMouseTimer(timer)
+  }
+
   const handleContextMenu = (e: React.MouseEvent): void => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, visible: true }) }
   const handleCloseContextMenu = (): void => { setContextMenu({ x: 0, y: 0, visible: false }) }
 
@@ -706,7 +718,30 @@ function Player(): JSX.Element {
     <div ref={containerRef} className="h-full flex flex-col bg-black relative outline-none" onKeyDown={handleKeyDown} tabIndex={0}>
 
       {/* 视频区域 */}
-      <div className="flex-1 relative bg-black overflow-hidden" onContextMenu={handleContextMenu} onClick={handlePlayPause}>
+      <div className="flex-1 relative bg-black overflow-hidden" onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
+        {/* 顶部信息栏 */}
+        <div className={`absolute top-0 left-0 right-0 z-30 transition-opacity duration-300 ${showTopBar ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+          <div className="bg-gradient-to-b from-black/80 to-transparent px-4 py-3 flex items-center gap-3">
+            <button
+              onClick={() => navigate(-1)}
+              className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-colors"
+              title="返回"
+            >
+              <ArrowLeft size={18} />
+            </button>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm text-white font-medium truncate">
+                {itemName}
+              </div>
+              {episodeList.length > 0 && currentEpisodeIndex >= 0 && (
+                <div className="text-xs text-[#999] truncate">
+                  {episodeList[currentEpisodeIndex]?.Name || `第 ${currentEpisodeIndex + 1} 集`}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
         <video ref={videoRef} className="absolute inset-0 w-full h-full object-contain" controls={false} playsInline preload="metadata" crossOrigin="anonymous" />
         <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-10" />
 
