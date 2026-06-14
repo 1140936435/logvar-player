@@ -43,6 +43,7 @@ class DanmakuEngine {
   private fontSize = 24
   private speed = 120
   private displayArea: 'full' | 'top' | 'bottom' = 'full'
+  private maxCount = 300
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
@@ -57,7 +58,9 @@ class DanmakuEngine {
   }
 
   loadComments(comments: DanmakuComment[]): void {
-    this.comments = comments.sort((a, b) => a.time - b.time)
+    const sorted = comments.sort((a, b) => a.time - b.time)
+    // 限制弹幕总数，防止太密集
+    this.comments = sorted.slice(0, this.maxCount)
   }
 
   clear(): void {
@@ -80,6 +83,10 @@ class DanmakuEngine {
 
   setDisplayArea(area: 'full' | 'top' | 'bottom'): void {
     this.displayArea = area
+  }
+
+  setMaxCount(count: number): void {
+    this.maxCount = Math.max(50, Math.min(500, count))
   }
 
   private getTrackForScroll(): number {
@@ -322,6 +329,7 @@ function Player(): JSX.Element {
   const [danmakuFontSize, setDanmakuFontSize] = useState(24)
   const [danmakuSpeed, setDanmakuSpeed] = useState(120)
   const [danmakuArea, setDanmakuArea] = useState<'full' | 'top' | 'bottom'>('full')
+  const [danmakuMaxCount, setDanmakuMaxCount] = useState(300)
 
   const [playbackRate, setPlaybackRate] = useState(1)
   const [speedToast, setSpeedToast] = useState('')
@@ -825,6 +833,25 @@ function Player(): JSX.Element {
             <div>
               <div className="flex justify-between text-[10px] text-[#666] mb-1.5"><span>速度</span><span>{danmakuSpeed}px/s</span></div>
               <input type="range" min="60" max="300" step="10" value={danmakuSpeed} onChange={(e) => handleSpeedChange(parseInt(e.target.value))} className="w-full" />
+            </div>
+            <div>
+              <div className="flex justify-between text-[10px] text-[#666] mb-1.5">
+                <span>弹幕密度</span>
+                <span>{danmakuMaxCount} 条</span>
+              </div>
+              <input
+                type="range"
+                min="50"
+                max="500"
+                step="50"
+                value={danmakuMaxCount}
+                onChange={(e) => handleMaxCountChange(parseInt(e.target.value))}
+                className="w-full"
+              />
+              <div className="flex justify-between text-[9px] text-[#555] mt-1">
+                <span>稀疏 (50)</span>
+                <span>密集 (500)</span>
+              </div>
             </div>
             <div>
               <div className="text-[10px] text-[#666] mb-2">显示区域</div>
