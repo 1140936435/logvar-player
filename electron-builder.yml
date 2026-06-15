@@ -1,5 +1,5 @@
-appId: com.logvar.player
-productName: 慢播
+appId: com.mplay.player
+productName: mplay
 directories:
   buildResources: build
   output: dist3
@@ -21,8 +21,13 @@ files:
   - "!dist2/**"
 asarUnpack:
   - out/tools/**
+extraResources:
+  - from: build
+    to: build
+    filter:
+      - "icon*"
 win:
-  executableName: logvar-player
+  executableName: mplay
   icon: build/icon.ico
   target:
     - target: nsis

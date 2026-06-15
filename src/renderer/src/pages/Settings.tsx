@@ -4,7 +4,7 @@ import type { JellyfinServerInfo } from '../../shared/types'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Database, Plug, WifiOff, Save, Loader2, CheckCircle,
-  MessageCircleMore, Radar, MonitorPlay, Info, Eye,
+  MessageCircleMore, Radar, MonitorPlay, Info,
   ChevronDown, Key, Link as LinkIcon, CirclePlus, Trash2, Settings as SettingsIcon,
   CircleDot
 } from 'lucide-react'
@@ -116,20 +116,6 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   )
 }
 
-function SliderRow({ label, value, unit, children }: { label: string; value: string | number; unit: string; children: React.ReactNode }): ReactElement {
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-[13px] text-[var(--text-secondary)] font-medium">{label}</span>
-        <span className="text-[12px] text-[var(--text-primary)] font-mono tabular-nums bg-[var(--bg-input)] px-2 py-0.5 rounded-md min-w-[48px] text-center">
-          {value}{unit}
-        </span>
-      </div>
-      {children}
-    </div>
-  )
-}
-
 /* ==================== Settings 主组件 ==================== */
 
 function Settings(): ReactElement {
@@ -151,12 +137,6 @@ function Settings(): ReactElement {
   const [danmakuTesting, setDanmakuTesting] = useState(false)
   const [danmakuSaveMsg, setDanmakuSaveMsg] = useState('')
   const [danmakuInfo, setDanmakuInfo] = useState('')
-
-  // 弹幕显示
-  const [fontSize, setFontSize] = useState(24)
-  const [danmakuArea, setDanmakuArea] = useState<'full' | 'top' | 'bottom'>('full')
-  const [danmakuSpeed, setDanmakuSpeed] = useState(120)
-  const [danmakuOpacity, setDanmakuOpacity] = useState(1.0)
 
   // 播放器
   const [hardwareDecode, setHardwareDecode] = useState(true)
@@ -266,36 +246,6 @@ function Settings(): ReactElement {
     window.api.danmaku.getConfig().then((cfg) => {
       setDanmakuPrimary(cfg.primary)
       setDanmakuMirrors(cfg.mirrors.join('\n'))
-    }).catch(() => {})
-
-    Promise.all([
-      window.api.store.get('danmakuFontSize'),
-      window.api.store.get('danmakuArea'),
-      window.api.store.get('danmakuSpeed'),
-      window.api.store.get('danmakuOpacity'),
-      window.api.store.get('danmakuDisplayArea'),
-      window.api.store.get('danmakuScrollSpeed')
-    ]).then(([fs, area, speed, op, legacyArea, legacySpeed]) => {
-      if (fs !== null) setFontSize(Number(fs))
-      if (area !== null) {
-        setDanmakuArea(area as 'full' | 'top' | 'bottom')
-      } else if (legacyArea !== null) {
-        const pct = Number(legacyArea)
-        setDanmakuArea(pct <= 40 ? 'top' : pct >= 80 ? 'full' : 'bottom')
-      }
-      if (speed !== null) {
-        setDanmakuSpeed(Number(speed))
-      } else if (legacySpeed === 'slow') {
-        setDanmakuSpeed(90)
-      } else if (legacySpeed === 'fast') {
-        setDanmakuSpeed(180)
-      } else if (legacySpeed === 'medium') {
-        setDanmakuSpeed(120)
-      }
-      if (op !== null) {
-        const v = Number(op)
-        setDanmakuOpacity(v > 1 ? v / 100 : v)
-      }
     }).catch(() => {})
   }, [])
 
@@ -631,45 +581,6 @@ function Settings(): ReactElement {
                     <p className="text-[12px] text-[var(--text-tertiary)] leading-relaxed">{danmakuInfo}</p>
                   </div>
                 )}
-              </CollapseSection>
-
-              <CollapseSection
-                title="弹幕显示"
-                subtitle="文字大小、透明度、滚动速度"
-                icon={Eye}
-                defaultOpen={true}
-              >
-                <SliderRow label="文字大小" value={fontSize} unit="px">
-                  <input type="range" min="12" max="48" value={fontSize} onChange={(e) => { const v = Number(e.target.value); setFontSize(v); window.api.store.set('danmakuFontSize', v) }} className="w-full" />
-                </SliderRow>
-
-                <div>
-                  <span className="text-[13px] text-[var(--text-secondary)] font-medium mb-3 block">显示区域</span>
-                  <div className="flex gap-2">
-                    {(['full', 'top', 'bottom'] as const).map((area) => (
-                      <motion.button
-                        key={area}
-                        onClick={() => { setDanmakuArea(area); window.api.store.set('danmakuArea', area) }}
-                        className={`flex-1 h-11 rounded-[var(--radius-md)] text-[13px] font-medium transition-colors ${
-                          danmakuArea === area
-                            ? 'bg-[var(--accent)] text-white'
-                            : 'bg-[var(--bg-input)] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]'
-                        }`}
-                        whileTap={{ scale: 0.96 }}
-                      >
-                        {area === 'full' ? '全屏' : area === 'top' ? '顶部' : '底部'}
-                      </motion.button>
-                    ))}
-                  </div>
-                </div>
-
-                <SliderRow label="滚动速度" value={danmakuSpeed} unit="px/s">
-                  <input type="range" min="60" max="300" step="10" value={danmakuSpeed} onChange={(e) => { const v = Number(e.target.value); setDanmakuSpeed(v); window.api.store.set('danmakuSpeed', v) }} className="w-full" />
-                </SliderRow>
-
-                <SliderRow label="透明度" value={Math.round(danmakuOpacity * 100)} unit="%">
-                  <input type="range" min="0" max="1" step="0.1" value={danmakuOpacity} onChange={(e) => { const v = Number(e.target.value); setDanmakuOpacity(v); window.api.store.set('danmakuOpacity', v) }} className="w-full" />
-                </SliderRow>
               </CollapseSection>
             </GlassCard>
 

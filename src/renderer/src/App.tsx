@@ -1,7 +1,8 @@
-import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom'
+import { HashRouter, Routes, Route, Link, useLocation } from 'react-router-dom'
 import { Settings, Play, Home as HomeIcon, Minus, X as XIcon, Copy, Sun, Moon } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useState, useEffect, lazy, Suspense, type ReactElement } from 'react'
+import AppLogo from './components/AppLogo'
 
 /* 路由懒加载 — Player 最重，按需加载 */
 const Home = lazy(() => import('./pages/Home'))
@@ -46,15 +47,15 @@ function NavItem({ to, icon: Icon, label, active }: { to: string; icon: React.El
       className="no-underline no-drag"
     >
       <motion.div
-        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[13px] font-medium transition-colors ${
+        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium ${
           active
             ? 'text-[var(--accent)] bg-[var(--accent-bg)]'
-            : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
+            : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
         }`}
         whileTap={{ scale: 0.96 }}
         transition={{ type: 'spring', stiffness: 400, damping: 25 }}
       >
-        <Icon size={18} strokeWidth={active ? 2 : 1.5} />
+        <Icon size={15} strokeWidth={active ? 2 : 1.5} />
         <span>{label}</span>
       </motion.div>
     </Link>
@@ -74,18 +75,13 @@ function TopBar({ dark, toggleTheme }: { dark: boolean; toggleTheme: () => void 
       }`}
     >
       {/* Logo */}
-      <Link to="/" className="flex items-center gap-2.5 no-underline group no-drag">
-        <div className="w-8 h-8 rounded-[var(--radius-sm)] bg-[var(--accent)] flex items-center justify-center shadow-sm">
-          <Play size={14} fill="white" className="text-white ml-0.5" />
-        </div>
-        <span className="text-[15px] font-semibold text-[var(--text-primary)] tracking-tight">
-          慢播
-        </span>
+      <Link to="/" className="no-underline no-drag">
+        <AppLogo />
       </Link>
 
       {/* Navigation */}
       {!isPlayer && (
-        <nav className="ml-4 flex items-center gap-1 no-drag">
+        <nav className="ml-3 flex items-center gap-0.5 no-drag">
           <NavItem to="/" icon={HomeIcon} label="媒体库" active={location.pathname === '/'} />
           <NavItem to="/settings" icon={Settings} label="设置" active={location.pathname === '/settings'} />
         </nav>
@@ -98,7 +94,7 @@ function TopBar({ dark, toggleTheme }: { dark: boolean; toggleTheme: () => void 
       {!isPlayer && (
         <motion.button
           onClick={toggleTheme}
-          className="w-9 h-9 rounded-[var(--radius-md)] flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors mr-2 no-drag"
+          className="glass-btn-icon w-9 h-9 text-[var(--text-secondary)] hover:text-[var(--text-primary)] mr-2 no-drag"
           whileTap={{ scale: 0.9 }}
           aria-label={dark ? '切换亮色模式' : '切换暗色模式'}
         >
@@ -193,7 +189,7 @@ function AppLayout(): ReactElement {
   }, [location.pathname])
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden relative rounded-xl" style={{ background: 'var(--bg-page)' }}>
+    <div className="h-screen flex flex-col overflow-hidden relative" style={{ background: 'var(--bg-page)' }}>
       <TopBar dark={dark} toggleTheme={toggle} />
       <main className="flex-1 overflow-auto relative z-10">
         <AnimatePresence mode="wait">
@@ -211,9 +207,9 @@ function AppLayout(): ReactElement {
 
 function App(): ReactElement {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <AppLayout />
-    </BrowserRouter>
+    </HashRouter>
   )
 }
 

@@ -24,18 +24,25 @@ const DANMAKU_TRACK_COUNT = 12
 const DANMAKU_TRACK_HEIGHT = 32
 const DANMAKU_FIXED_DURATION = 4
 
+// 弹幕颜色缓存（避免重复转换）
+const colorCache = new Map<number, string>()
 function decToRgb(dec: number): string {
+  let cached = colorCache.get(dec)
+  if (cached) return cached
   const r = (dec >> 16) & 0xff
   const g = (dec >> 8) & 0xff
   const b = dec & 0xff
-  return `rgb(${r},${g},${b})`
+  cached = `rgb(${r},${g},${b})`
+  if (colorCache.size > 256) colorCache.clear()
+  colorCache.set(dec, cached)
+  return cached
 }
 
 class DanmakuEngine {
   private canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
   private allComments: DanmakuComment[] = []  // 保存所有原始弹幕
-  private comments: DanmakuComment[] = []  // 当前显示的弹幕（受 maxCount 限制）
+  private displayedIndex = 0  // 记录已经处理到哪一条弹幕（不删除）
   private active: ActiveComment[] = []
   private trackOccupied: number[] = new Array(DANMAKU_TRACK_COUNT).fill(0)
   private lastTime = 0
@@ -43,15 +50,28 @@ class DanmakuEngine {
   private opacity = 1.0
   private fontSize = 24
   private speed = 120
-  private displayArea: 'full' | 'top' | 'bottom' = 'full'
-  private maxCount = 300
+  private maxCount = 300 // 密度 50-500，控制活跃轨道数
   private timeDensity = 20 // 每秒最多显示条数
   private lastAddTime = 0
   private addedThisSecond = 0
+  private lastVideoTime = 0 // 用于检测跳播
+
+  // 密度值 → 活跃轨道数（线性映射 50→3, 500→12）
+  private activeTrackCount(): number {
+    return Math.round(3 + (this.maxCount - 50) / 450 * 9)
+  }
+
+  private fontString = ''
+  private trackTemp = new Array(DANMAKU_TRACK_COUNT)
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
     this.ctx = canvas.getContext('2d')!
+    this.buildFont()
+  }
+
+  private buildFont(): void {
+    this.fontString = `bold ${this.fontSize}px "Microsoft YaHei", sans-serif`
   }
 
   resize(): void {
@@ -65,8 +85,11 @@ class DanmakuEngine {
     const sorted = comments.sort((a, b) => a.time - b.time)
     // 保存所有原始弹幕
     this.allComments = sorted
-    // 限制弹幕总数，防止太密集
-    this.comments = sorted.slice(0, this.maxCount)
+    // 重置播放状态，确保新弹幕从头开始显示
+    this.displayedIndex = 0
+    this.lastAddTime = 0
+    this.addedThisSecond = 0
+    this.lastVideoTime = 0
   }
 
   getCommentCount(): number {
@@ -75,9 +98,12 @@ class DanmakuEngine {
 
   clear(): void {
     this.allComments = []
-    this.comments = []
     this.active = []
     this.trackOccupied = new Array(DANMAKU_TRACK_COUNT).fill(0)
+    this.displayedIndex = 0
+    this.lastAddTime = 0
+    this.addedThisSecond = 0
+    this.lastVideoTime = 0
   }
 
   setOpacity(opacity: number): void {
@@ -86,27 +112,23 @@ class DanmakuEngine {
 
   setFontSize(size: number): void {
     this.fontSize = Math.max(12, Math.min(48, size))
+    this.buildFont()
   }
 
   setSpeed(speed: number): void {
     this.speed = Math.max(60, Math.min(300, speed))
   }
 
-  setDisplayArea(area: 'full' | 'top' | 'bottom'): void {
-    this.displayArea = area
-  }
-
   setMaxCount(count: number): void {
+    const oldTracks = this.activeTrackCount()
     this.maxCount = Math.max(50, Math.min(500, count))
-    // 从所有原始弹幕中重新 slice，应用新的密度限制
-    if (this.allComments.length > 0) {
-      this.comments = this.allComments.slice(0, this.maxCount)
-      // 重置活跃弹幕和轨道占用，让弹幕重新开始显示
-      this.active = []
-      this.trackOccupied = new Array(DANMAKU_TRACK_COUNT).fill(0)
-      this.lastTime = 0
-      this.addedThisSecond = 0
-      this.lastAddTime = 0
+    const newTracks = this.activeTrackCount()
+    // 降低密度：移除超出新轨道范围的弹幕，即时视觉反馈
+    if (newTracks < oldTracks) {
+      this.active = this.active.filter(a => {
+        const track = Math.floor(a.y / DANMAKU_TRACK_HEIGHT)
+        return track < newTracks
+      })
     }
   }
 
@@ -115,9 +137,19 @@ class DanmakuEngine {
   }
 
   private getTrackForScroll(): number {
+    const numTracks = this.activeTrackCount()
+    // 优先选空轨道
+    for (let i = 0; i < numTracks; i++) {
+      if (this.trackOccupied[i] <= 0) return i
+    }
+    // 选现有弹幕已过半屏的轨道（最多同时 2 条同轨，不重叠）
+    for (let i = 0; i < numTracks; i++) {
+      if (this.trackOccupied[i] <= this.canvas.width * 0.5) return i
+    }
+    // 全忙，选最空闲的
     let best = 0
     let bestRight = Infinity
-    for (let i = 0; i < DANMAKU_TRACK_COUNT; i++) {
+    for (let i = 0; i < numTracks; i++) {
       if (this.trackOccupied[i] < bestRight) {
         bestRight = this.trackOccupied[i]
         best = i
@@ -126,91 +158,146 @@ class DanmakuEngine {
     return best
   }
 
-  private addComment(c: DanmakuComment, now: number): void {
+  private addComment(c: DanmakuComment, now: number): boolean {
     // 时间密度控制 - 限制每秒显示的弹幕数
     const elapsed = now - this.lastAddTime
-    if (elapsed >= 1000) {
-      // 新的一秒，重置计数
+    if (elapsed >= 1) {
       this.addedThisSecond = 0
       this.lastAddTime = now
     }
     if (this.addedThisSecond >= this.timeDensity) {
-      // 超过每秒限制，跳过此弹幕
-      return
+      return false
     }
     this.addedThisSecond++
 
     const colorStr = decToRgb(c.color)
-    const font = `bold ${this.fontSize}px "Microsoft YaHei", sans-serif`
-    this.ctx.font = font
+    this.ctx.font = this.fontString
     const metrics = this.ctx.measureText(c.text)
     const textWidth = metrics.width
 
     if (c.mode === 1) {
       const track = this.getTrackForScroll()
       const y = track * DANMAKU_TRACK_HEIGHT + DANMAKU_TRACK_HEIGHT * 0.8
-      this.trackOccupied[track] = this.canvas.width + textWidth
+      // 在前一条弹幕后紧跟，间距 = 字号，绝不重叠
+      const startX = Math.max(this.canvas.width + 10, this.trackOccupied[track] + this.fontSize)
+      this.trackOccupied[track] = startX + textWidth
       this.active.push({
-        text: c.text, x: this.canvas.width + 10, y,
+        text: c.text, x: startX, y,
         color: colorStr, speed: this.speed, width: textWidth,
         mode: 1, bornAt: now, duration: 0
       })
     } else {
+      // 固定弹幕：在活跃轨道范围内找最空的轨道
+      const numTracks = this.activeTrackCount()
       const isTop = c.mode === 5
-      const track = isTop ? 0 : DANMAKU_TRACK_COUNT - 1
-      const y = track * DANMAKU_TRACK_HEIGHT + DANMAKU_TRACK_HEIGHT * 0.8
+      const half = Math.floor(numTracks / 2)
+      const tStart = isTop ? 0 : half
+      const tEnd = isTop ? half : numTracks
+      let bestTrack = tStart
+      let bestRight = Infinity
+      for (let i = tStart; i < tEnd; i++) {
+        if (this.trackOccupied[i] < bestRight) {
+          bestRight = this.trackOccupied[i]
+          bestTrack = i
+        }
+      }
+      const y = bestTrack * DANMAKU_TRACK_HEIGHT + DANMAKU_TRACK_HEIGHT * 0.8
+      this.trackOccupied[bestTrack] = textWidth
       this.active.push({
         text: c.text, x: (this.canvas.width - textWidth) / 2, y,
         color: colorStr, speed: 0, width: textWidth,
         mode: c.mode, bornAt: now, duration: DANMAKU_FIXED_DURATION
       })
     }
+    return true
   }
 
   update(videoTime: number): void {
     if (this.allComments.length === 0 || !this.enabled) return
 
-    // 从 allComments 中取出应该显示的弹幕
-    while (this.comments.length > 0 && this.comments[0].time <= videoTime) {
-      const c = this.comments.shift()!
-      this.addComment(c, videoTime)
+    const delta = videoTime - this.lastVideoTime
+
+    // 检测跳播（时间跳跃超过 1 秒视为 seek 操作）
+    if (Math.abs(delta) > 1) {
+      this.active = []
+      this.trackOccupied = new Array(DANMAKU_TRACK_COUNT).fill(0)
+      this.lastAddTime = videoTime
+      this.addedThisSecond = 0
+
+      if (delta > 0) {
+        // 前进跳播：快速跳过已错过的弹幕（预留 2 秒缓冲，显示即将出现的弹幕）
+        while (this.displayedIndex < this.allComments.length &&
+               this.allComments[this.displayedIndex].time < videoTime - 2) {
+          this.displayedIndex++
+        }
+      } else {
+        // 后退跳播：从头定位到当前时间附近的弹幕
+        this.displayedIndex = 0
+        while (this.displayedIndex < this.allComments.length &&
+               this.allComments[this.displayedIndex].time < videoTime - 2) {
+          this.displayedIndex++
+        }
+      }
+    }
+
+    this.lastVideoTime = videoTime
+
+    // 从 allComments 中取出应该显示的弹幕（连续流动，不丢弃被阻塞的弹幕）
+    let addedThisFrame = 0
+    while (this.displayedIndex < this.allComments.length &&
+           this.allComments[this.displayedIndex].time <= videoTime &&
+           addedThisFrame < 3) {
+      const c = this.allComments[this.displayedIndex]
+      if (this.addComment(c, videoTime)) {
+        this.displayedIndex++
+        addedThisFrame++
+      } else {
+        // 时间密度超限，跳过本条，下帧继续下一条
+        this.displayedIndex++
+        break
+      }
     }
 
     const now = performance.now()
     const dt = this.lastTime ? (now - this.lastTime) / 1000 : 0.016
     this.lastTime = now
 
-    this.active = this.active.filter((a) => {
+    // 单次遍历：更新位置 + 过滤 + 重建轨道占用
+    let wi = 0
+    const arr = this.active
+    const ln = arr.length
+    const occ = this.trackTemp
+    for (let i = 0; i < DANMAKU_TRACK_COUNT; i++) occ[i] = 0
+
+    for (let i = 0; i < ln; i++) {
+      const a = arr[i]
       if (a.mode === 1) {
         a.x -= a.speed * dt
-        return a.x > -a.width - 20
-      }
-      return videoTime - a.bornAt < a.duration
-    })
-
-    this.trackOccupied = new Array(DANMAKU_TRACK_COUNT).fill(0)
-    for (const a of this.active) {
-      if (a.mode === 1) {
-        const track = Math.floor(a.y / DANMAKU_TRACK_HEIGHT)
-        if (track >= 0 && track < DANMAKU_TRACK_COUNT) {
-          this.trackOccupied[track] = Math.max(this.trackOccupied[track], a.x + a.width)
+        if (a.x <= -a.width - 20) continue
+        const tk = Math.floor(a.y / DANMAKU_TRACK_HEIGHT)
+        if (tk >= 0 && tk < DANMAKU_TRACK_COUNT) {
+          const r = a.x + a.width
+          if (r > occ[tk]) occ[tk] = r
         }
+      } else if (videoTime - a.bornAt >= a.duration) {
+        continue
       }
+      arr[wi++] = a
     }
+    arr.length = wi
+    this.trackOccupied = occ
   }
 
   draw(): void {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
     if (!this.enabled) return
     this.ctx.globalAlpha = this.opacity
+    this.ctx.font = this.fontString
+    this.ctx.textBaseline = 'middle'
+    this.ctx.strokeStyle = 'rgba(0,0,0,0.6)'
+    this.ctx.lineWidth = 3
 
     for (const a of this.active) {
-      if (this.displayArea === 'top' && a.y > this.canvas.height * 0.3) continue
-      if (this.displayArea === 'bottom' && a.y < this.canvas.height * 0.7) continue
-      this.ctx.font = `bold ${this.fontSize}px "Microsoft YaHei", sans-serif`
-      this.ctx.textBaseline = 'middle'
-      this.ctx.strokeStyle = 'rgba(0,0,0,0.6)'
-      this.ctx.lineWidth = 3
       this.ctx.strokeText(a.text, a.x, a.y)
       this.ctx.fillStyle = a.color
       this.ctx.fillText(a.text, a.x, a.y)
@@ -348,6 +435,7 @@ function Player(): JSX.Element {
   const [playing, setPlaying] = useState(false)
   const [volume, setVolume] = useState(100)
   const [currentTime, setCurrentTime] = useState(0)
+  const currentTimeRef = useRef(0) // 性能优化：ref 避免逐帧 setState
   const [duration, setDuration] = useState(0)
   const [buffered, setBuffered] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -368,15 +456,13 @@ function Player(): JSX.Element {
   const [danmakuOpacity, setDanmakuOpacity] = useState(1.0)
   const [danmakuFontSize, setDanmakuFontSize] = useState(24)
   const [danmakuSpeed, setDanmakuSpeed] = useState(120)
-  const [danmakuArea, setDanmakuArea] = useState<'full' | 'top' | 'bottom'>('full')
   const [danmakuMaxCount, setDanmakuMaxCount] = useState(300)
   // const [danmakuSmartMode, setDanmakuSmartMode] = useState(false) // removed
   // const [danmakuTimeDensity, setDanmakuTimeDensity] = useState(20) // removed // 每秒最多显示条数
 
   const [playbackRate, setPlaybackRate] = useState(1)
+
   const [speedToast, setSpeedToast] = useState('')
-  const [showTopBar, setShowTopBar] = useState(false)
-  const [mouseTimer, setMouseTimer] = useState<NodeJS.Timeout | null>(null)
   const [volumePopup, setVolumePopup] = useState(false)
   const [speedPopup, setSpeedPopup] = useState(false)
 
@@ -459,15 +545,6 @@ function Player(): JSX.Element {
           else if (legacySpeed === 'medium') speed = 120
         }
         if (speed !== null) { setDanmakuSpeed(Number(speed)); engineRef.current?.setSpeed(Number(speed)) }
-        let area = await window.api.store.get('danmakuArea')
-        if (area === null) {
-          const legacyArea = await window.api.store.get('danmakuDisplayArea')
-          if (legacyArea !== null) {
-            const pct = Number(legacyArea)
-            area = pct <= 40 ? 'top' : pct >= 80 ? 'full' : 'bottom'
-          }
-        }
-        if (area !== null) { setDanmakuArea(area as 'full' | 'top' | 'bottom'); engineRef.current?.setDisplayArea(area as 'full' | 'top' | 'bottom') }
         const maxCount = await window.api.store.get('danmakuMaxCount')
         if (maxCount !== null) { setDanmakuMaxCount(Number(maxCount)); engineRef.current?.setMaxCount(Number(maxCount)) }
       } catch (err) { /* ignore */ }
@@ -535,7 +612,6 @@ function Player(): JSX.Element {
   const handleOpacityChange = (value: number): void => { setDanmakuOpacity(value); engineRef.current?.setOpacity(value); window.api.store.set('danmakuOpacity', value) }
   const handleFontSizeChange = (value: number): void => { setDanmakuFontSize(value); engineRef.current?.setFontSize(value); window.api.store.set('danmakuFontSize', value) }
   const handleSpeedChange = (value: number): void => { setDanmakuSpeed(value); engineRef.current?.setSpeed(value); window.api.store.set('danmakuSpeed', value) }
-  const handleAreaChange = (area: 'full' | 'top' | 'bottom'): void => { setDanmakuArea(area); engineRef.current?.setDisplayArea(area); window.api.store.set('danmakuArea', area) }
 
   // 弹幕密度控制 - 简单滑块
   const handleDensityChange = (value: number): void => {
@@ -546,12 +622,11 @@ function Player(): JSX.Element {
     }
   }
 
-  const danmakuEngine = engineRef.current
-
-  const handleDanmakuSearch = async (): Promise<void> => {
-    if (!searchKeyword.trim()) return; setSearchLoading(true)
+  const handleDanmakuSearch = async (keyword?: string): Promise<void> => {
+    const kw = (keyword || searchKeyword).trim()
+    if (!kw) return; setSearchLoading(true)
     try {
-      const result = await window.api.danmaku.search(searchKeyword.trim())
+      const result = await window.api.danmaku.search(kw)
       if (result.success && result.data) {
         const data = result.data as DanmakuSearchResponse
         const eps: DanmakuSearchResult[] = []
@@ -569,8 +644,7 @@ function Player(): JSX.Element {
     const searchTitle = seriesName || (localFile ? extractSeriesNameFromFilename(localFile.split(/[/\\]/).pop() || itemName) || itemName : itemName)
     setSearchKeyword(searchTitle)
     setSearchOpen(true)
-    // 自动触发搜索
-    handleDanmakuSearch()
+    handleDanmakuSearch(searchTitle)
   }
 
   const handleDanmakuSelect = async (ep: DanmakuSearchResult): Promise<void> => {
@@ -639,9 +713,11 @@ function Player(): JSX.Element {
     const onPause = (): void => setPlaying(false)
     const onEnded = (): void => setPlaying(false)
     const onTimeUpdate = (): void => {
-      setCurrentTime(video.currentTime)
+      const ct = video.currentTime
+      currentTimeRef.current = ct
+      // 每 250ms 更新一次 React state，减少重渲染
+      if (Math.abs(ct - currentTime) > 0.5) setCurrentTime(ct)
       if (video.buffered.length > 0) setBuffered(video.buffered.end(video.buffered.length - 1))
-      // danmaku update is handled in the RAF loop below
     }
     const onWaiting = (): void => setLoading(true)
     const onCanPlay = (): void => setLoading(false)
@@ -715,15 +791,25 @@ function Player(): JSX.Element {
     setSpeedToast(`${rate}x`); setTimeout(() => setSpeedToast(''), 2000)
   }
 
-  // 顶部信息栏 - 鼠标移动检测
-  const handleMouseMove = (): void => {
-    setShowTopBar(true)
-    if (mouseTimer) clearTimeout(mouseTimer)
-    const timer = setTimeout(() => {
-      setShowTopBar(false)
-    }, 2500)
-    setMouseTimer(timer)
+  // 沉浸式控制栏 — 鼠标不动 3 秒自动隐藏
+  const [controlsVisible, setControlsVisible] = useState(true)
+  const hideTimerRef = useRef<NodeJS.Timeout | null>(null)
+
+  const resetAutoHide = (): void => {
+    setControlsVisible(true)
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    hideTimerRef.current = setTimeout(() => {
+      setControlsVisible(false)
+    }, 3000)
   }
+
+  const handleMouseMove = (): void => {
+    resetAutoHide()
+  }
+
+  useEffect(() => {
+    return () => { if (hideTimerRef.current) clearTimeout(hideTimerRef.current) }
+  }, [])
 
   const handleContextMenu = (e: React.MouseEvent): void => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, visible: true }) }
   const handleCloseContextMenu = (): void => { setContextMenu({ x: 0, y: 0, visible: false }) }
@@ -795,7 +881,7 @@ function Player(): JSX.Element {
     return (
       <div className="h-full flex items-center justify-center bg-black">
         <div className="text-center">
-          <p className="text-sm text-[#666] mb-8">未选择视频</p>
+          <p className="text-sm text-white/35 mb-8">未选择视频</p>
           <Link to="/" className="inline-block px-6 py-2.5 bg-[#8b82f6] hover:bg-[#7a72e5] rounded-md text-sm font-medium transition-colors no-underline">
             返回媒体库
           </Link>
@@ -813,11 +899,11 @@ function Player(): JSX.Element {
       {/* 视频区域 */}
       <div className="flex-1 relative bg-black overflow-hidden" onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
         {/* 顶部信息栏 */}
-        <div className={`absolute top-0 left-0 right-0 z-30 transition-opacity duration-300 ${showTopBar ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-          <div className="bg-gradient-to-b from-black/80 to-transparent px-4 py-3 flex items-center gap-3">
+        <div className={`absolute top-0 left-0 right-0 z-30 transition-all duration-500 ${controlsVisible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2 pointer-events-none'}`}>
+          <div className="player-glass-bar bg-gradient-to-b from-black/60 to-black/30 px-4 py-3 flex items-center gap-3 border-none">
             <button
               onClick={() => navigate(-1)}
-              className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-colors"
+              className="glass-btn-icon text-white/80 hover:text-white"
               title="返回"
             >
               <ArrowLeft size={18} />
@@ -827,7 +913,7 @@ function Player(): JSX.Element {
                 {itemName}
               </div>
               {episodeList.length > 0 && currentEpisodeIndex >= 0 && (
-                <div className="text-xs text-[#999] truncate">
+                <div className="text-xs text-white/40 truncate">
                   {episodeList[currentEpisodeIndex]?.Name || `第 ${currentEpisodeIndex + 1} 集`}
                 </div>
               )}
@@ -840,18 +926,18 @@ function Player(): JSX.Element {
 
         {/* 弹幕状态 */}
         {danmakuLoading && (
-          <div className="absolute top-4 right-4 bg-black/70 px-3 py-1.5 rounded text-[11px] text-[#999] z-20 flex items-center gap-2">
+          <div className="absolute top-4 right-4 player-glass-badge px-3 py-1.5 rounded text-[11px] text-[#bbb] z-20 flex items-center gap-2">
             <div className="w-3 h-3 border border-[#8b82f6] border-t-transparent rounded-full animate-spin" />匹配弹幕
           </div>
         )}
         {currentDanmakuCount > 0 && !danmakuLoading && (
-          <div className={`absolute top-4 right-4 bg-black/70 px-2 py-1 rounded text-[10px] text-[#666] z-20 transition-opacity duration-500 ${danmakuCountVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>{currentDanmakuCount} 条弹幕</div>
+          <div className={`absolute top-4 right-4 player-glass-badge px-2 py-1 rounded text-[10px] text-[#999] z-20 transition-opacity duration-500 ${danmakuCountVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>{currentDanmakuCount} 条弹幕</div>
         )}
 
         {/* 倍速提示 */}
         {speedToast && (
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 pointer-events-none animate-speed-toast">
-            <div className="px-5 py-2.5 bg-[#8b82f6]/90 rounded-lg">
+            <div className="player-glass-toast px-5 py-2.5 rounded-lg">
               <span className="text-2xl font-bold text-white">{speedToast}</span>
             </div>
           </div>
@@ -868,7 +954,7 @@ function Player(): JSX.Element {
         {error && !loading && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
             <div className="text-center">
-              <p className="text-sm text-[#666] mb-6">{error}</p>
+              <p className="text-sm text-white/40 mb-6">{error}</p>
               <Link to="/" className="text-[#8b82f6] hover:text-[#a29bfe] text-xs transition-colors">返回媒体库</Link>
             </div>
           </div>
@@ -877,50 +963,50 @@ function Player(): JSX.Element {
 
       {/* 弹幕搜索面板 */}
       {searchOpen && (
-        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="w-72 bg-[#0d0d0d] border border-[#1a1a1a] rounded-lg shadow-2xl z-30 p-4">
+        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="w-72 player-glass-panel z-50 p-4">
           <div className="flex gap-2 mb-3">
-            <input type="text" value={searchKeyword} onChange={(e) => setSearchKeyword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleDanmakuSearch() }} placeholder="搜索弹幕" className="flex-1 bg-[#111] border border-transparent rounded-md px-3 py-2 text-xs text-white placeholder-[#555] focus:outline-none focus:border-[#8b82f6]" autoFocus />
-            <button onClick={handleDanmakuSearch} disabled={searchLoading} className="px-3 py-2 bg-[#8b82f6] hover:bg-[#7a72e5] rounded-md text-xs font-medium disabled:opacity-50 transition-colors">{searchLoading ? '...' : '搜索'}</button>
+            <input type="text" value={searchKeyword} onChange={(e) => setSearchKeyword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleDanmakuSearch() }} placeholder="搜索弹幕" className="flex-1 bg-white/5 border border-white/5 rounded-md px-3 py-2 text-xs text-white/90 placeholder-white/25 focus:outline-none focus:border-[#8b82f6]/40 focus:bg-white/8" autoFocus />
+            <button onClick={handleDanmakuSearch} disabled={searchLoading} className="px-3 py-2 bg-[#8b82f6] hover:bg-[#7a72e5] rounded-md text-xs font-medium text-white disabled:opacity-40 transition-colors">{searchLoading ? '...' : '搜索'}</button>
           </div>
           {searchResults.length > 0 && (
             <div className="max-h-60 overflow-y-auto space-y-0.5">
               {searchResults.map((ep, i) => (
-                <button key={`${ep.episodeId}-${i}`} onClick={() => handleDanmakuSelect(ep)} className="w-full text-left px-3 py-2 rounded hover:bg-[#1a1a1a] transition-colors">
+                <button key={`${ep.episodeId}-${i}`} onClick={() => handleDanmakuSelect(ep)} className="w-full text-left px-3 py-2 rounded hover:bg-white/5 transition-colors">
                   <div className="text-xs text-white truncate">{ep.animeTitle}</div>
-                  <div className="text-[10px] text-[#666] mt-0.5">{ep.episodeTitle} &middot; {ep.typeDescription}</div>
+                  <div className="text-[10px] text-white/35 mt-0.5">{ep.episodeTitle} &middot; {ep.typeDescription}</div>
                 </button>
               ))}
             </div>
           )}
           {localFile && (
-            <button onClick={handleLoadLocalXml} className="mt-2 w-full text-[10px] text-[#666] hover:text-[#8b82f6] py-2 border-t border-[#1a1a1a] transition-colors">加载本地 XML 弹幕</button>
+            <button onClick={handleLoadLocalXml} className="mt-2 w-full text-[10px] text-white/30 hover:text-[#8b82f6] py-2 border-t border-white/5 transition-colors">加载本地 XML 弹幕</button>
           )}
-          <button onClick={() => { setSearchOpen(false); setSearchResults([]) }} className="mt-2 w-full text-[10px] text-[#555] hover:text-white py-1 transition-colors">关闭</button>
+          <button onClick={() => { setSearchOpen(false); setSearchResults([]) }} className="mt-2 w-full text-[10px] text-white/25 hover:text-white/70 py-1 transition-colors">关闭</button>
         </div>
       )}
 
       {/* 弹幕设置面板 */}
       {settingsOpen && (
-        <div style={{ position: 'fixed', top: '280px', right: '20px' }} className="w-60 bg-[#0d0d0d] border border-[#1a1a1a] rounded-lg shadow-2xl z-30 p-5">
+        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="w-60 player-glass-panel z-50 p-5">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-xs font-medium">弹幕设置</h3>
-            <button onClick={() => setSettingsOpen(false)} className="text-[#555] hover:text-white transition-colors text-sm">&times;</button>
+            <button onClick={() => setSettingsOpen(false)} className="text-white/30 hover:text-white/80 transition-colors text-sm">&times;</button>
           </div>
           <div className="space-y-4">
             <div>
-              <div className="flex justify-between text-[10px] text-[#666] mb-1.5"><span>透明度</span><span>{Math.round(danmakuOpacity * 100)}%</span></div>
+              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>透明度</span><span>{Math.round(danmakuOpacity * 100)}%</span></div>
               <input type="range" min="0" max="1" step="0.1" value={danmakuOpacity} onChange={(e) => handleOpacityChange(parseFloat(e.target.value))} className="w-full" />
             </div>
             <div>
-              <div className="flex justify-between text-[10px] text-[#666] mb-1.5"><span>字体大小</span><span>{danmakuFontSize}px</span></div>
+              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>字体大小</span><span>{danmakuFontSize}px</span></div>
               <input type="range" min="12" max="48" step="1" value={danmakuFontSize} onChange={(e) => handleFontSizeChange(parseInt(e.target.value))} className="w-full" />
             </div>
             <div>
-              <div className="flex justify-between text-[10px] text-[#666] mb-1.5"><span>速度</span><span>{danmakuSpeed}px/s</span></div>
+              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>速度</span><span>{danmakuSpeed}px/s</span></div>
               <input type="range" min="60" max="300" step="10" value={danmakuSpeed} onChange={(e) => handleSpeedChange(parseInt(e.target.value))} className="w-full" />
             </div>
             <div>
-              <div className="flex justify-between text-[10px] text-[#666] mb-1.5">
+              <div className="flex justify-between text-[10px] text-white/35 mb-1.5">
                 <span>弹幕密度</span>
                 <span>{danmakuMaxCount} 条</span>
               </div>
@@ -933,19 +1019,9 @@ function Player(): JSX.Element {
                 onChange={(e) => handleDensityChange(parseInt(e.target.value))}
                 className="w-full"
               />
-              <div className="flex justify-between text-[9px] text-[#555] mt-1">
+              <div className="flex justify-between text-[9px] text-white/25 mt-1">
                 <span>稀疏 (50)</span>
                 <span>密集 (500)</span>
-              </div>
-            </div>
-            <div>
-              <div className="text-[10px] text-[#666] mb-2">显示区域</div>
-              <div className="flex gap-2">
-                {(['full', 'top', 'bottom'] as const).map((area) => (
-                  <button key={area} onClick={() => handleAreaChange(area)} className={`flex-1 py-1.5 text-[10px] rounded font-medium transition-colors ${danmakuArea === area ? 'bg-[#8b82f6] text-white' : 'bg-[#111] text-[#666] hover:text-white'}`}>
-                    {area === 'full' ? '全屏' : area === 'top' ? '顶部' : '底部'}
-                  </button>
-                ))}
               </div>
             </div>
           </div>
@@ -956,28 +1032,29 @@ function Player(): JSX.Element {
       {contextMenu.visible && (
         <>
           <div className="fixed inset-0 z-40" onClick={handleCloseContextMenu} onContextMenu={(e) => { e.preventDefault(); handleCloseContextMenu() }} />
-          <div className="fixed z-50 w-40 bg-[#0d0d0d] border border-[#1a1a1a] rounded-md shadow-2xl py-1" style={{ left: Math.min(contextMenu.x, window.innerWidth - 170), top: Math.min(contextMenu.y, window.innerHeight - 280) }}>
-            <button onClick={handleShowInfo} className="w-full text-left px-3 py-2 text-xs text-white hover:bg-[#1a1a1a] transition-colors">影片信息</button>
-            <div className="border-t border-[#1a1a1a] my-0.5" />
-            <div className="px-3 py-1 text-[10px] text-[#666]">播放速度</div>
+          <div className="fixed z-50 w-40 player-glass-panel rounded-md py-1" style={{ left: Math.min(contextMenu.x, window.innerWidth - 170), top: Math.min(contextMenu.y, window.innerHeight - 280) }}>
+            <button onClick={handleShowInfo} className="w-full text-left px-3 py-2 text-xs text-white/80 hover:bg-white/5 transition-colors">影片信息</button>
+            <hr className="border-white/5 my-0.5" />
+            <hr className="border-white/5 my-0.5" />
+            <div className="px-3 py-1 text-[10px] text-white/35">播放速度</div>
             {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
-              <button key={rate} onClick={() => handlePlaybackRateChange(rate)} className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${playbackRate === rate ? 'text-[#8b82f6]' : 'text-[#999] hover:bg-[#1a1a1a]'}`}>{rate}x</button>
+              <button key={rate} onClick={() => handlePlaybackRateChange(rate)} className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${playbackRate === rate ? 'text-[#8b82f6]' : 'text-white/60 hover:bg-white/5'}`}>{rate}x</button>
             ))}
-            <div className="border-t border-[#1a1a1a] my-0.5" />
-            <button onClick={() => { handleDanmakuToggle(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white hover:bg-[#1a1a1a] transition-colors">{danmakuEnabled ? '关闭弹幕' : '开启弹幕'}</button>
-            <button onClick={() => { handleOpenDanmakuSearch(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white hover:bg-[#1a1a1a] transition-colors">搜索弹幕</button>
-            <button onClick={() => { handleLoadLocalXml(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white hover:bg-[#1a1a1a] transition-colors">加载本地弹幕</button>
+            <hr className="border-white/5 my-0.5" />
+            <button onClick={() => { handleDanmakuToggle(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">{danmakuEnabled ? '关闭弹幕' : '开启弹幕'}</button>
+            <button onClick={() => { handleOpenDanmakuSearch(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">搜索弹幕</button>
+            <button onClick={() => { handleLoadLocalXml(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">加载本地弹幕</button>
           </div>
         </>
       )}
 
       {/* 影片信息覆盖层 */}
       {infoOverlay && (
-        <div className="absolute inset-0 z-30 bg-black/85 flex items-center justify-center animate-page-in" onClick={handleCloseInfo}>
-          <div className="w-[480px] max-h-[70vh] bg-[#0d0d0d] rounded-lg p-8 overflow-y-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="absolute inset-0 z-30 bg-black/70 backdrop-blur-sm flex items-center justify-center animate-page-in" onClick={handleCloseInfo}>
+          <div className="w-[480px] max-h-[70vh] player-glass-panel p-8 overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-sm font-medium">影片信息</h3>
-              <button onClick={handleCloseInfo} className="w-6 h-6 rounded flex items-center justify-center text-[#555] hover:text-white hover:bg-[#1a1a1a] transition-all text-sm">&times;</button>
+              <button onClick={handleCloseInfo} className="w-6 h-6 rounded flex items-center justify-center text-white/50 hover:text-white hover:bg-white/10 transition-all text-sm">&times;</button>
             </div>
             {itemInfoLoading ? (
               <div className="flex items-center justify-center py-10">
@@ -985,23 +1062,23 @@ function Player(): JSX.Element {
               </div>
             ) : itemInfo ? (
               <div className="space-y-4 text-xs">
-                <div className="flex justify-between"><span className="text-[#666]">片名</span><span className="text-white">{String(itemInfo.Name || '-')}</span></div>
-                {itemInfo.OriginalTitle && <div className="flex justify-between"><span className="text-[#666]">原名</span><span className="text-[#999]">{String(itemInfo.OriginalTitle)}</span></div>}
-                <div className="flex justify-between"><span className="text-[#666]">年份</span><span className="text-[#999]">{itemInfo.ProductionYear || '-'}</span></div>
-                {itemInfo.Genres && (itemInfo.Genres as string[]).length > 0 && <div className="flex justify-between"><span className="text-[#666]">类型</span><span className="text-[#999]">{(itemInfo.Genres as string[]).join(' / ')}</span></div>}
-                <div className="flex justify-between"><span className="text-[#666]">时长</span><span className="text-[#999]">{itemInfo.RunTimeTicks ? formatTime((Number(itemInfo.RunTimeTicks) / 10000000)) : '-'}</span></div>
-                {itemInfo.CommunityRating && <div className="flex justify-between"><span className="text-[#666]">评分</span><span className="text-[#8b82f6] font-medium">{String(itemInfo.CommunityRating)}</span></div>}
-                {itemInfo.Overview && <div><div className="text-[#666] mb-2">简介</div><p className="text-[#999] leading-relaxed">{String(itemInfo.Overview)}</p></div>}
+                <div className="flex justify-between"><span className="text-white/35">片名</span><span className="text-white/80">{String(itemInfo.Name || '-')}</span></div>
+                {itemInfo.OriginalTitle && <div className="flex justify-between"><span className="text-white/35">原名</span><span className="text-white/50">{String(itemInfo.OriginalTitle)}</span></div>}
+                <div className="flex justify-between"><span className="text-white/35">年份</span><span className="text-white/50">{itemInfo.ProductionYear || '-'}</span></div>
+                {itemInfo.Genres && (itemInfo.Genres as string[]).length > 0 && <div className="flex justify-between"><span className="text-white/35">类型</span><span className="text-white/50">{(itemInfo.Genres as string[]).join(' / ')}</span></div>}
+                <div className="flex justify-between"><span className="text-white/35">时长</span><span className="text-white/50">{itemInfo.RunTimeTicks ? formatTime((Number(itemInfo.RunTimeTicks) / 10000000)) : '-'}</span></div>
+                {itemInfo.CommunityRating && <div className="flex justify-between"><span className="text-white/35">评分</span><span className="text-[#8b82f6] font-medium">{String(itemInfo.CommunityRating)}</span></div>}
+                {itemInfo.Overview && <div><div className="text-white/35 mb-2">简介</div><p className="text-white/50 leading-relaxed">{String(itemInfo.Overview)}</p></div>}
               </div>
-            ) : <p className="text-xs text-[#555] text-center py-10">无法获取影片信息</p>}
+            ) : <p className="text-xs text-white/25 text-center py-10">无法获取影片信息</p>}
           </div>
         </div>
       )}
 
       {/* 控制栏 — 64px 纯黑 95% 不透明 */}
-      <div className="h-16 bg-black/95 flex items-center px-5 gap-6 shrink-0 relative z-20 animate-control-up">
+      <div className={`player-glass-bar h-16 flex items-center px-5 gap-6 shrink-0 relative z-20 transition-all duration-500 ${controlsVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3 pointer-events-none'}`} onMouseMove={handleMouseMove}>
         {/* 播放/暂停 */}
-        <button onClick={handlePlayPause} className="text-white hover:text-[#8b82f6] transition-colors" title={playing ? '暂停' : '播放'}>
+        <button onClick={handlePlayPause} className="glass-btn-sm text-white/80 hover:text-white" title={playing ? '暂停' : '播放'}>
           {playing ? (
             <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
           ) : (
@@ -1011,11 +1088,11 @@ function Player(): JSX.Element {
 
         {/* 剧集切换按钮 */}
         {(episodeList.length > 0 || folderVideos.length > 0) && (
-          <div className="flex items-center gap-2">
+          <div className="relative flex items-center gap-2">
             <button
               onClick={() => handleSwitchEpisode(currentEpisodeIndex - 1)}
               disabled={currentEpisodeIndex <= 0}
-              className="text-[#666] hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="glass-btn-sm text-white/60 hover:text-white/80 disabled:opacity-20 disabled:cursor-not-allowed"
               title="上一集"
             >
               <ChevronLeft size={18} />
@@ -1026,195 +1103,198 @@ function Player(): JSX.Element {
             <button
               onClick={() => handleSwitchEpisode(currentEpisodeIndex + 1)}
               disabled={currentEpisodeIndex >= Math.max(episodeList.length, folderVideos.length) - 1}
-              className="text-[#666] hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="glass-btn-sm text-white/60 hover:text-white/80 disabled:opacity-20 disabled:cursor-not-allowed"
               title="下一集"
             >
               <ChevronRight size={18} />
             </button>
-            <div className="w-[1px] h-4 bg-[#444] mx-1" />
+            <div className="w-[1px] h-4 bg-white/8 mx-1" />
             <button
               onClick={() => setEpisodePopup(!episodePopup)}
-              className="text-[#666] hover:text-white transition-colors flex items-center gap-1"
+              className="glass-btn-sm text-white/60 hover:text-white/80 flex items-center gap-1"
               title="剧集列表"
             >
               <List size={18} />
-              <span className="text-xs text-[#999]">{Math.max(episodeList.length, folderVideos.length)}集</span>
+              <span className="text-xs text-white/40">{Math.max(episodeList.length, folderVideos.length)}集</span>
             </button>
           </div>
         )}
 
         {/* 进度条 */}
         <div className="flex-1 h-6 flex items-center cursor-pointer group relative" onClick={handleSeek}>
-          <div className="absolute left-0 right-0 h-[2px] bg-[#333] rounded-full group-hover:h-[4px] transition-all">
-            <div className="h-full bg-[#444] rounded-full" style={{ width: `${bufferedPercent}%` }} />
+          <div className="absolute left-0 right-0 h-[2px] bg-white/5 rounded-full group-hover:h-[4px] transition-all">
+            <div className="h-full bg-white/10 rounded-full" style={{ width: `${bufferedPercent}%` }} />
             <div className="h-full bg-[#8b82f6] rounded-full absolute top-0 left-0" style={{ width: `${progressPercent}%` }} />
             <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-[#8b82f6] rounded-full opacity-0 group-hover:opacity-100 transition-opacity" style={{ left: `${progressPercent}%` }} />
           </div>
         </div>
 
         {/* 时间 */}
-        <span className="text-xs text-[#999] font-mono tabular-nums w-[90px] text-right whitespace-nowrap">
+        <span className="text-xs text-white/40 font-mono tabular-nums w-[90px] text-right whitespace-nowrap">
           {formatTime(currentTime)}&nbsp;/&nbsp;{formatTime(duration)}
         </span>
 
         {/* 倍速 */}
-        <div className="relative speed-popup">
+        <div className="speed-popup">
           <button
             onClick={() => { setSpeedPopup(!speedPopup); setVolumePopup(false) }}
-            className={`text-xs font-medium transition-colors px-2 py-1 rounded hover:bg-white/10 ${playbackRate !== 1 ? 'text-[#8b82f6]' : 'text-[#999] hover:text-white'}`}
+            className={`glass-btn-sm text-xs font-medium ${playbackRate !== 1 ? 'text-[#8b82f6]' : 'text-white/60 hover:text-white/80'}`}
             title="播放速度"
           >
             <span className="flex items-center gap-1"><Gauge size={13} />{playbackRate}x</span>
           </button>
-          <AnimatePresence>
-            {speedPopup && (
-              <motion.div
-                className="absolute bottom-full right-0 mb-2 bg-[#0d0d0d] border border-[#1a1a1a] rounded-lg py-2 min-w-[120px] z-30 shadow-2xl"
-                initial={{ opacity: 0, y: 8, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 8, scale: 0.95 }}
-                transition={{ duration: 0.15 }}
-              >
-                {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
-                  <button
-                    key={rate}
-                    onClick={() => { handlePlaybackRateChange(rate); setSpeedPopup(false) }}
-                    className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${playbackRate === rate ? 'text-[#8b82f6] bg-[#8b82f6]/10' : 'text-[#999] hover:bg-[#1a1a1a]'}`}
-                  >
-                    {rate === 1 ? '正常' : `${rate}x`}
-                    {playbackRate === rate && <span className="float-right text-[#8b82f6]">✓</span>}
-                  </button>
-                ))}
-              </motion.div>
-            )}
-          </AnimatePresence>
         </div>
 
         {/* 音量 */}
-        <div className="relative volume-popup">
+        <div className="volume-popup">
           <button
             onClick={() => { setVolumePopup(!volumePopup); setSpeedPopup(false) }}
-            className="w-9 h-9 rounded flex items-center justify-center text-[#999] hover:text-white hover:bg-white/10 transition-colors"
+            className="glass-btn-icon text-white/50 hover:text-white/80"
             title="音量"
           >
             {volume === 0 ? <VolumeX size={17} /> : volume < 50 ? <Volume1 size={17} /> : <Volume2 size={17} />}
           </button>
-          <AnimatePresence>
-            {volumePopup && (
-              <motion.div
-                className="absolute bottom-full right-0 mb-2 bg-[#0d0d0d] border border-[#1a1a1a] rounded-lg p-3 z-30 w-52 shadow-2xl"
-                initial={{ opacity: 0, y: 8, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 8, scale: 0.95 }}
-                transition={{ duration: 0.15 }}
-              >
-                <div className="flex items-center gap-3">
-                  <span className="text-[10px] text-[#666] w-8 text-right">{volume}%</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={volume}
-                    onChange={(e) => {
-                      const v = Number(e.target.value)
-                      setVolume(v)
-                      const video = videoRef.current
-                      if (video) { video.volume = v / 100; video.muted = v === 0 }
-                    }}
-                    className="flex-1 h-1 appearance-none bg-[#333] rounded-full cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:cursor-pointer"
-                  />
-                </div>
-                <div className="flex items-center gap-2 mt-2">
-                  <button
-                    onClick={() => {
-                      const video = videoRef.current; if (!video) return
-                      const muted = !video.muted; video.muted = muted; setVolume(muted ? 0 : Math.round(video.volume * 100))
-                    }}
-                    className="text-[10px] text-[#666] hover:text-white transition-colors"
-                  >
-                    {volume === 0 ? '取消静音' : '静音'}
-                  </button>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
         </div>
 
-        {/* 剧集列表弹窗 */}
-        <AnimatePresence>
-          {episodePopup && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 10 }}
-              className="absolute bottom-full right-0 mb-2 bg-[#1a1a1a]/95 backdrop-blur-md rounded-lg shadow-2xl border border-[#333] p-3 z-50"
-              style={{ maxHeight: '400px', overflowY: 'auto' }}
-            >
-              <div className="flex items-center justify-between mb-2 pb-2 border-b border-[#333]">
-                <span className="text-xs text-[#999] font-medium">剧集列表</span>
-                <button onClick={() => setEpisodePopup(false)} className="text-[#666] hover:text-white transition-colors">
-                  <X size={14} />
-                </button>
-              </div>
-              <div className="grid grid-cols-6 gap-2" style={{ minWidth: '280px' }}>
-                {episodeList.length > 0 ? episodeList.map((ep, idx) => {
-                  const epId = (ep as any).Id || (ep as any).id
-                  const isActive = idx === currentEpisodeIndex
-                  return (
-                    <button
-                      key={epId}
-                      onClick={() => {
-                        handleSwitchEpisode(idx)
-                        setEpisodePopup(false)
-                      }}
-                      className={`text-xs py-1.5 px-2 rounded transition-colors truncate ${
-                        isActive 
-                          ? 'bg-[#8b82f6] text-white' 
-                          : 'bg-[#2a2a2a] text-[#999] hover:bg-[#3a3a3a] hover:text-white'
-                      }`}
-                      title={ep.Name || `第${idx + 1}集`}
-                    >
-                      {idx + 1}
-                    </button>
-                  )
-                }) : folderVideos.map((video, idx) => (
+        {/* 弹幕按钮 */}
+        <button onClick={handleDanmakuToggle} className={`glass-btn-sm text-xs ${danmakuEnabled ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/70'}`} title="弹幕">
+          弹
+        </button>
+        <button onClick={handleOpenDanmakuSearch} className="glass-btn-icon text-white/50 hover:text-white/80" title="搜索弹幕">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </button>
+        <button onClick={() => setSettingsOpen((v) => !v)} className="glass-btn-icon text-white/50 hover:text-white/80" title="弹幕设置">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </button>
+
+        {/* 全屏 */}
+        <button onClick={handleFullscreen} className="glass-btn-icon text-white/50 hover:text-white/80" title="全屏">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+        </button>
+      </div>
+
+      {/* 剧集列表弹窗 — fixed 定位，不受视频 overflow 影响 */}
+      <AnimatePresence>
+        {episodePopup && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 10 }}
+            className="fixed bottom-20 right-4 player-glass-panel p-3 z-50 max-h-[400px] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between mb-2 pb-2 border-b border-white/5">
+              <span className="text-xs text-white/60 font-medium">剧集列表</span>
+              <button onClick={() => setEpisodePopup(false)} className="text-white/40 hover:text-white transition-colors">
+                <X size={14} />
+              </button>
+            </div>
+            <div className="grid grid-cols-6 gap-2" style={{ minWidth: '280px' }}>
+              {episodeList.length > 0 ? episodeList.map((ep, idx) => {
+                const epId = (ep as any).Id || (ep as any).id
+                const isActive = idx === currentEpisodeIndex
+                return (
                   <button
-                    key={video.path}
+                    key={epId}
                     onClick={() => {
                       handleSwitchEpisode(idx)
                       setEpisodePopup(false)
                     }}
                     className={`text-xs py-1.5 px-2 rounded transition-colors truncate ${
-                      idx === currentEpisodeIndex
-                        ? 'bg-[#8b82f6] text-white' 
-                        : 'bg-[#2a2a2a] text-[#999] hover:bg-[#3a3a3a] hover:text-white'
+                      isActive 
+                        ? 'bg-[#8b82f6] text-white shadow-[0_0_12px_rgba(139,130,246,0.3)]' 
+                        : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white/90'
                     }`}
-                    title={video.name}
+                    title={ep.Name || `第${idx + 1}集`}
                   >
                     {idx + 1}
                   </button>
-                ))}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                )
+              }) : folderVideos.map((video, idx) => (
+                <button
+                  key={video.path}
+                  onClick={() => {
+                    handleSwitchEpisode(idx)
+                    setEpisodePopup(false)
+                  }}
+                  className={`text-xs py-1.5 px-2 rounded transition-colors truncate ${
+                    idx === currentEpisodeIndex
+                      ? 'bg-[#8b82f6] text-white shadow-[0_0_12px_rgba(139,130,246,0.3)]' 
+                      : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white/90'
+                  }`}
+                  title={video.name}
+                >
+                  {idx + 1}
+                </button>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-        {/* 弹幕按钮 */}
-        <button onClick={handleDanmakuToggle} className={`text-xs transition-colors ${danmakuEnabled ? 'text-[#8b82f6]' : 'text-[#999] hover:text-white'}`} title="弹幕">
-          弹
-        </button>
-        <button onClick={handleOpenDanmakuSearch} className="text-[#999] hover:text-white transition-colors" title="搜索弹幕">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        </button>
-        <button onClick={() => setSettingsOpen((v) => !v)} className="text-[#999] hover:text-white transition-colors" title="弹幕设置">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-        </button>
+      {/* 倍速弹窗 */}
+      <AnimatePresence>
+        {speedPopup && (
+          <motion.div
+            className="fixed bottom-20 right-4 speed-popup player-glass-panel rounded-lg py-2 min-w-[120px] z-50"
+            initial={{ opacity: 0, y: 8, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.95 }}
+            transition={{ duration: 0.15 }}
+          >
+            {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
+              <button
+                key={rate}
+                onClick={() => { handlePlaybackRateChange(rate); setSpeedPopup(false) }}
+                className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${playbackRate === rate ? 'text-[#8b82f6] bg-white/5' : 'text-white/60 hover:bg-white/5'}`}
+              >
+                {rate === 1 ? '正常' : `${rate}x`}
+                {playbackRate === rate && <span className="float-right text-[#8b82f6]">✓</span>}
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-        {/* 全屏 */}
-        <button onClick={handleFullscreen} className="text-[#999] hover:text-white transition-colors" title="全屏">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
-        </button>
-      </div>
+      {/* 音量弹窗 */}
+      <AnimatePresence>
+        {volumePopup && (
+          <motion.div
+            className="fixed bottom-20 right-4 volume-popup player-glass-panel rounded-lg p-3 z-50 w-52"
+            initial={{ opacity: 0, y: 8, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.95 }}
+            transition={{ duration: 0.15 }}
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] text-white/40 w-8 text-right">{volume}%</span>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={volume}
+                onChange={(e) => {
+                  const v = Number(e.target.value)
+                  setVolume(v)
+                  const video = videoRef.current
+                  if (video) { video.volume = v / 100; video.muted = v === 0 }
+                }}
+                className="flex-1 h-1 appearance-none bg-white/8 rounded-full cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:cursor-pointer"
+              />
+            </div>
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                onClick={() => {
+                  const video = videoRef.current; if (!video) return
+                  const muted = !video.muted; video.muted = muted; setVolume(muted ? 0 : Math.round(video.volume * 100))
+                }}
+                className="text-[10px] text-white/40 hover:text-white/80 transition-colors"
+              >
+                {volume === 0 ? '取消静音' : '静音'}
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

@@ -107,6 +107,14 @@
    基础样式
    ===================================================== */
 
+/* 主题切换全局过渡 */
+:root {
+  color-scheme: light;
+}
+:root.dark {
+  color-scheme: dark;
+}
+
 body {
   color: var(--text-primary);
   font-family: var(--font-system);
@@ -114,6 +122,7 @@ body {
   -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
   margin: 0;
+
 }
 
 html {
@@ -126,25 +135,7 @@ html {
   border-radius: 12px;
   overflow: hidden;
   background: var(--bg-page);
-}
 
-/* 亮色背景渐变 */
-#root {
-  background-image:
-    radial-gradient(ellipse at 10% 40%, rgba(100, 130, 210, 0.22) 0%, transparent 50%),
-    radial-gradient(ellipse at 90% 15%, rgba(180, 140, 220, 0.18) 0%, transparent 45%),
-    radial-gradient(ellipse at 50% 90%, rgba(130, 160, 210, 0.12) 0%, transparent 50%),
-    radial-gradient(ellipse at 60% 30%, rgba(200, 180, 230, 0.10) 0%, transparent 40%);
-}
-
-/* 暗色背景渐变 — 冷光漫反射 */
-.dark #root {
-  background-image:
-    radial-gradient(ellipse 60% 50% at 8% 35%, rgba(40, 70, 160, 0.18) 0%, transparent 100%),
-    radial-gradient(ellipse 50% 60% at 92% 12%, rgba(100, 60, 180, 0.14) 0%, transparent 100%),
-    radial-gradient(ellipse 70% 40% at 50% 85%, rgba(30, 80, 160, 0.10) 0%, transparent 100%),
-    radial-gradient(ellipse 40% 40% at 65% 25%, rgba(80, 100, 180, 0.08) 0%, transparent 100%),
-    radial-gradient(ellipse 30% 30% at 25% 70%, rgba(60, 90, 170, 0.06) 0%, transparent 100%);
 }
 
 /* ── 毛玻璃工具类 ── */
@@ -158,6 +149,7 @@ html {
     box-shadow: var(--glass-shadow), var(--glass-glow, none);
     will-change: backdrop-filter;
     position: relative;
+
   }
 
   .glass-thick {
@@ -168,6 +160,7 @@ html {
     box-shadow: var(--glass-shadow-lg), var(--glass-glow, none);
     will-change: backdrop-filter;
     position: relative;
+
   }
 
   .glass-card {
@@ -398,8 +391,8 @@ input[type="range"] {
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 28px;
-  height: 28px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: #FFFFFF;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15), 0 0 1px rgba(0, 0, 0, 0.12);
@@ -408,7 +401,7 @@ input[type="range"]::-webkit-slider-thumb {
   border: 0.5px solid rgba(0, 0, 0, 0.08);
 }
 input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.08);
+  transform: scale(1.12);
 }
 input[type="range"]::-webkit-slider-thumb:active {
   transform: scale(0.95);
@@ -712,4 +705,140 @@ input[type="range"]::-webkit-slider-thumb:active {
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
   border-radius: var(--radius-sm);
+}
+
+/* =====================================================
+   播放器 毛玻璃面板 (深色兼容)
+   ===================================================== */
+
+/* 控制栏 — 深色磨砂底 */
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .player-glass-bar {
+    background: rgba(12, 12, 20, 0.72);
+    backdrop-filter: blur(32px) saturate(180%);
+    -webkit-backdrop-filter: blur(32px) saturate(180%);
+    border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+    will-change: backdrop-filter;
+    contain: layout paint style;
+  }
+
+  .player-glass-panel {
+    background:
+      linear-gradient(
+        135deg,
+        rgba(120, 150, 220, 0.06) 0%,
+        transparent 40%,
+        transparent 60%,
+        rgba(100, 80, 180, 0.04) 100%
+      ),
+      rgba(18, 18, 28, 0.72);
+    backdrop-filter: blur(28px) saturate(170%);
+    -webkit-backdrop-filter: blur(28px) saturate(170%);
+    border: 0.5px solid rgba(255, 255, 255, 0.10);
+    border-radius: var(--radius-lg);
+    box-shadow:
+      0 8px 32px rgba(0, 0, 0, 0.40),
+      0 0 1px rgba(255, 255, 255, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    will-change: backdrop-filter;
+  }
+
+  .player-glass-panel > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .player-glass-toast {
+    background: rgba(12, 12, 24, 0.75);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    border: 0.5px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-md);
+    box-shadow:
+      0 4px 20px rgba(0, 0, 0, 0.30),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    will-change: backdrop-filter;
+  }
+
+  .player-glass-badge {
+    background: rgba(10, 10, 20, 0.68);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    border: 0.5px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-xs);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.20);
+  }
+
+  .player-glass-btn {
+    background: rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 0.5px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-sm);
+    transition: background 0.18s ease, transform 0.15s ease;
+  }
+  .player-glass-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+  }
+  .player-glass-btn:active {
+    transform: scale(0.95);
+    background: rgba(255, 255, 255, 0.08);
+  }
+}
+
+/* 无 backdrop-filter 回退 */
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .player-glass-bar { background: rgba(8, 8, 14, 0.96); }
+  .player-glass-panel { background: rgba(12, 12, 20, 0.96); border: 1px solid rgba(255,255,255,0.06); }
+  .player-glass-toast { background: rgba(10, 10, 20, 0.94); border: 1px solid rgba(255,255,255,0.08); }
+  .player-glass-badge { background: rgba(8, 8, 16, 0.92); border: 1px solid rgba(255,255,255,0.06); }
+  .player-glass-btn { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); }
+}
+
+/* =====================================================
+   通用玻璃按钮
+   ===================================================== */
+
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .glass-btn {
+    background: var(--glass-bg);
+    backdrop-filter: blur(16px) saturate(150%);
+    -webkit-backdrop-filter: blur(16px) saturate(150%);
+    border: 0.5px solid var(--glass-border);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--glass-shadow), 0 0 0 0.5px rgba(255,255,255,0.04);
+    will-change: backdrop-filter;
+    contain: layout paint style;
+  }
+  .glass-btn:hover {
+    background: var(--glass-bg-thick);
+    box-shadow: var(--glass-shadow-lg), 0 0 0 0.5px rgba(255,255,255,0.08);
+  }
+  .glass-btn:active {
+    transform: scale(0.96);
+    box-shadow: var(--glass-shadow);
+  }
+
+  .glass-btn-sm {
+    backdrop-filter: blur(12px) saturate(140%);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    border-radius: var(--radius-md);
+    padding: 6px 14px;
+    font-size: 13px;
+  }
+
+  .glass-btn-icon {
+    backdrop-filter: blur(10px) saturate(130%);
+    -webkit-backdrop-filter: blur(10px) saturate(130%);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .glass-btn { background: var(--bg-elevated); border: 1px solid var(--separator); border-radius: var(--radius-xl); }
+  .glass-btn-sm { border-radius: var(--radius-md); }
+  .glass-btn-icon { border-radius: 50%; }
 }

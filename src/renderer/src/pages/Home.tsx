@@ -242,6 +242,9 @@ function Home(): ReactElement {
   const [searchLoading, setSearchLoading] = useState(false)
   const [isSearching, setIsSearching] = useState(false)
 
+  // 分类快捷跳转（使用 Jellyfin 媒体库分类）
+  const [activeLibrary, setActiveLibrary] = useState('')
+
   const searchInputRef = useRef<HTMLInputElement>(null)
 
   const isFolderItem = (item: MediaItem): boolean => {
@@ -431,6 +434,17 @@ function Home(): ReactElement {
     setSearchQuery('')
     setSearchResults([])
     setIsSearching(false)
+    setDrillStack([])
+  }
+
+  const handleLibraryClick = (libId: string): void => {
+    if (activeLibrary === libId) {
+      setActiveLibrary('')
+      return
+    }
+    setActiveLibrary(libId)
+    setIsSearching(false)
+    setSearchResults([])
     setDrillStack([])
   }
 
@@ -627,7 +641,7 @@ function Home(): ReactElement {
             />
             <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
               {isSearching && (
-                <button onClick={handleClearSearch} className="px-2.5 py-1 text-[13px] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors rounded-lg hover:bg-[var(--bg-hover)]">
+                <button onClick={handleClearSearch} className="glass-btn-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
                   清空
                 </button>
               )}
@@ -704,6 +718,66 @@ function Home(): ReactElement {
         </div>
         </div>
 
+        {/* 分类快捷跳转 — Jellyfin 媒体库 */}
+        {!isSearching && drillStack.length === 0 && libraries.length > 0 && (
+          <div className="mb-8">
+            <div className="flex gap-2 overflow-x-auto pt-1 pb-2">
+              {libraries.filter(lib => {
+                const t = lib.CollectionType
+                // 显示影视类库：有明确媒体类型 + 无类型的自定义库，排除合集/书籍/音乐等
+                return !t || ['movies', 'tvshows', 'mixed', 'homevideos'].includes(t)
+              }).map((lib) => (
+                <motion.button
+                  key={lib.Id}
+                  onClick={() => handleLibraryClick(lib.Id)}
+                  className={`flex-shrink-0 px-4 py-2 rounded-full text-[13px] font-medium transition-all duration-200 ${
+                    activeLibrary === lib.Id
+                      ? 'bg-[var(--accent)] text-white shadow-[0_2px_8px_rgba(0,122,255,0.3)]'
+                      : 'bg-[var(--bg-grouped)] text-[var(--text-secondary)] border border-[var(--separator)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
+                  }`}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  {lib.Name}
+                </motion.button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 分类内容 */}
+        {!isSearching && activeLibrary && (() => {
+          const items = libraryItems[activeLibrary] || []
+          const activeLib = libraries.find(l => l.Id === activeLibrary)
+          return (
+            <section className="mb-12">
+              <div className="flex items-center gap-2 mb-4">
+                <button onClick={() => setActiveLibrary('')} className="flex items-center gap-1 text-[var(--accent)] hover:text-[var(--accent-light)]">
+                  <ArrowLeft size={14} /> 返回全部
+                </button>
+                <span className="text-[13px] text-[var(--text-tertiary)]">
+                  {activeLib?.Name || activeLibrary} — {items.length} 部
+                </span>
+              </div>
+              {items.length === 0 ? (
+                <p className="text-[15px] text-[var(--text-tertiary)] py-20 text-center">该分类暂无内容</p>
+              ) : (
+                <div className="responsive-grid">
+                  {items.map((item) => (
+                    <MediaCard
+                      key={item.Id}
+                      item={item}
+                      posterUrl={getPosterUrl(item)}
+                      displayName={item.Name}
+                      communityRating={item.CommunityRating}
+                      onClick={() => handleItemClick(item)}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          )
+        })()}
+
         {/* 搜索结果 */}
         {isSearching && !currentDrill && (
           <section className="mb-12">
@@ -775,7 +849,7 @@ function Home(): ReactElement {
         )}
 
         {/* 快捷操作 */}
-        {!isSearching && drillStack.length === 0 && (
+        {!isSearching && !activeLibrary && drillStack.length === 0 && (
           <div className="flex gap-3 mb-12">
             <motion.button
               onClick={async () => {
@@ -816,7 +890,7 @@ function Home(): ReactElement {
         )}
 
         {/* 播放历史 */}
-        {!isSearching && drillStack.length === 0 && (pageState === 'ready' || pageState === 'empty') && (
+        {!isSearching && !activeLibrary && drillStack.length === 0 && (pageState === 'ready' || pageState === 'empty') && (
           <section className="mb-12">
             <div className="flex items-center justify-between mb-4">
               <h2 className="section-title flex items-center gap-2">
@@ -859,7 +933,7 @@ function Home(): ReactElement {
         )}
 
         {/* Drill-down 子集 */}
-        {!isSearching && !drillLoading && currentDrill && (
+        {!isSearching && !activeLibrary && !drillLoading && currentDrill && (
           <section className="mb-12">
             {currentDrill.items.length === 0 ? (
               <p className="text-[15px] text-[var(--text-tertiary)] py-20 text-center">此文件夹中暂无内容</p>
@@ -887,7 +961,7 @@ function Home(): ReactElement {
         )}
 
         {/* 空媒体库 */}
-        {!isSearching && !drillLoading && !currentDrill && pageState === 'empty' && (
+        {!isSearching && !activeLibrary && !drillLoading && !currentDrill && pageState === 'empty' && (
           <div className="text-center py-20">
             <p className="text-[15px] text-[var(--text-tertiary)] mb-4">
               {libraries.length > 0 ? '媒体库中没有找到视频文件' : 'Jellyfin 服务器上没有配置媒体库'}
@@ -897,7 +971,7 @@ function Home(): ReactElement {
         )}
 
         {/* 媒体库内容 */}
-        {!isSearching && !drillLoading && !currentDrill && pageState === 'ready' &&
+        {!isSearching && !activeLibrary && !drillLoading && !currentDrill && pageState === 'ready' &&
           libraries.map((lib) => {
             const items = libraryItems[lib.Id] || []
             if (items.length === 0) return null

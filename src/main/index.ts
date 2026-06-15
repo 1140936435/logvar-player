@@ -21,6 +21,15 @@ import * as http from 'http'
 import * as https from 'https'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
+// ==================== 资源路径工具 ====================
+
+function getResourcePath(relativePath: string): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, relativePath)
+  }
+  return join(__dirname, '../../', relativePath)
+}
+
 // ==================== 日志系统 ====================
 
 interface LogEntry {
@@ -121,7 +130,7 @@ function getLogWindow(): BrowserWindow {
     height: 600,
     minWidth: 500,
     minHeight: 300,
-    title: '慢播 - 日志',
+    title: 'mplay - 日志',
     backgroundColor: '#0d0d0d',
     show: false,
     webPreferences: {
@@ -675,6 +684,37 @@ ipcMain.handle('jellyfin:get-episodes', async (_event, seriesId: string, seasonI
   }
 })
 
+ipcMain.handle('jellyfin:get-genres', async () => {
+  try {
+    if (!jellyfinAuth) return { success: false, error: '未连接 Jellyfin' }
+    const result = await jellyfinRequest<{ Items?: Array<{ Id: string; Name: string }> }>(
+      jellyfinAuth, '/Genres?userId=' + jellyfinAuth.userId
+    )
+    return { success: true, data: result.Items || [] }
+  } catch (err) {
+    console.error('jellyfin:get-genres failed:', err)
+    return { success: false, error: String(err) }
+  }
+})
+
+ipcMain.handle('jellyfin:get-genre-items', async (_event, genre: string, startIndex?: number) => {
+  try {
+    if (!jellyfinAuth) return { success: false, error: '未连接 Jellyfin' }
+    const baseUrl = normalizeUrl(jellyfinAuth.url)
+    const url = `${baseUrl}/Items?userId=${jellyfinAuth.userId}&genres=${encodeURIComponent(genre)}&recursive=true&includeItemTypes=Movie,Series&sortBy=SortName&startIndex=${startIndex || 0}&limit=50`
+    console.log(`[jellyfin:get-genre-items] GET ${url}`)
+    const response = await fetch(url, { headers: buildJellyfinHeaders(jellyfinAuth.token) })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const buffer = await response.arrayBuffer()
+    const text = new TextDecoder('utf-8').decode(buffer)
+    const data = JSON.parse(text)
+    return { success: true, data: { Items: data.Items || [], TotalRecordCount: data.TotalRecordCount || 0 } }
+  } catch (err) {
+    console.error('jellyfin:get-genre-items failed:', err)
+    return { success: false, error: String(err) }
+  }
+})
+
 // ==================== IPC: Store ====================
 
 // ==================== 敏感数据加密（safeStorage） ====================
@@ -1129,7 +1169,7 @@ ipcMain.handle('danmaku:test-api', async (_event, url: string) => {
       {
         headers: {
           'Accept': 'application/json',
-          'User-Agent': 'LogVarPlayer/1.0 (Electron)'
+          'User-Agent': 'mplay/1.0 (Electron)'
         }
       }
     )
@@ -1259,7 +1299,7 @@ async function dandanRequest<T>(path: string, retries = 2): Promise<T> {
         const response = await nodeFetch(url, {
           headers: {
             'Accept': 'application/json',
-            'User-Agent': 'LogVarPlayer/1.0 (Electron)'
+            'User-Agent': 'mplay/1.0 (Electron)'
           },
           timeoutMs: 15000
         })
@@ -1363,7 +1403,7 @@ async function bilibiliAutoMatch(title: string): Promise<{
     `https://api.bilibili.com/x/web-interface/wbi/search/type?search_type=media_bangumi&keyword=${encodeURIComponent(searchKey)}`,
     {
       headers: {
-        'User-Agent': 'LogVarPlayer/1.0',
+        'User-Agent': 'mplay/1.0',
         'Referer': 'https://www.bilibili.com/',
         'Accept': 'application/json'
       }
@@ -1390,7 +1430,7 @@ async function bilibiliAutoMatch(title: string): Promise<{
     `https://api.bilibili.com/pgc/web/season/section?season_id=${seasonId}`,
     {
       headers: {
-        'User-Agent': 'LogVarPlayer/1.0',
+        'User-Agent': 'mplay/1.0',
         'Referer': 'https://www.bilibili.com/'
       }
     }
@@ -1468,7 +1508,7 @@ ipcMain.handle('danmaku:bilibili-comments', async (_event, cid: number) => {
 
     const response = await nodeFetch(`https://comment.bilibili.com/${cid}.xml`, {
       headers: {
-        'User-Agent': 'LogVarPlayer/1.0',
+        'User-Agent': 'mplay/1.0',
         'Referer': 'https://www.bilibili.com/'
       }
     })
@@ -1715,7 +1755,7 @@ ipcMain.handle('danmaku:get-comments', async (_event, episodeId: string, source?
       }
       const response = await nodeFetch(`https://comment.bilibili.com/${cid}.xml`, {
         headers: {
-          'User-Agent': 'LogVarPlayer/1.0',
+          'User-Agent': 'mplay/1.0',
           'Referer': 'https://www.bilibili.com/'
         }
       })
@@ -1927,7 +1967,7 @@ function createWindow(): void {
     height: 800,
     minWidth: 900,
     minHeight: 600,
-    icon: join(__dirname, '../../build/icon.png'),
+    icon: getResourcePath('build/icon.png'),
     show: false,
     transparent: true,
     frame: false,
@@ -1972,7 +2012,13 @@ function createWindow(): void {
 }
 
 function createTray(): void {
-  const icon = nativeImage.createEmpty()
+  const iconPath = getResourcePath('build/icon-32.png')
+  let icon = nativeImage.createFromPath(iconPath)
+  if (icon.isEmpty()) {
+    // fallback to 256px and resize
+    icon = nativeImage.createFromPath(getResourcePath('build/icon.png'))
+    icon = icon.resize({ width: 32, height: 32 })
+  }
   tray = new Tray(icon)
 
   const contextMenu = Menu.buildFromTemplate([
@@ -1998,7 +2044,7 @@ function createTray(): void {
     }
   ])
 
-  tray.setToolTip('慢播')
+  tray.setToolTip('mplay')
   tray.setContextMenu(contextMenu)
 
   tray.on('double-click', () => {
@@ -2012,7 +2058,7 @@ function createTray(): void {
 // ==================== 应用生命周期 ====================
 
 app.whenReady().then(() => {
-  electronApp.setAppUserModelId('com.logvar.player')
+  electronApp.setAppUserModelId('com.mplay.player')
 
   // 注册 local-file 协议
   registerLocalFileProtocol()

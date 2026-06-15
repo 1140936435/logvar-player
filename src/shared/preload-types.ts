@@ -173,6 +173,8 @@ export interface Api {
     reportProgress: (itemId: string, position: number, isPaused: boolean) => Promise<ApiResponse<void>>
     toggleFavorite: (itemId: string) => Promise<ApiResponse<void>>
     getEpisodes: (seriesId: string, seasonId?: string) => Promise<JellyfinItemsResponse>
+    getGenres: () => Promise<ApiResponse<Array<{ Id: string; Name: string }>>>
+    getGenreItems: (genre: string, startIndex?: number) => Promise<JellyfinItemsResponse>
   }
 
   danmaku: {

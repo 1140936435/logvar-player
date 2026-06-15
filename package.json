@@ -1,9 +1,9 @@
 {
-  "name": "logvar-player",
+  "name": "mplay",
   "version": "1.0.0",
-  "description": "慢播 - Jellyfin + 本地文件 + 弹幕",
+  "description": "mplay - Jellyfin + 本地文件 + 弹幕",
   "main": "./out/main/index.js",
-  "author": "慢播",
+  "author": "mplay",
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",

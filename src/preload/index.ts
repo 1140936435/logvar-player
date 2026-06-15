@@ -42,7 +42,10 @@ const api: Api = {
       ipcRenderer.invoke('jellyfin:report-progress', itemId, position, isPaused),
     toggleFavorite: (itemId: string) => ipcRenderer.invoke('jellyfin:toggle-favorite', itemId),
     getEpisodes: (seriesId: string, seasonId?: string) =>
-      ipcRenderer.invoke('jellyfin:get-episodes', seriesId, seasonId)
+      ipcRenderer.invoke('jellyfin:get-episodes', seriesId, seasonId),
+    getGenres: () => ipcRenderer.invoke('jellyfin:get-genres'),
+    getGenreItems: (genre: string, startIndex?: number) =>
+      ipcRenderer.invoke('jellyfin:get-genre-items', genre, startIndex)
   },
 
   // 豆瓣评分
