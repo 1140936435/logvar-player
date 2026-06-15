@@ -66,6 +66,10 @@ class DanmakuEngine {
     this.comments = sorted.slice(0, this.maxCount)
   }
 
+  getCommentCount(): number {
+    return this.comments.length
+  }
+
   clear(): void {
     this.comments = []
     this.active = []
@@ -503,10 +507,12 @@ function Player(): JSX.Element {
     window.api.store.set('danmakuSmartMode', next)
     if (next && engineRef.current) {
       // 自动调节为当前弹幕数的 60%
-      const smartCount = Math.max(50, Math.min(500, Math.floor(engineRef.current.comments.length * 0.6)))
+      const total = engineRef.current.getCommentCount()
+      const smartCount = Math.max(50, Math.min(500, Math.floor(total * 0.6)))
       setDanmakuMaxCount(smartCount)
       engineRef.current.setMaxCount(smartCount)
       engineRef.current.setTimeDensity(20)
+      console.log('[Danmaku] Smart mode: total=%d, smartCount=%d', total, smartCount)
     } else {
       engineRef.current?.setMaxCount(danmakuMaxCount)
       engineRef.current?.setTimeDensity(danmakuTimeDensity)
