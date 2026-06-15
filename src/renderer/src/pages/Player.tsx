@@ -355,8 +355,8 @@ function Player(): JSX.Element {
   const [danmakuSpeed, setDanmakuSpeed] = useState(120)
   const [danmakuArea, setDanmakuArea] = useState<'full' | 'top' | 'bottom'>('full')
   const [danmakuMaxCount, setDanmakuMaxCount] = useState(300)
-  const [danmakuSmartMode, setDanmakuSmartMode] = useState(false)
-  const [danmakuTimeDensity, setDanmakuTimeDensity] = useState(20) // 每秒最多显示条数
+  // const [danmakuSmartMode, setDanmakuSmartMode] = useState(false) // removed
+  // const [danmakuTimeDensity, setDanmakuTimeDensity] = useState(20) // removed // 每秒最多显示条数
 
   const [playbackRate, setPlaybackRate] = useState(1)
   const [speedToast, setSpeedToast] = useState('')
@@ -500,31 +500,12 @@ function Player(): JSX.Element {
   const handleSpeedChange = (value: number): void => { setDanmakuSpeed(value); engineRef.current?.setSpeed(value); window.api.store.set('danmakuSpeed', value) }
   const handleAreaChange = (area: 'full' | 'top' | 'bottom'): void => { setDanmakuArea(area); engineRef.current?.setDisplayArea(area); window.api.store.set('danmakuArea', area) }
 
-  // 智能密度控制
-  const handleSmartModeToggle = (): void => {
-    const next = !danmakuSmartMode
-    setDanmakuSmartMode(next)
-    window.api.store.set('danmakuSmartMode', next)
-    if (next && engineRef.current) {
-      // 自动调节为当前弹幕数的 60%
-      const total = engineRef.current.getCommentCount()
-      const smartCount = Math.max(50, Math.min(500, Math.floor(total * 0.6)))
-      setDanmakuMaxCount(smartCount)
-      engineRef.current.setMaxCount(smartCount)
-      engineRef.current.setTimeDensity(20)
-      console.log('[Danmaku] Smart mode: total=%d, smartCount=%d', total, smartCount)
-    } else {
-      engineRef.current?.setMaxCount(danmakuMaxCount)
-      engineRef.current?.setTimeDensity(danmakuTimeDensity)
-    }
-  }
-
-  const handleMaxCountChange = (value: number): void => {
+  // 弹幕密度控制 - 简单滑块
+  const handleDensityChange = (value: number): void => {
     setDanmakuMaxCount(value)
     window.api.store.set('danmakuMaxCount', value)
-    if (engineRef.current && !danmakuSmartMode) {
+    if (engineRef.current) {
       engineRef.current.setMaxCount(value)
-      engineRef.current.setTimeDensity(danmakuTimeDensity)
     }
   }
 
