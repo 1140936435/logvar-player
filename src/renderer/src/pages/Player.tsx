@@ -527,6 +527,15 @@ function Player(): JSX.Element {
     setSearchLoading(false)
   }
 
+  // 打开弹幕搜索并自动填入影片名
+  const handleOpenDanmakuSearch = (): void => {
+    const searchTitle = seriesName || (localFile ? extractSeriesNameFromFilename(localFile.split(/[/\\]/).pop() || itemName) || itemName : itemName)
+    setSearchKeyword(searchTitle)
+    setSearchOpen(true)
+    // 自动触发搜索
+    handleDanmakuSearch()
+  }
+
   const handleDanmakuSelect = async (ep: DanmakuSearchResult): Promise<void> => {
     setSearchOpen(false); setSearchResults([]); setDanmakuLoading(true); setDanmakuError('')
     try {
@@ -919,7 +928,7 @@ function Player(): JSX.Element {
             ))}
             <div className="border-t border-[#1a1a1a] my-0.5" />
             <button onClick={() => { handleDanmakuToggle(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white hover:bg-[#1a1a1a] transition-colors">{danmakuEnabled ? '关闭弹幕' : '开启弹幕'}</button>
-            <button onClick={() => { setSearchOpen(true); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white hover:bg-[#1a1a1a] transition-colors">搜索弹幕</button>
+            <button onClick={() => { handleOpenDanmakuSearch(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white hover:bg-[#1a1a1a] transition-colors">搜索弹幕</button>
             <button onClick={() => { handleLoadLocalXml(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white hover:bg-[#1a1a1a] transition-colors">加载本地弹幕</button>
           </div>
         </>
@@ -1157,7 +1166,7 @@ function Player(): JSX.Element {
         <button onClick={handleDanmakuToggle} className={`text-xs transition-colors ${danmakuEnabled ? 'text-[#8b82f6]' : 'text-[#999] hover:text-white'}`} title="弹幕">
           弹
         </button>
-        <button onClick={() => setSearchOpen(true)} className="text-[#999] hover:text-white transition-colors" title="搜索弹幕">
+        <button onClick={handleOpenDanmakuSearch} className="text-[#999] hover:text-white transition-colors" title="搜索弹幕">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         </button>
         <button onClick={() => setSettingsOpen((v) => !v)} className="text-[#999] hover:text-white transition-colors" title="弹幕设置">
