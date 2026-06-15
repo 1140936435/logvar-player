@@ -817,8 +817,8 @@ function Player(): JSX.Element {
             <div className="w-3 h-3 border border-[#8b82f6] border-t-transparent rounded-full animate-spin" />匹配弹幕
           </div>
         )}
-        {danmakuCount > 0 && !danmakuLoading && (
-          <div className={`absolute top-4 right-4 bg-black/70 px-2 py-1 rounded text-[10px] text-[#666] z-20 transition-opacity duration-500 ${danmakuCountVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>{danmakuCount} 条弹幕</div>
+        {currentDanmakuCount > 0 && !danmakuLoading && (
+          <div className={`absolute top-4 right-4 bg-black/70 px-2 py-1 rounded text-[10px] text-[#666] z-20 transition-opacity duration-500 ${danmakuCountVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>{currentDanmakuCount} 条弹幕</div>
         )}
 
         {/* 倍速提示 */}
