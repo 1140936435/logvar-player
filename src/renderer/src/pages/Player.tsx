@@ -115,7 +115,8 @@ class DanmakuEngine {
       // 新的一秒，重置计数
       this.addedThisSecond = 0
       this.lastAddTime = now
-    } else if (this.addedThisSecond >= this.timeDensity) {
+    }
+    if (this.addedThisSecond >= this.timeDensity) {
       // 超过每秒限制，跳过此弹幕
       return
     }
@@ -493,6 +494,34 @@ function Player(): JSX.Element {
   const handleFontSizeChange = (value: number): void => { setDanmakuFontSize(value); engineRef.current?.setFontSize(value); window.api.store.set('danmakuFontSize', value) }
   const handleSpeedChange = (value: number): void => { setDanmakuSpeed(value); engineRef.current?.setSpeed(value); window.api.store.set('danmakuSpeed', value) }
   const handleAreaChange = (area: 'full' | 'top' | 'bottom'): void => { setDanmakuArea(area); engineRef.current?.setDisplayArea(area); window.api.store.set('danmakuArea', area) }
+
+  // 智能密度控制
+  const handleSmartModeToggle = (): void => {
+    const next = !danmakuSmartMode
+    setDanmakuSmartMode(next)
+    window.api.store.set('danmakuSmartMode', next)
+    if (next && engineRef.current) {
+      // 自动调节为当前弹幕数的 60%
+      const smartCount = Math.max(50, Math.min(500, Math.floor(engineRef.current.comments.length * 0.6)))
+      setDanmakuMaxCount(smartCount)
+      engineRef.current.setMaxCount(smartCount)
+      engineRef.current.setTimeDensity(20)
+    } else {
+      engineRef.current?.setMaxCount(danmakuMaxCount)
+      engineRef.current?.setTimeDensity(danmakuTimeDensity)
+    }
+  }
+
+  const handleMaxCountChange = (value: number): void => {
+    setDanmakuMaxCount(value)
+    window.api.store.set('danmakuMaxCount', value)
+    if (engineRef.current && !danmakuSmartMode) {
+      engineRef.current.setMaxCount(value)
+      engineRef.current.setTimeDensity(danmakuTimeDensity)
+    }
+  }
+
+  const danmakuEngine = engineRef.current
 
   const handleDanmakuSearch = async (): Promise<void> => {
     if (!searchKeyword.trim()) return; setSearchLoading(true)

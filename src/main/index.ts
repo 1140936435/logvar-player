@@ -1085,8 +1085,6 @@ ipcMain.handle('file:scan-folder', async (_event, folderPath: string) => {
 
 ipcMain.handle('file:get-url', async (_event, filePath: string) => {
   try {
-    // 使用 pathToFileURL 处理 Windows 路径
-    const { pathToFileURL } = require('url')
     const url = pathToFileURL(filePath).toString()
     return { success: true, data: { url } }
   } catch (err) {

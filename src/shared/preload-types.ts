@@ -192,6 +192,7 @@ export interface Api {
     openFile: () => Promise<OpenFileResponse>
     openFolder: () => Promise<OpenFolderResponse>
     scanFolder: (folderPath: string) => Promise<ScanFolderResponse>
+    getLocalFileUrl: (filePath: string) => Promise<ApiResponse<{ url: string }>>
   }
 
   server: {
