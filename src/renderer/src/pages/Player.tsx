@@ -168,8 +168,9 @@ class DanmakuEngine {
   }
 
   update(videoTime: number): void {
-    if (this.comments.length === 0 || !this.enabled) return
+    if (this.allComments.length === 0 || !this.enabled) return
 
+    // 从 allComments 中取出应该显示的弹幕
     while (this.comments.length > 0 && this.comments[0].time <= videoTime) {
       const c = this.comments.shift()!
       this.addComment(c, videoTime)
