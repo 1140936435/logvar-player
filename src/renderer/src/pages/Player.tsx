@@ -874,63 +874,22 @@ function Player(): JSX.Element {
               <input type="range" min="60" max="300" step="10" value={danmakuSpeed} onChange={(e) => handleSpeedChange(parseInt(e.target.value))} className="w-full" />
             </div>
             <div>
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-[10px] text-[#666]">智能密度</span>
-                <button
-                  onClick={handleSmartModeToggle}
-                  className={`relative w-10 h-5 rounded-full transition-colors ${danmakuSmartMode ? 'bg-[#8b82f6]' : 'bg-[#333]'}`}
-                >
-                  <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${danmakuSmartMode ? 'left-5' : 'left-0.5'}`} />
-                </button>
-              </div>
-              {danmakuSmartMode && (
-                <div className="mb-3 px-2 py-1.5 bg-[#1a1a1a] rounded text-[9px] text-[#8b82f6]">
-                  已自动调节为 {danmakuMaxCount} 条（共 {currentDanmakuCount} 条）
-                </div>
-              )}
-              {!danmakuSmartMode && (
-                <>
-                  <div className="flex justify-between text-[10px] text-[#666] mb-1.5">
-                    <span>弹幕密度</span>
-                    <span>{danmakuMaxCount} 条</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="50"
-                    max="500"
-                    step="50"
-                    value={danmakuMaxCount}
-                    onChange={(e) => handleMaxCountChange(parseInt(e.target.value))}
-                    className="w-full"
-                  />
-                  <div className="flex justify-between text-[9px] text-[#555] mt-1">
-                    <span>稀疏 (50)</span>
-                    <span>密集 (500)</span>
-                  </div>
-                </>
-              )}
-            </div>
-            <div>
               <div className="flex justify-between text-[10px] text-[#666] mb-1.5">
-                <span>时间密度</span>
-                <span>{danmakuTimeDensity} 条/秒</span>
+                <span>弹幕密度</span>
+                <span>{danmakuMaxCount} 条</span>
               </div>
               <input
                 type="range"
-                min="5"
-                max="50"
-                step="5"
-                value={danmakuTimeDensity}
-                onChange={(e) => {
-                  const val = parseInt(e.target.value)
-                  setDanmakuTimeDensity(val)
-                  danmakuEngine?.setTimeDensity(val)
-                }}
+                min="50"
+                max="500"
+                step="50"
+                value={danmakuMaxCount}
+                onChange={(e) => handleDensityChange(parseInt(e.target.value))}
                 className="w-full"
               />
               <div className="flex justify-between text-[9px] text-[#555] mt-1">
-                <span>流畅 (5)</span>
-                <span>密集 (50)</span>
+                <span>稀疏 (50)</span>
+                <span>密集 (500)</span>
               </div>
             </div>
             <div>
