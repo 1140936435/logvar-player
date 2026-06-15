@@ -607,7 +607,7 @@ function Player(): JSX.Element {
     const onTimeUpdate = (): void => {
       setCurrentTime(video.currentTime)
       if (video.buffered.length > 0) setBuffered(video.buffered.end(video.buffered.length - 1))
-      if (danmakuEnabled && engineRef.current) engineRef.current.update(video.currentTime)
+      // danmaku update is handled in the RAF loop below
     }
     const onWaiting = (): void => setLoading(true)
     const onCanPlay = (): void => setLoading(false)
