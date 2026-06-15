@@ -94,6 +94,18 @@ class DanmakuEngine {
 
   setMaxCount(count: number): void {
     this.maxCount = Math.max(50, Math.min(500, count))
+    // 重新过滤弹幕，应用新的密度限制
+    if (this.comments.length > 0) {
+      // 保留原始弹幕引用，重新 slice
+      const allComments = this.comments
+      this.comments = allComments.slice(0, this.maxCount)
+      // 重置活跃弹幕和轨道占用，让弹幕重新开始显示
+      this.active = []
+      this.trackOccupied = new Array(DANMAKU_TRACK_COUNT).fill(0)
+      this.lastTime = 0
+      this.addedThisSecond = 0
+      this.lastAddTime = 0
+    }
   }
 
   setTimeDensity(density: number): void {
@@ -427,14 +439,34 @@ function Player(): JSX.Element {
       try {
         const enabled = await window.api.store.get('danmakuEnabled')
         if (enabled !== null) setDanmakuEnabled(!!enabled)
-        const opacity = await window.api.store.get('danmakuOpacity')
-        if (opacity !== null) { setDanmakuOpacity(Number(opacity)); engineRef.current?.setOpacity(Number(opacity)) }
+        const opacityRaw = await window.api.store.get('danmakuOpacity')
+        if (opacityRaw !== null) {
+          const v = Number(opacityRaw)
+          const opacity = v > 1 ? v / 100 : v
+          setDanmakuOpacity(opacity)
+          engineRef.current?.setOpacity(opacity)
+        }
         const fontSize = await window.api.store.get('danmakuFontSize')
         if (fontSize !== null) { setDanmakuFontSize(Number(fontSize)); engineRef.current?.setFontSize(Number(fontSize)) }
-        const speed = await window.api.store.get('danmakuSpeed')
+        let speed = await window.api.store.get('danmakuSpeed')
+        if (speed === null) {
+          const legacySpeed = await window.api.store.get('danmakuScrollSpeed')
+          if (legacySpeed === 'slow') speed = 90
+          else if (legacySpeed === 'fast') speed = 180
+          else if (legacySpeed === 'medium') speed = 120
+        }
         if (speed !== null) { setDanmakuSpeed(Number(speed)); engineRef.current?.setSpeed(Number(speed)) }
-        const area = await window.api.store.get('danmakuArea')
+        let area = await window.api.store.get('danmakuArea')
+        if (area === null) {
+          const legacyArea = await window.api.store.get('danmakuDisplayArea')
+          if (legacyArea !== null) {
+            const pct = Number(legacyArea)
+            area = pct <= 40 ? 'top' : pct >= 80 ? 'full' : 'bottom'
+          }
+        }
         if (area !== null) { setDanmakuArea(area as 'full' | 'top' | 'bottom'); engineRef.current?.setDisplayArea(area as 'full' | 'top' | 'bottom') }
+        const maxCount = await window.api.store.get('danmakuMaxCount')
+        if (maxCount !== null) { setDanmakuMaxCount(Number(maxCount)); engineRef.current?.setMaxCount(Number(maxCount)) }
       } catch (err) { /* ignore */ }
     }
     loadSettings()
@@ -447,6 +479,8 @@ function Player(): JSX.Element {
   useEffect(() => {
     // 只要有 localFile 或 seriesName 就尝试加载弹幕，itemName 可以是未知视频
     if (!localFile && !seriesName && (!itemName || itemName === '未知视频')) return
+    engineRef.current?.clear()
+    setCurrentDanmakuCount(0)
     setDanmakuLoading(true)
     setDanmakuError('')
 
@@ -486,7 +520,7 @@ function Player(): JSX.Element {
         }).catch(() => setDanmakuError('获取弹幕失败')).finally(() => setDanmakuLoading(false))
       }).catch(() => { setDanmakuError('自动匹配失败'); setDanmakuLoading(false) })
     }
-  }, [itemName, localFile])
+  }, [itemId, itemName, localFile, seriesName])
 
   const handleDanmakuToggle = (): void => {
     const next = !danmakuEnabled; setDanmakuEnabled(next)

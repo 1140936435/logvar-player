@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, type ReactElement } from 'react'
 import type { ServerConfig as ApiServerConfig, ServerInfo, ServerTestResult as ApiServerTestResult } from '../../shared/preload-types'
+import type { JellyfinServerInfo } from '../../shared/types'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Database, Plug, WifiOff, Save, Loader2, CheckCircle,
@@ -17,12 +18,6 @@ interface DanmakuTestResult {
   elapsed: number
   animeCount?: number
   epCount?: number
-}
-
-interface JellyfinServerInfo {
-  ServerName?: string
-  Version?: string
-  Id?: string
 }
 
 type ServerConfig = ApiServerConfig
@@ -159,9 +154,9 @@ function Settings(): ReactElement {
 
   // 弹幕显示
   const [fontSize, setFontSize] = useState(24)
-  const [displayArea, setDisplayArea] = useState(70)
-  const [scrollSpeed, setScrollSpeed] = useState('medium')
-  const [opacity, setOpacity] = useState(100)
+  const [danmakuArea, setDanmakuArea] = useState<'full' | 'top' | 'bottom'>('full')
+  const [danmakuSpeed, setDanmakuSpeed] = useState(120)
+  const [danmakuOpacity, setDanmakuOpacity] = useState(1.0)
 
   // 播放器
   const [hardwareDecode, setHardwareDecode] = useState(true)
@@ -275,14 +270,32 @@ function Settings(): ReactElement {
 
     Promise.all([
       window.api.store.get('danmakuFontSize'),
+      window.api.store.get('danmakuArea'),
+      window.api.store.get('danmakuSpeed'),
+      window.api.store.get('danmakuOpacity'),
       window.api.store.get('danmakuDisplayArea'),
-      window.api.store.get('danmakuScrollSpeed'),
-      window.api.store.get('danmakuOpacity')
-    ]).then(([fs, area, speed, op]) => {
+      window.api.store.get('danmakuScrollSpeed')
+    ]).then(([fs, area, speed, op, legacyArea, legacySpeed]) => {
       if (fs !== null) setFontSize(Number(fs))
-      if (area !== null) setDisplayArea(Number(area))
-      if (speed !== null) setScrollSpeed(String(speed))
-      if (op !== null) setOpacity(Number(op))
+      if (area !== null) {
+        setDanmakuArea(area as 'full' | 'top' | 'bottom')
+      } else if (legacyArea !== null) {
+        const pct = Number(legacyArea)
+        setDanmakuArea(pct <= 40 ? 'top' : pct >= 80 ? 'full' : 'bottom')
+      }
+      if (speed !== null) {
+        setDanmakuSpeed(Number(speed))
+      } else if (legacySpeed === 'slow') {
+        setDanmakuSpeed(90)
+      } else if (legacySpeed === 'fast') {
+        setDanmakuSpeed(180)
+      } else if (legacySpeed === 'medium') {
+        setDanmakuSpeed(120)
+      }
+      if (op !== null) {
+        const v = Number(op)
+        setDanmakuOpacity(v > 1 ? v / 100 : v)
+      }
     }).catch(() => {})
   }, [])
 
@@ -627,35 +640,35 @@ function Settings(): ReactElement {
                 defaultOpen={true}
               >
                 <SliderRow label="文字大小" value={fontSize} unit="px">
-                  <input type="range" min="12" max="36" value={fontSize} onChange={(e) => { const v = Number(e.target.value); setFontSize(v); window.api.store.set('danmakuFontSize', v) }} className="w-full" />
-                </SliderRow>
-
-                <SliderRow label="显示区域" value={displayArea} unit="%">
-                  <input type="range" min="10" max="100" value={displayArea} onChange={(e) => { const v = Number(e.target.value); setDisplayArea(v); window.api.store.set('danmakuDisplayArea', v) }} className="w-full" />
+                  <input type="range" min="12" max="48" value={fontSize} onChange={(e) => { const v = Number(e.target.value); setFontSize(v); window.api.store.set('danmakuFontSize', v) }} className="w-full" />
                 </SliderRow>
 
                 <div>
-                  <span className="text-[13px] text-[var(--text-secondary)] font-medium mb-3 block">滚动速度</span>
+                  <span className="text-[13px] text-[var(--text-secondary)] font-medium mb-3 block">显示区域</span>
                   <div className="flex gap-2">
-                    {(['slow', 'medium', 'fast'] as const).map((speed) => (
+                    {(['full', 'top', 'bottom'] as const).map((area) => (
                       <motion.button
-                        key={speed}
-                        onClick={() => { setScrollSpeed(speed); window.api.store.set('danmakuScrollSpeed', speed) }}
+                        key={area}
+                        onClick={() => { setDanmakuArea(area); window.api.store.set('danmakuArea', area) }}
                         className={`flex-1 h-11 rounded-[var(--radius-md)] text-[13px] font-medium transition-colors ${
-                          scrollSpeed === speed
+                          danmakuArea === area
                             ? 'bg-[var(--accent)] text-white'
                             : 'bg-[var(--bg-input)] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]'
                         }`}
                         whileTap={{ scale: 0.96 }}
                       >
-                        {speed === 'slow' ? '慢速' : speed === 'medium' ? '中速' : '快速'}
+                        {area === 'full' ? '全屏' : area === 'top' ? '顶部' : '底部'}
                       </motion.button>
                     ))}
                   </div>
                 </div>
 
-                <SliderRow label="透明度" value={opacity} unit="%">
-                  <input type="range" min="20" max="100" value={opacity} onChange={(e) => { const v = Number(e.target.value); setOpacity(v); window.api.store.set('danmakuOpacity', v) }} className="w-full" />
+                <SliderRow label="滚动速度" value={danmakuSpeed} unit="px/s">
+                  <input type="range" min="60" max="300" step="10" value={danmakuSpeed} onChange={(e) => { const v = Number(e.target.value); setDanmakuSpeed(v); window.api.store.set('danmakuSpeed', v) }} className="w-full" />
+                </SliderRow>
+
+                <SliderRow label="透明度" value={Math.round(danmakuOpacity * 100)} unit="%">
+                  <input type="range" min="0" max="1" step="0.1" value={danmakuOpacity} onChange={(e) => { const v = Number(e.target.value); setDanmakuOpacity(v); window.api.store.set('danmakuOpacity', v) }} className="w-full" />
                 </SliderRow>
               </CollapseSection>
             </GlassCard>

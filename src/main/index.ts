@@ -12,11 +12,11 @@ import {
   net,
   safeStorage
 } from 'electron'
-import { join, extname, dirname, resolve, relative, isAbsolute } from 'path'
+import { join, extname, dirname, resolve, relative, isAbsolute, basename } from 'path'
 import { pathToFileURL } from 'url'
 import { platform } from 'os'
 import { readdirSync, createReadStream, readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'fs'
-import type { DanmakuComment, DanmakuCommentRaw, DanmakuCommentsResponse, DanmakuMatchResult, DanmakuSearchResponse } from '../shared/types'
+import type { DanmakuComment, DanmakuCommentRaw, DanmakuCommentsResponse, DanmakuMatchResult, DanmakuSearchResponse, JellyfinServerInfo } from '../shared/types'
 import * as http from 'http'
 import * as https from 'https'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -1173,8 +1173,8 @@ ipcMain.handle('danmaku:parse-local-xml', async (_event, xmlPath: string) => {
 
     const result = { count: comments.length, comments }
     // 使用 XML 文件名作为 episodeId 缓存弹幕
-    const episodeId = parseInt(path.basename(xmlPath)) || Date.now()
-    writeCachedComments(episodeId, result)
+    const cacheKey = parseInt(basename(xmlPath)) || Date.now()
+    writeCachedComments(cacheKey, result)
     return { success: true, data: result }
   } catch (err) {
     return { success: false, error: `XML 解析失败: ${String(err)}` }
@@ -1221,7 +1221,7 @@ function nodeFetch(url: string, options?: { headers?: Record<string, string>; ti
         resolve({
           ok: res.statusCode! >= 200 && res.statusCode! < 300,
           status: res.statusCode!,
-          headers: { get(name: string) { return res.headers[name.toLowerCase()] ?? null } },
+          headers: { get(name: string): string | null { const v = res.headers[name.toLowerCase()]; return Array.isArray(v) ? v[0] : (v ?? null) } },
           text: async () => body,
           json: async () => JSON.parse(body)
         })
@@ -1309,19 +1309,6 @@ async function dandanRequest<T>(path: string, retries = 2): Promise<T> {
   throw lastError || new Error('DandanPlay 所有 API 镜像均不可用')
 }
 
-interface DanmakuMatchResult {
-  animeId: number
-  animeTitle: string
-  episodeId: number
-  episodeTitle: string
-  type: string
-  typeDescription: string
-}
-
-interface DanmakuSearchResponse {
-  hasMore: boolean
-  animes: Array<{ animeId: number; animeTitle: string; episodes: DanmakuMatchResult[] }>
-}
 
 // ==================== 弹幕 API（Bilibili 回退） ====================
 
@@ -1719,8 +1706,8 @@ function writeCachedComments(episodeId: number, data: DanmakuCommentsResponse): 
 ipcMain.handle('danmaku:get-comments', async (_event, episodeId: string, source?: string) => {
   // B站弹幕
   if (source === 'bilibili') {
+    const cid = parseInt(episodeId)
     try {
-      const cid = parseInt(episodeId)
       // B站弹幕先查缓存
       const cached = getCachedComments(cid)
       if (cached) {
@@ -1737,11 +1724,8 @@ ipcMain.handle('danmaku:get-comments', async (_event, episodeId: string, source?
       }
       const xml = await readResponseBody(response)
       const comments = parseBilibiliXml(xml)
-      // 使用 XML 文件名作为 episodeId 缓存弹幕
-      const episodeId = parseInt(path.basename(xmlPath)) || Date.now()
-
       const result = { count: comments.length, comments }
-      writeCachedComments(episodeId, result)
+      writeCachedComments(cid, result)
       return { success: true, data: result }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -1763,7 +1747,7 @@ ipcMain.handle('danmaku:get-comments', async (_event, episodeId: string, source?
       `/api/v2/comment/${episodeId}?withRelated=true`
     )
     // 解析 p 字段为结构化数据
-    const parsed = (result.comments || []).map((c) => {
+    const parsed = (result.comments || []).map((c: DanmakuCommentRaw) => {
       const parts = c.p.split(',')
       return {
         time: parseFloat(parts[0]) || 0,      // 秒
@@ -1793,7 +1777,7 @@ ipcMain.handle('danmaku:get-segment-comments', async (_event, params: { episodeI
     const result = await dandanRequest<DanmakuCommentsResponse>(
       `/api/v2/comment/${episodeId}?withRelated=true`
     )
-    const parsed = (result.comments || []).map((c) => {
+    const parsed = (result.comments || []).map((c: DanmakuCommentRaw) => {
       const parts = c.p.split(',')
       return {
         time: parseFloat(parts[0]) || 0,

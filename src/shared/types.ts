@@ -12,6 +12,12 @@ export interface JellyfinLibrary {
   ImageTags: Record<string, string>
 }
 
+export interface JellyfinServerInfo {
+  ServerName?: string
+  Version?: string
+  Id?: string
+}
+
 export interface JellyfinItem {
   Id: string
   Name: string
@@ -33,9 +39,9 @@ export interface JellyfinItem {
 export interface DanmakuConfig {
   apiUrl: string
   fontSize: number
-  displayArea: number  // 10-100 百分比
-  scrollSpeed: 'slow' | 'medium' | 'fast'
-  opacity: number  // 20-100 百分比
+  area: 'full' | 'top' | 'bottom'
+  speed: number  // px/s, 60-300
+  opacity: number  // 0-1
   enabled: boolean
 }
 
@@ -83,7 +89,7 @@ export interface DanmakuMatchResult {
 // 弹幕缓存响应
 export interface DanmakuCommentsResponse {
   count: number
-  comments: DanmakuComment[]
+  comments: DanmakuCommentRaw[]
 }
 
 // ===== 播放器 类型 =====
