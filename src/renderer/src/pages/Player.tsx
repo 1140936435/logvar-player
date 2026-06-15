@@ -339,7 +339,7 @@ function Player(): JSX.Element {
   const [error, setError] = useState('')
   const [danmakuEnabled, setDanmakuEnabled] = useState(true)
   const [danmakuLoading, setDanmakuLoading] = useState(false)
-  const [danmakuCount, setDanmakuCount] = useState(0)
+  // const [danmakuCount, setDanmakuCount] = useState(0) // deprecated, use currentDanmakuCount instead
   const [currentDanmakuCount, setCurrentDanmakuCount] = useState(0)
   const [danmakuCountVisible, setDanmakuCountVisible] = useState(false)
   const [danmakuError, setDanmakuError] = useState('')
@@ -455,7 +455,7 @@ function Player(): JSX.Element {
         if (xmlResult.success && xmlResult.data) {
           const data = xmlResult.data as { count: number; comments: DanmakuComment[]; source?: string }
           engineRef.current?.loadComments(data.comments)
-          setDanmakuCount(data.count)
+          setCurrentDanmakuCount(data.count)
           setDanmakuCountVisible(true)
           setTimeout(() => setDanmakuCountVisible(false), 3000)
           setDanmakuLoading(false)
@@ -479,7 +479,7 @@ function Player(): JSX.Element {
           if (commentResult.success && commentResult.data) {
             const data = commentResult.data as { count: number; comments: DanmakuComment[] }
             engineRef.current?.loadComments(data.comments)
-            setDanmakuCount(data.count)
+            setCurrentDanmakuCount(data.count)
             setDanmakuCountVisible(true)
             setTimeout(() => setDanmakuCountVisible(false), 3000)
           } else { setDanmakuError(commentResult.error || '获取弹幕失败') }
@@ -552,7 +552,7 @@ function Player(): JSX.Element {
       const result = await window.api.danmaku.getComments(String(ep.episodeId))
       if (result.success && result.data) {
         const data = result.data as { count: number; comments: DanmakuComment[] }
-        engineRef.current?.loadComments(data.comments); setDanmakuCount(data.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000)
+        engineRef.current?.loadComments(data.comments); setCurrentDanmakuCount(data.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000)
       } else { setDanmakuError(result.error || '获取弹幕失败') }
     } catch { setDanmakuError('获取弹幕失败') }
     setDanmakuLoading(false)
@@ -565,7 +565,7 @@ function Player(): JSX.Element {
       const result = await window.api.danmaku.findLocalXml(localFile)
       if (result.success && result.data) {
         const data = result.data as { count: number; comments: DanmakuComment[]; source?: string }
-        engineRef.current?.loadComments(data.comments); setDanmakuCount(data.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000); showStatus(`已加载本地弹幕: ${data.source || ''}`)
+        engineRef.current?.loadComments(data.comments); setCurrentDanmakuCount(data.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000); showStatus(`已加载本地弹幕: ${data.source || ''}`)
       } else { setDanmakuError(result.error || '未找到本地弹幕 XML') }
     } catch (err) { setDanmakuError(`本地 XML 加载失败: ${String(err)}`) }
     setDanmakuLoading(false)
