@@ -34,7 +34,8 @@ function decToRgb(dec: number): string {
 class DanmakuEngine {
   private canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
-  private comments: DanmakuComment[] = []
+  private allComments: DanmakuComment[] = []  // 保存所有原始弹幕
+  private comments: DanmakuComment[] = []  // 当前显示的弹幕（受 maxCount 限制）
   private active: ActiveComment[] = []
   private trackOccupied: number[] = new Array(DANMAKU_TRACK_COUNT).fill(0)
   private lastTime = 0
@@ -62,15 +63,18 @@ class DanmakuEngine {
 
   loadComments(comments: DanmakuComment[]): void {
     const sorted = comments.sort((a, b) => a.time - b.time)
+    // 保存所有原始弹幕
+    this.allComments = sorted
     // 限制弹幕总数，防止太密集
     this.comments = sorted.slice(0, this.maxCount)
   }
 
   getCommentCount(): number {
-    return this.comments.length
+    return this.allComments.length  // 返回总弹幕数，不是当前显示数
   }
 
   clear(): void {
+    this.allComments = []
     this.comments = []
     this.active = []
     this.trackOccupied = new Array(DANMAKU_TRACK_COUNT).fill(0)
@@ -94,11 +98,9 @@ class DanmakuEngine {
 
   setMaxCount(count: number): void {
     this.maxCount = Math.max(50, Math.min(500, count))
-    // 重新过滤弹幕，应用新的密度限制
-    if (this.comments.length > 0) {
-      // 保留原始弹幕引用，重新 slice
-      const allComments = this.comments
-      this.comments = allComments.slice(0, this.maxCount)
+    // 从所有原始弹幕中重新 slice，应用新的密度限制
+    if (this.allComments.length > 0) {
+      this.comments = this.allComments.slice(0, this.maxCount)
       // 重置活跃弹幕和轨道占用，让弹幕重新开始显示
       this.active = []
       this.trackOccupied = new Array(DANMAKU_TRACK_COUNT).fill(0)
