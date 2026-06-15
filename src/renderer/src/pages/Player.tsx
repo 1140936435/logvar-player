@@ -441,7 +441,8 @@ function Player(): JSX.Element {
   }, [canvasRef.current])
 
   useEffect(() => {
-    if (!itemName || itemName === '未知视频') return
+    // 只要有 localFile 或 seriesName 就尝试加载弹幕，itemName 可以是未知视频
+    if (!localFile && !seriesName && (!itemName || itemName === '未知视频')) return
     setDanmakuLoading(true)
     setDanmakuError('')
 
