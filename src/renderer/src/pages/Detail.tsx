@@ -96,6 +96,13 @@ function Detail(): ReactElement {
 
   const [baseUrl, setBaseUrl] = useState('http://localhost:8096')
   const [jellyfinToken, setJellyfinToken] = useState('')
+  const [localPosters, setLocalPosters] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    window.api.store.get('poster-map').then((data: any) => {
+      if (data && typeof data === 'object') setLocalPosters(data as Record<string, string>)
+    })
+  }, [])
 
   // 加载详情
   useEffect(() => {
@@ -196,6 +203,12 @@ function Detail(): ReactElement {
   }
 
   const getPosterUrl = (): string | null => {
+    // 优先使用本地刮削封面
+    if (itemId && localPosters[itemId]) {
+      let urlPath = localPosters[itemId].replace(/\\/g, '/')
+      if (urlPath.match(/^[A-Z]:/i)) urlPath = '/' + urlPath
+      return `local-file://${urlPath}`
+    }
     if (!detail?.ImageTags?.Primary || !itemId) return null
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
     return `${baseUrl}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90${authParam}`
@@ -581,3 +594,4 @@ function Detail(): ReactElement {
 }
 
 export default Detail
+

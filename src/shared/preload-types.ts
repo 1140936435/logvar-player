@@ -175,6 +175,10 @@ export interface Api {
     getEpisodes: (seriesId: string, seasonId?: string) => Promise<JellyfinItemsResponse>
     getGenres: () => Promise<ApiResponse<Array<{ Id: string; Name: string }>>>
     getGenreItems: (genre: string, startIndex?: number) => Promise<JellyfinItemsResponse>
+    scrape: {
+      search: (params: { query: string; year?: number; type?: string }) => Promise<ApiResponse<Array<{ id: string; title: string; year: string; poster: string; overview: string }>>>
+      fetch: (params: { doubanId: string; posterUrl: string }) => Promise<ApiResponse<{ localPath: string }>>
+    }
   }
 
   danmaku: {
@@ -229,3 +233,5 @@ declare global {
     }
   }
 }
+
+

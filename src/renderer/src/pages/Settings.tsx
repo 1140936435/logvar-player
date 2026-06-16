@@ -138,6 +138,8 @@ function Settings(): ReactElement {
   const [danmakuSaveMsg, setDanmakuSaveMsg] = useState('')
   const [danmakuInfo, setDanmakuInfo] = useState('')
 
+  // 网络代理
+
   // 播放器
   const [hardwareDecode, setHardwareDecode] = useState(true)
   const [hdrToneMapping, setHdrToneMapping] = useState(true)
@@ -247,6 +249,8 @@ function Settings(): ReactElement {
       setDanmakuPrimary(cfg.primary)
       setDanmakuMirrors(cfg.mirrors.join('\n'))
     }).catch(() => {})
+
+
   }, [])
 
   const handleDanmakuTest = async (): Promise<void> => {
@@ -506,12 +510,8 @@ function Settings(): ReactElement {
 
             {/* ---- 弹幕设置 ---- */}
             <GlassCard title="弹幕" icon={MessageCircleMore}>
-              <CollapseSection
-                title="弹幕源"
-                subtitle={danmakuPrimary || 'DandanPlay API'}
-                icon={MessageCircleMore}
-                defaultOpen={false}
-              >
+              <div className="space-y-5">
+                <p className="text-[12px] text-[var(--text-tertiary)] mb-1">{danmakuPrimary || 'DandanPlay API'}</p>
                 <Field label="主 API 地址">
                   <input
                     type="text"
@@ -522,7 +522,7 @@ function Settings(): ReactElement {
                   />
                 </Field>
 
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 mt-1 mb-3">
                   <motion.button
                     onClick={handleDanmakuTest}
                     disabled={danmakuTesting || !danmakuPrimary.trim()}
@@ -555,7 +555,7 @@ function Settings(): ReactElement {
                   />
                 </Field>
 
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 mt-1">
                   <motion.button
                     onClick={handleDanmakuSave}
                     disabled={!danmakuPrimary.trim()}
@@ -581,7 +581,7 @@ function Settings(): ReactElement {
                     <p className="text-[12px] text-[var(--text-tertiary)] leading-relaxed">{danmakuInfo}</p>
                   </div>
                 )}
-              </CollapseSection>
+              </div>
             </GlassCard>
 
             {/* ---- 播放器设置 ---- */}
@@ -638,3 +638,6 @@ function Settings(): ReactElement {
 }
 
 export default Settings
+
+
+

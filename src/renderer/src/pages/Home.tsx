@@ -3,7 +3,7 @@ import { useRef, useState, useEffect, useCallback, useMemo, memo, type ReactElem
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Search, FolderOpen, Video, ChevronRight, ArrowLeft,
-  Clock, Trash2, X, Loader2, TvMinimal, Film, Folder, Database, ChevronDown, CircleDot
+  Clock, Trash2, X, Loader2, TvMinimal, Film, Folder, Database, ChevronDown, CircleDot, ImagePlus, Download
 } from 'lucide-react'
 
 /* ==================== 类型 ==================== */
@@ -63,12 +63,13 @@ interface ServerInfo {
 
 /* ==================== 子组件 ==================== */
 
-const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, communityRating, onClick }: {
+const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, communityRating, onClick, onScrape }: {
   item: MediaItem
   posterUrl: string | null
   displayName: string
   communityRating?: number | null
   onClick: () => void
+  onScrape?: () => void
 }): ReactElement {
   const isFolder = item.IsFolder || (!!item.ChildCount && item.ChildCount > 0)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -117,6 +118,17 @@ const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, commun
         )}
       </div>
 
+      {/* 刮削按钮 */}
+      {onScrape && (
+        <motion.button
+          onClick={(e) => { e.stopPropagation(); onScrape() }}
+          className="absolute top-2 left-2 w-6 h-6 rounded-md bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity z-20"
+          whileTap={{ scale: 0.9 }}
+        >
+          <ImagePlus size={12} className="text-white/80" />
+        </motion.button>
+      )}
+
       {/* 评分角标 */}
       {communityRating != null && communityRating > 0 && (
         <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-[var(--accent)]/90 text-white backdrop-blur-sm shadow-sm z-10">
@@ -131,7 +143,7 @@ const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, commun
 
       {/* 文件夹角标 — 电视剧不显示 */}
       {isFolder && item.Type !== 'Series' && (
-        <div className="absolute top-2 left-2 px-2 py-0.5 bg-[var(--accent)]/90 backdrop-blur-sm rounded-md text-[10px] font-semibold text-white z-10">
+        <div className="absolute top-2 right-2 px-2 py-0.5 bg-[var(--accent)]/90 backdrop-blur-sm rounded-md text-[10px] font-semibold text-white z-10">
           {item.ChildCount ? `${item.ChildCount}项` : '文件夹'}
         </div>
       )}
@@ -245,7 +257,24 @@ function Home(): ReactElement {
   // 分类快捷跳转（使用 Jellyfin 媒体库分类）
   const [activeLibrary, setActiveLibrary] = useState('')
 
+  // 豆瓣刮削 + 本地封面
+  const [doubanPosters, setDoubanPosters] = useState<Record<string, string>>({})
+  const [scrapeItem, setScrapeItem] = useState<MediaItem | null>(null)
+  const [scrapeLoading, setScrapeLoading] = useState(false)
+  const [scrapeResults, setScrapeResults] = useState<Array<{id: number; title: string; year: string; poster: string; overview: string}>>([])
+  const [scrapeError, setScrapeError] = useState('')
+
   const searchInputRef = useRef<HTMLInputElement>(null)
+
+  // 加载本地海报映射
+  useEffect(() => {
+    // 加载持久化的海报映射
+    window.api.store.get('poster-map').then((data: any) => {
+      if (data) {
+        setDoubanPosters(data as Record<string, string>)
+      }
+    })
+  }, [])
 
   const isFolderItem = (item: MediaItem): boolean => {
     return !!(item.IsFolder || (item.ChildCount && item.ChildCount > 0))
@@ -488,12 +517,75 @@ function Home(): ReactElement {
     }
   }, [navigate, handleDrillDown])
 
+  // 豆瓣刮削
+  const handleScrape = useCallback(async (item: MediaItem): Promise<void> => {
+    setScrapeItem(item)
+    setScrapeLoading(true)
+    setScrapeResults([])
+    setScrapeError('')
+    try {
+      let name = item.Name
+      let year: number | undefined
+      const yearMatch = name.match(/\(?(19\d{2}|20\d{2})\)?/)
+      if (yearMatch) {
+        year = parseInt(yearMatch[1])
+        name = name.replace(/\s*\(?(19\d{2}|20\d{2})\)?/, '').trim()
+      }
+      const r = await window.api.jellyfin.scrape.search({
+        query: name,
+        year,
+        type: item.Type === 'Movie' ? 'movie' : 'tv'
+      })
+      if (r.success && r.data) {
+        setScrapeResults(r.data)
+      } else {
+        setScrapeError(r.error || '豆瓣搜索失败')
+      }
+    } catch (e: any) {
+      setScrapeError(e?.message || '搜索异常')
+    } finally {
+      setScrapeLoading(false)
+    }
+  }, [])
+
+  const handleSelectPoster = useCallback(async (doubanId: string, posterUrl: string): Promise<void> => {
+    if (!scrapeItem) return
+    setScrapeLoading(true)
+    try {
+      const r = await window.api.jellyfin.scrape.fetch({ doubanId, posterUrl })
+      if (r.success && r.data?.localPath) {
+        setDoubanPosters(prev => {
+          const next = { ...prev, [scrapeItem.Id]: r.data.localPath }
+          window.api.store.get('poster-map').then((map: any) => {
+            window.api.store.set('poster-map', { ...(map || {}), [scrapeItem.Id]: r.data.localPath })
+          })
+          return next
+        })
+        setScrapeItem(null)
+        setScrapeResults([])
+      } else {
+        setScrapeError(r.error || '下载封面失败')
+      }
+    } catch (e: any) {
+      setScrapeError(e?.message || '下载异常')
+    } finally {
+      setScrapeLoading(false)
+    }
+  }, [scrapeItem])
+
+
   const getPosterUrl = useCallback((item: MediaItem): string | null => {
+    // 优先使用本地刮削的封面
+    if (doubanPosters[item.Id]) {
+      let urlPath = doubanPosters[item.Id].replace(/\\/g, '/')
+      if (urlPath.match(/^[A-Z]:/i)) urlPath = '/' + urlPath
+      return `local-file://${urlPath}`
+    }
     if (!item.ImageTags?.Primary) return null
     const base = connectedServer || 'http://localhost:8096'
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
     return `${base}/Items/${item.Id}/Images/Primary?maxHeight=400&tag=${item.ImageTags.Primary}&quality=90${authParam}`
-  }, [connectedServer, jellyfinToken])
+  }, [connectedServer, jellyfinToken, doubanPosters])
 
   const breadcrumb = drillStack.map((d) => d.parentName)
   const currentDrill = drillStack.length > 0 ? drillStack[drillStack.length - 1] : null
@@ -770,6 +862,7 @@ function Home(): ReactElement {
                       displayName={item.Name}
                       communityRating={item.CommunityRating}
                       onClick={() => handleItemClick(item)}
+                      onScrape={() => handleScrape(item)}
                     />
                   ))}
                 </div>
@@ -809,6 +902,7 @@ function Home(): ReactElement {
                       }
                       communityRating={item.CommunityRating}
                       onClick={() => handleItemClick(item)}
+                      onScrape={() => handleScrape(item)}
                     />
                   ))}
                 </div>
@@ -993,15 +1087,123 @@ function Home(): ReactElement {
                       }
                       communityRating={item.CommunityRating}
                       onClick={() => handleItemClick(item)}
+                      onScrape={() => handleScrape(item)}
                     />
                   ))}
                 </div>
               </section>
             )
           })}
+      {/* 豆瓣刮削弹窗 */}
+      <AnimatePresence>
+        {scrapeItem && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center p-6"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => { setScrapeItem(null); setScrapeResults([]); setScrapeError('') }}
+          >
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+            <motion.div
+              className="relative glass-thick p-6 rounded-[var(--radius-xl)] w-full max-w-lg max-h-[80vh] overflow-y-auto"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+
+                </div>
+                <h3 className="text-[15px] font-semibold">选择豆瓣封面</h3>
+                <button
+                  onClick={() => { setScrapeItem(null); setScrapeResults([]); setScrapeError('') }}
+                  className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <p className="text-[13px] text-[var(--text-tertiary)] mb-4">
+                为 <span className="text-[var(--text-primary)] font-medium">{scrapeItem.Name}</span> 选择豆瓣封面
+              </p>
+
+              {scrapeLoading && scrapeResults.length === 0 ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 size={20} className="text-[var(--accent)] animate-spin" />
+                  <span className="text-[14px] text-[var(--text-tertiary)] ml-3">搜索中...</span>
+                </div>
+              ) : scrapeError ? (
+                <div className="text-center py-8">
+                  <p className="text-[13px] text-red-400 mb-3">{scrapeError}</p>
+                  <motion.button
+                    onClick={() => scrapeItem && handleScrape(scrapeItem)}
+                    className="ios-btn ios-btn-secondary text-[13px]"
+                    whileTap={{ scale: 0.96 }}
+                  >
+                    重试
+                  </motion.button>
+                </div>
+              ) : scrapeResults.length > 0 ? (
+                <div className="space-y-3">
+                  {scrapeResults.map((r) => (
+                    <motion.div
+                      key={r.id}
+                      className="flex gap-4 p-3 rounded-[var(--radius-lg)] hover:bg-white/5 cursor-pointer transition-colors"
+                      whileHover={{ x: 2 }}
+                      onClick={() => handleSelectPoster(String(r.id), r.poster)}
+                    >
+                      <div className="w-16 h-24 rounded-[var(--radius-md)] overflow-hidden bg-[var(--surface-secondary)] flex-shrink-0">
+                        {r.poster ? (
+                          <img
+                            src={r.poster ? `douban-img://${encodeURIComponent(r.poster)}` : undefined}
+                            alt={r.title}
+                            className="w-full h-full object-cover"
+                            loading="lazy"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-[var(--text-quaternary)]">
+                            <ImagePlus size={20} />
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[14px] font-medium text-[var(--text-primary)] truncate">{r.title}</p>
+                        <p className="text-[12px] text-[var(--accent)]">{r.year}</p>
+                        <p className="text-[12px] text-[var(--text-tertiary)] mt-1 line-clamp-2">{r.overview}</p>
+                      </div>
+                      <div className="flex items-center">
+                        <Download size={16} className="text-[var(--text-quaternary)]" />
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <Search size={32} className="mx-auto text-[var(--text-quaternary)] mb-3" />
+                  <p className="text-[13px] text-[var(--text-tertiary)]">未找到豆瓣结果</p>
+                </div>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       </div>
     </div>
   )
 }
 
 export default Home
+
+
+
+
+
+
+
+
+
+
+
+
+

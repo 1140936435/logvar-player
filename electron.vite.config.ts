@@ -6,36 +6,22 @@ import { copyFileSync, existsSync, mkdirSync } from 'fs'
 
 export default defineConfig({
   main: {
+    build: {
+      minify: 'esbuild'
+    },
     plugins: [
       externalizeDepsPlugin(),
-      // 复制 log-window.html 到输出目录
       {
-        name: 'copy-log-window-html',
+        name: 'copy-assets',
         closeBundle() {
-          const src = resolve(__dirname, 'src/main/log-window.html')
-          const destDir = resolve(__dirname, 'out/main')
-          const dest = resolve(destDir, 'log-window.html')
-          if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
-          if (existsSync(src)) {
-            copyFileSync(src, dest)
-            console.log('Copied log-window.html to out/main/')
+          const copy = (src: string, dest: string) => {
+            const d = resolve(__dirname, dest)
+            const dd = resolve(d, '..')
+            if (!existsSync(dd)) mkdirSync(dd, { recursive: true })
+            if (existsSync(src)) copyFileSync(src, d)
           }
-          // 复制 disable-dwm.ps1
-          const psSrc = resolve(__dirname, 'disable-dwm.ps1')
-          const psDest = resolve(destDir, 'disable-dwm.ps1')
-          if (existsSync(psSrc)) {
-            copyFileSync(psSrc, psDest)
-            console.log('Copied disable-dwm.ps1 to out/main/')
-          }
-          // 复制 dwm-helper.exe
-          const exeSrc = resolve(__dirname, 'tools/dwm-helper.exe')
-          const exeDest = resolve(__dirname, 'out/tools/dwm-helper.exe')
-          if (existsSync(exeSrc)) {
-            const exeDir = resolve(__dirname, 'out/tools')
-            if (!existsSync(exeDir)) mkdirSync(exeDir, { recursive: true })
-            copyFileSync(exeSrc, exeDest)
-            console.log('Copied dwm-helper.exe to out/tools/')
-          }
+          copy('src/main/log-window.html', 'out/main/log-window.html')
+          copy('tools/dwm-helper.exe', 'out/tools/dwm-helper.exe')
         }
       }
     ]
@@ -49,6 +35,21 @@ export default defineConfig({
         '@': resolve('src/renderer/src')
       }
     },
-    plugins: [react(), tailwindcss()]
+    plugins: [react(), tailwindcss()],
+    build: {
+      minify: 'esbuild',
+      target: 'es2020',
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            // 拆分大型库到单独 chunk，利用浏览器缓存
+            if (id.includes('node_modules/framer-motion')) return 'vendor-fm'
+            if (id.includes('node_modules/lucide-react')) return 'vendor-icons'
+            if (id.includes('node_modules/react-router')) return 'vendor-router'
+            if (id.includes('node_modules/react-dom') || id.includes('node_modules/react/')) return 'vendor-react'
+          }
+        }
+      }
+    }
   }
 })

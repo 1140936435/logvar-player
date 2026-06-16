@@ -45,7 +45,13 @@ const api: Api = {
       ipcRenderer.invoke('jellyfin:get-episodes', seriesId, seasonId),
     getGenres: () => ipcRenderer.invoke('jellyfin:get-genres'),
     getGenreItems: (genre: string, startIndex?: number) =>
-      ipcRenderer.invoke('jellyfin:get-genre-items', genre, startIndex)
+      ipcRenderer.invoke('jellyfin:get-genre-items', genre, startIndex),
+    scrape: {
+      search: (params: { query: string; year?: number; type?: string }) =>
+        ipcRenderer.invoke('media:search-douban', params),
+      fetch: (params: { doubanId: string; posterUrl: string }) =>
+        ipcRenderer.invoke('media:fetch-douban-poster', params)
+    }
   },
 
   // 豆瓣评分
@@ -130,3 +136,4 @@ if (process.contextIsolated) {
   // @ts-ignore
   window.api = api
 }
+

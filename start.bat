@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-npm run dev
+node_modules\.bin\electron.cmd .

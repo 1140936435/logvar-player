@@ -606,6 +606,129 @@ ipcMain.handle('douban:get-ratings-batch', async (_event, _titles: string[]) => 
   return { success: true, data: {} }
 })
 
+// ==================== IPC: 海报映射持久化 ====================
+
+function getPosterMapPath(): string {
+  return join(app.getPath('userData'), 'poster-map.json')
+}
+
+function loadPosterMap(): Record<string, string> {
+  try {
+    if (existsSync(getPosterMapPath())) {
+      return JSON.parse(readFileSync(getPosterMapPath(), 'utf-8'))
+    }
+  } catch {}
+  return {}
+}
+
+function savePosterMap(map: Record<string, string>): void {
+  try {
+    writeFileSync(getPosterMapPath(), JSON.stringify(map, null, 2), 'utf-8')
+  } catch (err) {
+    console.error('[poster] Failed to save map:', err)
+  }
+}
+
+ipcMain.handle('poster:load-all', async () => {
+  const map = loadPosterMap()
+  // Also scan directories to find any orphaned posters
+  const postersDir = join(app.getPath('userData'), 'posters')
+  const doubanDir = join(app.getPath('userData'), 'posters_douban')
+  for (const dir of [postersDir, doubanDir]) {
+    if (!existsSync(dir)) continue
+    try {
+      const files = readdirSync(dir).filter(f => f.endsWith('.jpg'))
+      for (const f of files) {
+        const id = f.replace('.jpg', '')
+        const fullPath = join(dir, f)
+        // Add any orphaned posters if not already in map
+        const existing = Object.entries(map).find(([, v]) => v === fullPath)
+        if (!existing) {
+          map[`orphan_${id}`] = fullPath
+        }
+      }
+    } catch {}
+  }
+  return { success: true, data: map }
+})
+
+ipcMain.handle('poster:save-mapping', async (_event, itemId: string, localPath: string) => {
+  const map = loadPosterMap()
+  map[itemId] = localPath
+  savePosterMap(map)
+  return { success: true }
+})
+
+
+// ==================== IPC: 豆瓣刮削 ====================
+
+ipcMain.handle('media:search-douban', async (_event, params: { query: string; year?: number; type?: string }) => {
+  const { query, year, type } = params
+  console.log(`[douban] Searching: "${query}" year=${year} type=${type}`)
+  
+  try {
+    // 使用豆瓣 suggest JSON API（最可靠）
+    const url = `https://movie.douban.com/j/subject_suggest?q=${encodeURIComponent(query)}`
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      signal: AbortSignal.timeout(10000)
+    })
+
+    if (!res || !res.ok) {
+      return { success: false, error: '豆瓣搜索不可达' }
+    }
+
+    const items = await res.json() as any[]
+    if (!Array.isArray(items) || items.length === 0) {
+      return { success: false, error: '未找到豆瓣结果' }
+    }
+
+    const results = items.slice(0, 10).map((r: any) => ({
+      id: String(r.id || ''),
+      title: r.title || '',
+      year: r.year || '',
+      poster: r.img || r.cover_url || '',
+      overview: r.sub_title || ''
+    }))
+    
+    console.log(`[douban] Got ${results.length} results for "${query}"`)
+    return { success: true, data: results }
+  } catch (e: any) {
+    console.error(`[douban] Search error:`, e?.message)
+    return { success: false, error: e?.message || '搜索失败' }
+  }
+})
+
+ipcMain.handle('media:fetch-douban-poster', async (_event, params: { doubanId: string; posterUrl: string }) => {
+  const postersDir = join(app.getPath('userData'), 'posters_douban')
+  if (!existsSync(postersDir)) mkdirSync(postersDir, { recursive: true })
+  
+  const safeName = params.doubanId.replace(/[^a-zA-Z0-9_-]/g, '_')
+  const localPath = join(postersDir, `${safeName}.jpg`)
+  
+  if (existsSync(localPath)) {
+    return { success: true, data: { localPath } }
+  }
+  
+  try {
+    const imgRes = await fetch(params.posterUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://movie.douban.com/' },
+      signal: AbortSignal.timeout(15000)
+    }).catch(() => null)
+    
+    if (!imgRes || !imgRes.ok) {
+      return { success: false, error: '下载封面失败' }
+    }
+    
+    const buffer = Buffer.from(await imgRes.arrayBuffer())
+    writeFileSync(localPath, buffer)
+    console.log(`[douban] poster saved: ${localPath}`)
+    return { success: true, data: { localPath } }
+  } catch (e: any) {
+    return { success: false, error: e?.message || '下载失败' }
+  }
+})
+
 // ==================== IPC: 剧集列表 ====================
 
 ipcMain.handle('jellyfin:get-episodes', async (_event, seriesId: string, seasonId?: string) => {
@@ -1899,6 +2022,49 @@ ipcMain.handle('danmaku:get-cached-comments', async (_event, episodeId: string) 
 
 // ==================== 文件操作 ====================
 
+// ==================== 自定义协议: douban-img (豆瓣图片反盗链) ====================
+
+const DOUBAN_IMG_CACHE = new Map<string, { buffer: Buffer; mime: string }>()
+
+function registerDoubanImageProtocol(): void {
+  protocol.handle('douban-img', (request) => {
+    const url = decodeURIComponent(request.url.replace('douban-img://', ''))
+    
+    return new Promise((resolve) => {
+      const cached = DOUBAN_IMG_CACHE.get(url)
+      if (cached) {
+        resolve(new Response(Buffer.from(cached.buffer), {
+          status: 200,
+          headers: { 'content-type': cached.mime, 'cache-control': 'max-age=86400' }
+        }))
+        return
+      }
+      
+      fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://movie.douban.com/'
+        },
+        signal: AbortSignal.timeout(10000)
+      })
+      .then(async (res) => {
+        if (!res.ok) throw new Error('fetch failed')
+        const buffer = Buffer.from(await res.arrayBuffer())
+        const mime = res.headers.get('content-type') || 'image/jpeg'
+        DOUBAN_IMG_CACHE.set(url, { buffer, mime })
+        resolve(new Response(buffer, {
+          status: 200,
+          headers: { 'content-type': mime, 'cache-control': 'max-age=86400' }
+        }))
+      })
+      .catch(() => {
+        resolve(new Response('Image not found', { status: 404 }))
+      })
+    })
+  })
+}
+
+
 // ==================== 自定义协议: local-file ====================
 
 
@@ -1919,7 +2085,9 @@ function registerLocalFileProtocol(): void {
   protocol.handle('local-file', (request) => {
     const url = new URL(request.url)
     let filePath = decodeURIComponent(url.pathname)
-    if (process.platform === 'win32' && filePath.length > 1 && filePath[0] === '/') {
+    if (process.platform === 'win32' && url.hostname && /^[a-zA-Z]$/.test(url.hostname)) {
+      filePath = `${url.hostname.toUpperCase()}:${filePath}`
+    } else if (process.platform === 'win32' && filePath.length > 1 && filePath[0] === '/') {
       filePath = filePath.slice(1)
     }
     const ext = require('path').extname(filePath.toLowerCase()).toLowerCase()
@@ -2060,8 +2228,9 @@ function createTray(): void {
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.mplay.player')
 
-  // 注册 local-file 协议
+  // 注册自定义协议
   registerLocalFileProtocol()
+  registerDoubanImageProtocol()
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -2117,3 +2286,16 @@ process.on('unhandledRejection', (reason) => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
 })
+
+
+
+
+
+
+
+
+
+
+
+
+

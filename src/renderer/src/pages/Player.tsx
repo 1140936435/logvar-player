@@ -484,6 +484,7 @@ function Player(): JSX.Element {
   const [infoOverlay, setInfoOverlay] = useState(false)
   const [itemInfo, setItemInfo] = useState<Record<string, unknown> | null>(null)
   const [itemInfoLoading, setItemInfoLoading] = useState(false)
+  const [videoSourceInfo, setVideoSourceInfo] = useState<Record<string, string> | null>(null)
 
   const showStatus = (msg: string): void => {
     setStatusMsg(msg)
@@ -822,6 +823,57 @@ function Player(): JSX.Element {
   }
   const handleCloseInfo = (): void => { setInfoOverlay(false); setItemInfo(null) }
 
+  const fd = (s) => { const h=Math.floor(s/3600);const m=Math.floor((s%3600)/60);const sec=Math.floor(s%60);return h>0?h+":"+String(m).padStart(2,"0")+":"+String(sec).padStart(2,"0"):m+":"+String(sec).padStart(2,"0") }
+  const fb = (b) => b>=1e9?(b/1e9).toFixed(1)+" GB":b>=1e6?(b/1e6).toFixed(1)+" MB":b>=1e3?(b/1e3).toFixed(1)+" KB":b+" B"
+
+  const handleVideoSourceInfo = async () => {
+    setContextMenu({ x: 0, y: 0, visible: false })
+    const info = {}
+    const v = videoRef.current
+    if (v) {
+      info["视频分辨率"] = (v.videoWidth || "--") + " × " + (v.videoHeight || "--")
+      info["时长"] = fd(v.duration || 0)
+      const q = v.getVideoPlaybackQuality?.()
+      if (q) {
+        info["总帧数"] = String(q.totalVideoFrames || "--")
+        info["丢帧"] = String(q.droppedVideoFrames || "--")
+      }
+    }
+    if (itemId) {
+      try {
+        const r = await window.api.jellyfin.getItemDetails(itemId)
+        if (r.success) {
+          const d = r.data; const ms = d.MediaSources?.[0]
+          if (ms) {
+            if (ms.Container) info["封装格式"] = ms.Container
+            if (ms.Bitrate) info["码率"] = (ms.Bitrate/1e6).toFixed(1) + " Mbps"
+            if (ms.Size) info["文件大小"] = fb(ms.Size)
+            const vs = ms.MediaStreams?.find(s => s.Type==="Video")
+            if (vs) {
+              info["视频编码"] = vs.DisplayTitle || vs.Codec || "--"
+              if (vs.RealFrameRate) info["帧率"] = vs.RealFrameRate.toFixed(2) + " fps"
+              if (vs.BitRate) info["视频码率"] = (vs.BitRate/1e6).toFixed(1) + " Mbps"
+              if (vs.BitDepth) info["色深"] = vs.BitDepth + " bit"
+              if (vs.PixelFormat) info["像素格式"] = vs.PixelFormat
+              if (vs.VideoRange==="HDR"||vs.HDRType) info["HDR"] = vs.HDRType||"HDR"
+            }
+            const ast = ms.MediaStreams?.filter(s => s.Type==="Audio")||[]
+            ast.forEach((a,i) => {
+              const p = ast.length>1?"音蹨"+(i+1):"音频"
+              info[p+"编码"] = a.DisplayTitle || a.Codec || "--"
+              if (a.Channels) info[p+"声道"] = a.Channels + "ch"
+              if (a.SampleRate) info[p+"采样率"] = (a.SampleRate/1000).toFixed(1) + " kHz"
+            })
+            const subs = ms.MediaStreams?.filter(s => s.Type==="Subtitle")||[]
+            if (subs.length) info["字幕"] = subs.map(s => s.DisplayTitle||s.Language||s.Codec).join(", ")
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    setVideoSourceInfo(info)
+  }
+  const handleCloseVideoInfo = () => { setVideoSourceInfo(null) }
+
   // ==================== 键盘 ====================
 
   // 切换剧集
@@ -1035,7 +1087,7 @@ function Player(): JSX.Element {
           <div className="fixed z-50 w-40 player-glass-panel rounded-md py-1" style={{ left: Math.min(contextMenu.x, window.innerWidth - 170), top: Math.min(contextMenu.y, window.innerHeight - 280) }}>
             <button onClick={handleShowInfo} className="w-full text-left px-3 py-2 text-xs text-white/80 hover:bg-white/5 transition-colors">影片信息</button>
             <hr className="border-white/5 my-0.5" />
-            <hr className="border-white/5 my-0.5" />
+            <button onClick={handleVideoSourceInfo} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">视频源信息</button>
             <div className="px-3 py-1 text-[10px] text-white/35">播放速度</div>
             {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
               <button key={rate} onClick={() => handlePlaybackRateChange(rate)} className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${playbackRate === rate ? 'text-[#8b82f6]' : 'text-white/60 hover:bg-white/5'}`}>{rate}x</button>
@@ -1075,6 +1127,26 @@ function Player(): JSX.Element {
         </div>
       )}
 
+
+      {/* 视频源信息覆盖层 */}
+      {videoSourceInfo && (
+        <div className="absolute inset-0 z-30 bg-black/70 backdrop-blur-sm flex items-center justify-center animate-page-in" onClick={handleCloseVideoInfo}>
+          <div className="w-[520px] max-h-[75vh] player-glass-panel p-8 overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-sm font-medium">视频源信息</h3>
+              <button onClick={handleCloseVideoInfo} className="w-6 h-6 rounded flex items-center justify-center text-white/50 hover:text-white hover:bg-white/5 transition-colors"><X size={15} /></button>
+            </div>
+            <div className="space-y-2 text-xs">
+              {Object.entries(videoSourceInfo).map(([key, val]) => (
+                <div key={key} className="flex justify-between py-1.5 border-b border-white/5 last:border-0">
+                  <span className="text-white/40 min-w-[120px]">{key}</span>
+                  <span className="text-white/80 text-right font-mono">{val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       {/* 控制栏 — 64px 纯黑 95% 不透明 */}
       <div className={`player-glass-bar h-16 flex items-center px-5 gap-6 shrink-0 relative z-20 transition-all duration-500 ${controlsVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3 pointer-events-none'}`} onMouseMove={handleMouseMove}>
         {/* 播放/暂停 */}

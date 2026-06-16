@@ -15,6 +15,7 @@
     "build:unpack": "npm run build && electron-builder --win --dir --config"
   },
   "dependencies": {
+    "@rollup/rollup-win32-x64-msvc": "^4.62.0",
     "electron-store": "^8.2.0",
     "framer-motion": "^12.40.0",
     "koffi": "^3.0.2",
