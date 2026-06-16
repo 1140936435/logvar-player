@@ -5,6 +5,7 @@ import {
   Search, FolderOpen, Video, ChevronRight, ArrowLeft,
   Clock, Trash2, X, Loader2, TvMinimal, Film, Folder, Database, ChevronDown, CircleDot, ImagePlus, Download
 } from 'lucide-react'
+import { cachedFetch, clearCache } from '../utils/apiCache'
 
 /* ==================== 类型 ==================== */
 
@@ -322,7 +323,12 @@ function Home(): ReactElement {
       const itemsMap: Record<string, MediaItem[]> = {}
       await Promise.all(libs.map(async (lib) => {
         try {
-          const itemsResult = await window.api.jellyfin.getItems(lib.Id, 0, 50)
+          const itemsResult = await cachedFetch(
+            'jellyfin.getItems',
+            [lib.Id, 0, 50],
+            () => window.api.jellyfin.getItems(lib.Id, 0, 50),
+            5 * 60 * 1000 // 5 分钟缓存
+          )
           if (itemsResult.success && itemsResult.data) {
             const itemData = itemsResult.data as { Items?: MediaItem[] }
             itemsMap[lib.Id] = itemData.Items || []
@@ -382,6 +388,8 @@ function Home(): ReactElement {
     try {
       const result = await window.api.server.switch(id)
       if (result.success) {
+        // 切换服务器时清除缓存，确保获取最新数据
+        clearCache('jellyfin.')
         await loadServers()
         await loadMediaData()
         await loadHistory()

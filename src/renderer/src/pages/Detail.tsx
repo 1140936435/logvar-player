@@ -5,6 +5,7 @@ import {
   ArrowLeft, Play, Loader2, Star, Clock, Film, Tv,
   ChevronRight, Users, Info, ExternalLink
 } from 'lucide-react'
+import { cachedFetch } from '../utils/apiCache'
 
 /* ==================== 类型 ==================== */
 
@@ -116,7 +117,12 @@ function Detail(): ReactElement {
       if (saved?.token) setJellyfinToken(saved.token)
     }).catch(() => {})
 
-    window.api.jellyfin.getItemDetails(itemId).then((result) => {
+    cachedFetch(
+      'jellyfin.getItemDetails',
+      [itemId],
+      () => window.api.jellyfin.getItemDetails(itemId!),
+      5 * 60 * 1000 // 5 分钟缓存
+    ).then((result) => {
       if (result.success && result.data) {
         const data = result.data as DetailData
         setDetail(data)

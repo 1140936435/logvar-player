@@ -3,6 +3,7 @@ import type { DanmakuComment, DanmakuSearchResult, DanmakuSearchResponse, Jellyf
 import { useSearchParams, useNavigate, Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Volume2, VolumeX, Volume1, Gauge, List, X, ChevronLeft, ChevronRight, TvMinimalPlay, ArrowLeft } from 'lucide-react'
+import { cachedFetch } from '../utils/apiCache'
 
 // ==================== 弹幕类型 ====================
 
@@ -370,60 +371,84 @@ function Player(): JSX.Element {
     }).catch(() => {})
   }, [])
   
-  // 获取剧集列表（电视剧）
+  // 获取剧集列表（电视剧）— 合并 token 加载与请求，避免双重请求
+  const episodeFetchedRef = useRef(false)
   useEffect(() => {
-    console.log('[EpisodeList] Check: seriesId=%o, localFile=%o, jellyfinToken=%o', seriesId, localFile, jellyfinToken ? '***' : '')
-    
-    // 条件 1: seriesId 直接可用
-    if (seriesId && !localFile && jellyfinToken) {
-      console.log('[EpisodeList] Fetching with seriesId=%s, seasonId=%s', seriesId, seasonId)
-      window.api.jellyfin.getEpisodes(seriesId, seasonId || undefined).then((result) => {
-        console.log('[EpisodeList] Result: success=%o, data=%o', result.success, result.data ? 'present' : 'null')
-        if (result.success && result.data) {
-          const data = result.data as { Items?: JellyfinItem[]; episodes?: JellyfinItem[] }
-          const episodes = data.Items || data.episodes || []
-          setEpisodeList(episodes)
-          const idx = episodes.findIndex(ep => (ep as any).Id === itemId || (ep as any).id === itemId)
-          setCurrentEpisodeIndex(idx)
-          console.log('[EpisodeList] Loaded', episodes.length, 'episodes, current:', idx)
+    // 本地文件不需要剧集列表
+    if (localFile) return
+    // 已经获取过则跳过
+    if (episodeFetchedRef.current) return
+
+    const fetchEpisodes = async (token: string): Promise<void> => {
+      if (seriesId) {
+        // 条件 1: seriesId 直接可用
+        try {
+          const result = await cachedFetch(
+            'jellyfin.getEpisodes',
+            [seriesId, seasonId || undefined],
+            () => window.api.jellyfin.getEpisodes(seriesId, seasonId || undefined),
+            2 * 60 * 1000 // 2 分钟缓存
+          )
+          if (result.success && result.data) {
+            const data = result.data as { Items?: JellyfinItem[]; episodes?: JellyfinItem[] }
+            const episodes = data.Items || data.episodes || []
+            setEpisodeList(episodes)
+            const idx = episodes.findIndex(ep => (ep as any).Id === itemId || (ep as any).id === itemId)
+            setCurrentEpisodeIndex(idx)
+          }
+        } catch (err) {
+          console.error('[EpisodeList] Error:', err)
         }
-      }).catch((err) => {
-        console.error('[EpisodeList] Error:', err)
-      })
-      return
-    }
-    
-    // 条件 2: seriesId 为空，尝试从 itemId 获取详情
-    if (!seriesId && itemId && !localFile && jellyfinToken) {
-      console.log('[EpisodeList] seriesId empty, fetching details for itemId=%s', itemId)
-      window.api.jellyfin.getItemDetails(itemId).then((result) => {
-        if (result.success && result.data) {
-          const data = result.data as { SeriesId?: string; SeasonId?: string }
-          const fetchedSeriesId = data.SeriesId
-          const fetchedSeasonId = data.SeasonId || seasonId
-          if (fetchedSeriesId) {
-            console.log('[EpisodeList] Got SeriesId=%s, SeasonId=%s from details', fetchedSeriesId, fetchedSeasonId)
-            window.api.jellyfin.getEpisodes(fetchedSeriesId, fetchedSeasonId || undefined).then((epResult) => {
+      } else if (itemId) {
+        // 条件 2: seriesId 为空，先获取详情
+        try {
+          const detailResult = await cachedFetch(
+            'jellyfin.getItemDetails',
+            [itemId],
+            () => window.api.jellyfin.getItemDetails(itemId),
+            2 * 60 * 1000
+          )
+          if (detailResult.success && detailResult.data) {
+            const data = detailResult.data as { SeriesId?: string; SeasonId?: string }
+            const fetchedSeriesId = data.SeriesId
+            const fetchedSeasonId = data.SeasonId || seasonId
+            if (fetchedSeriesId) {
+              const epResult = await cachedFetch(
+                'jellyfin.getEpisodes',
+                [fetchedSeriesId, fetchedSeasonId || undefined],
+                () => window.api.jellyfin.getEpisodes(fetchedSeriesId, fetchedSeasonId || undefined),
+                2 * 60 * 1000
+              )
               if (epResult.success && epResult.data) {
                 const epData = epResult.data as { Items?: JellyfinItem[]; episodes?: JellyfinItem[] }
                 const episodes = epData.Items || epData.episodes || []
                 setEpisodeList(episodes)
                 const idx = episodes.findIndex(ep => (ep as any).Id === itemId || (ep as any).id === itemId)
                 setCurrentEpisodeIndex(idx)
-                console.log('[EpisodeList] Loaded', episodes.length, 'episodes, current:', idx)
               }
-            }).catch((err) => {
-              console.error('[EpisodeList] Error fetching episodes:', err)
-            })
-          } else {
-            console.log('[EpisodeList] Item has no SeriesId (not a TV episode)')
+            }
           }
+        } catch (err) {
+          console.error('[EpisodeList] Error:', err)
         }
-      }).catch((err) => {
-        console.error('[EpisodeList] Error fetching details:', err)
-      })
+      }
     }
-  }, [seriesId, seasonId, itemId, localFile, jellyfinToken])
+
+    // 先尝试直接用已有 token，没有则先加载
+    if (jellyfinToken) {
+      episodeFetchedRef.current = true
+      fetchEpisodes(jellyfinToken)
+    } else {
+      window.api.store.get('jellyfin').then((saved: unknown) => {
+        const s = saved as { token?: string } | null
+        if (s?.token) {
+          setJellyfinToken(s.token)
+          episodeFetchedRef.current = true
+          fetchEpisodes(s.token)
+        }
+      }).catch(() => {})
+    }
+  }, [seriesId, seasonId, itemId, localFile]) // 移除 jellyfinToken 依赖
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
