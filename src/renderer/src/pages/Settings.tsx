@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, type ReactElement } from 'react'
+import { useNavigate } from 'react-router-dom'
 import type { ServerConfig as ApiServerConfig, ServerInfo, ServerTestResult as ApiServerTestResult } from '../../shared/preload-types'
 import type { JellyfinServerInfo } from '../../shared/types'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -120,6 +121,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 
 function Settings(): ReactElement {
   // 多服务器管理
+  const navigate = useNavigate()
   const [servers, setServers] = useState<ServerConfig[]>([])
   const [activeServerId, setActiveServerId] = useState<string | null>(null)
   const [editingServer, setEditingServer] = useState<ServerConfig | null>(null)
@@ -142,7 +144,8 @@ function Settings(): ReactElement {
 
   // 播放器
   const [hardwareDecode, setHardwareDecode] = useState(true)
-  const [hdrToneMapping, setHdrToneMapping] = useState(true)
+  const [hdrToneMapping, setHdrToneMapping] = useState(false)
+  const [playerSaveMsg, setPlayerSaveMsg] = useState('')
 
   const loadServers = useCallback(async (): Promise<void> => {
     try {
@@ -203,7 +206,7 @@ function Settings(): ReactElement {
     }
   }, [serverForm, editingServer, loadServers])
 
-  const handleConnectServer = async (id: string): Promise<void> => {
+  const handleConnectServer = useCallback(async (id: string): Promise<void> => {
     setServerConnecting(true)
     setServerStatus({ type: 'info', message: '正在连接...' })
     try {
@@ -214,6 +217,8 @@ function Settings(): ReactElement {
         const server = servers.find(s => s.id === id)
         setServerStatus({ type: 'success', message: `已连接 - ${info.ServerName || server?.name || 'Jellyfin'}` })
         await loadServers()
+        // 导航回 Home 页面，触发媒体库刷新
+        navigate('/')
       } else {
         setServerStatus({ type: 'error', message: result.error || '连接失败' })
       }
@@ -221,7 +226,7 @@ function Settings(): ReactElement {
       setServerStatus({ type: 'error', message: err instanceof Error ? err.message : '连接失败' })
     }
     setServerConnecting(false)
-  }
+  }, [servers, loadServers, navigate])
 
   const handleRemoveServer = useCallback(async (id: string): Promise<void> => {
     if (!confirm('确定要删除此服务器吗？')) return
@@ -250,7 +255,13 @@ function Settings(): ReactElement {
       setDanmakuMirrors(cfg.mirrors.join('\n'))
     }).catch(() => {})
 
-
+    // 加载播放器设置
+    window.api.store.get('player').then((data: any) => {
+      if (data) {
+        if (typeof data.hardwareDecode === 'boolean') setHardwareDecode(data.hardwareDecode)
+        if (typeof data.hdrToneMapping === 'boolean') setHdrToneMapping(data.hdrToneMapping)
+      }
+    }).catch(() => {})
   }, [])
 
   const handleDanmakuTest = async (): Promise<void> => {
@@ -277,6 +288,16 @@ function Settings(): ReactElement {
     setDanmakuSaveMsg('已保存')
     setTimeout(() => setDanmakuSaveMsg(''), 2000)
   }
+
+  const savePlayerSettings = useCallback(async (hw?: boolean, hdr?: boolean): Promise<void> => {
+    const currentHw = hw ?? hardwareDecode
+    const currentHdr = hdr ?? hdrToneMapping
+    try {
+      await window.api.store.set('player', { hardwareDecode: currentHw, hdrToneMapping: currentHdr })
+      setPlayerSaveMsg('已保存')
+      setTimeout(() => setPlayerSaveMsg(''), 2000)
+    } catch { /* ignore */ }
+  }, [hardwareDecode, hdrToneMapping])
 
   const activeServer = useMemo(() => servers.find(s => s.id === activeServerId), [servers, activeServerId])
 
@@ -592,7 +613,7 @@ function Settings(): ReactElement {
                   <div className="text-[12px] text-[var(--text-tertiary)] mt-0.5 leading-relaxed">使用 GPU 加速视频解码，降低 CPU 占用</div>
                 </div>
                 <button
-                  onClick={() => setHardwareDecode(!hardwareDecode)}
+                  onClick={() => { const next = !hardwareDecode; setHardwareDecode(next); savePlayerSettings(next, undefined) }}
                   className={`ios-toggle ${hardwareDecode ? 'active' : ''}`}
                   aria-label="切换硬件解码"
                 />
@@ -606,11 +627,24 @@ function Settings(): ReactElement {
                   <div className="text-[12px] text-[var(--text-tertiary)] mt-0.5 leading-relaxed">播放 HDR 内容时自动进行色彩映射</div>
                 </div>
                 <button
-                  onClick={() => setHdrToneMapping(!hdrToneMapping)}
+                  onClick={() => { const next = !hdrToneMapping; setHdrToneMapping(next); savePlayerSettings(undefined, next) }}
                   className={`ios-toggle ${hdrToneMapping ? 'active' : ''}`}
                   aria-label="切换HDR色调映射"
                 />
               </div>
+
+              <div className="h-px bg-[var(--separator)]" />
+
+              {/* 保存提示 */}
+              {playerSaveMsg && (
+                <motion.div
+                  className="flex items-center gap-2 text-[13px] text-[var(--success)]"
+                  initial={{ opacity: 0, x: -4 }}
+                  animate={{ opacity: 1, x: 0 }}
+                >
+                  <CheckCircle size={14} strokeWidth={1.5} /> {playerSaveMsg}
+                </motion.div>
+              )}
 
               <div className="h-px bg-[var(--separator)]" />
 

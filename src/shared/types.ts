@@ -105,6 +105,30 @@ export interface PlayerState {
   mediaTitle: string
 }
 
+// ===== MPV 轨道类型 =====
+
+export interface MpvTrack {
+  id: number
+  type: 'audio' | 'video' | 'sub'
+  selected: boolean
+  title?: string
+  lang?: string
+  codec?: string
+  'demux-w': number
+  'demux-h': number
+}
+
+export interface MpvState {
+  paused: boolean
+  timePos: number
+  duration: number
+  volume: number
+  speed: number
+  fullscreen: boolean
+  trackList: MpvTrack[]
+  filename: string
+}
+
 // ===== 配置 类型 =====
 
 export interface AppConfig {

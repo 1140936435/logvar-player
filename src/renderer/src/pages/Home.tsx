@@ -3,7 +3,7 @@ import { useRef, useState, useEffect, useCallback, useMemo, memo, type ReactElem
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Search, FolderOpen, Video, ChevronRight, ArrowLeft,
-  Clock, Trash2, X, Loader2, TvMinimal, Film, Folder, Database, ChevronDown, CircleDot, ImagePlus, Download
+  Clock, Trash2, X, Loader2, TvMinimal, Film, Folder, Database, ChevronDown, CircleDot, ImagePlus, Download, Globe
 } from 'lucide-react'
 import { cachedFetch, clearCache } from '../utils/apiCache'
 
@@ -235,6 +235,10 @@ function Home(): ReactElement {
   const [errorMsg, setErrorMsg] = useState('')
   const [libraries, setLibraries] = useState<Library[]>([])
   const [libraryItems, setLibraryItems] = useState<Record<string, MediaItem[]>>({})
+  const [libraryTotalCounts, setLibraryTotalCounts] = useState<Record<string, number>>({})
+  const [libraryLoadCounts, setLibraryLoadCounts] = useState<Record<string, number>>({})
+  const [libraryLoadingMore, setLibraryLoadingMore] = useState<Record<string, boolean>>({})
+  const LIBRARY_PAGE_SIZE = 50
   const [connectedServer, setConnectedServer] = useState('')
   const [jellyfinToken, setJellyfinToken] = useState('')
 
@@ -269,12 +273,13 @@ function Home(): ReactElement {
 
   // 加载本地海报映射
   useEffect(() => {
-    // 加载持久化的海报映射
+    let cancelled = false
     window.api.store.get('poster-map').then((data: any) => {
-      if (data) {
+      if (!cancelled && data) {
         setDoubanPosters(data as Record<string, string>)
       }
     })
+    return () => { cancelled = true }
   }, [])
 
   const isFolderItem = (item: MediaItem): boolean => {
@@ -289,12 +294,28 @@ function Home(): ReactElement {
     try {
       let libResult = await window.api.jellyfin.getLibraries()
       if (!libResult.success && libResult.error === '未连接到 Jellyfin 服务器') {
+        // 优先从旧 key 恢复，其次从多服务器配置恢复
         const saved = await window.api.store.get('jellyfin') as { url?: string; token?: string } | null
-        if (!saved?.url || !saved?.token) {
+        const servers = await window.api.store.get('jellyfin:servers') as Array<{ id?: string; url: string; token: string }> | null
+        const activeId = await window.api.store.get('jellyfin:activeServerId') as string | null
+
+        let url = saved?.url
+        let token = saved?.token
+
+        // 如果旧 key 没有数据，从多服务器配置中获取活跃服务器
+        if ((!url || !token) && servers && servers.length > 0) {
+          const active = activeId ? servers.find(s => s.id === activeId) : servers[0]
+          if (active) {
+            url = active.url
+            token = active.token
+          }
+        }
+
+        if (!url || !token) {
           setPageState('not_connected')
           return
         }
-        const connectResult = await window.api.jellyfin.connect(saved.url, saved.token)
+        const connectResult = await window.api.jellyfin.connect(url, token)
         if (!connectResult.success) {
           setPageState('error')
           setErrorMsg(connectResult.error || '重新连接失败')
@@ -321,27 +342,46 @@ function Home(): ReactElement {
       setLibraries(libs)
 
       const itemsMap: Record<string, MediaItem[]> = {}
+      const totalMap: Record<string, number> = {}
+      const loadCountMap: Record<string, number> = {}
       await Promise.all(libs.map(async (lib) => {
         try {
           const itemsResult = await cachedFetch(
             'jellyfin.getItems',
-            [lib.Id, 0, 50],
-            () => window.api.jellyfin.getItems(lib.Id, 0, 50),
+            [lib.Id, 0, LIBRARY_PAGE_SIZE],
+            () => window.api.jellyfin.getItems(lib.Id, 0, LIBRARY_PAGE_SIZE),
             5 * 60 * 1000 // 5 分钟缓存
           )
           if (itemsResult.success && itemsResult.data) {
-            const itemData = itemsResult.data as { Items?: MediaItem[] }
+            const itemData = itemsResult.data as { Items?: MediaItem[]; TotalRecordCount?: number }
             itemsMap[lib.Id] = itemData.Items || []
+            totalMap[lib.Id] = itemData.TotalRecordCount ?? 0
+            loadCountMap[lib.Id] = (itemData.Items || []).length
           }
         } catch {
           itemsMap[lib.Id] = []
+          totalMap[lib.Id] = 0
+          loadCountMap[lib.Id] = 0
         }
       }))
       setLibraryItems(itemsMap)
+      setLibraryTotalCounts(totalMap)
+      setLibraryLoadCounts(loadCountMap)
 
       try {
         const saved = await window.api.store.get('jellyfin') as { url?: string; token?: string } | null
-        if (saved?.url) setConnectedServer(saved.url.replace(/\/+$/, ''))
+        if (saved?.url) {
+          setConnectedServer(saved.url.replace(/\/+$/, ''))
+        } else {
+          // 从多服务器配置获取
+          const servers = await window.api.store.get('jellyfin:servers') as Array<{ id?: string; url: string; token: string }> | null
+          const activeId = await window.api.store.get('jellyfin:activeServerId') as string | null
+          if (servers && servers.length > 0) {
+            const active = activeId ? servers.find(s => s.id === activeId) : servers[0]
+            if (active?.url) setConnectedServer(active.url.replace(/\/+$/, ''))
+            if (active?.token) setJellyfinToken(active.token)
+          }
+        }
         if (saved?.token) setJellyfinToken(saved.token)
       } catch { /* ignore */ }
 
@@ -363,6 +403,36 @@ function Home(): ReactElement {
     } catch { /* ignore */ }
     setHistoryLoading(false)
   }, [])
+
+  const loadMoreLoadingRef = useRef<Record<string, boolean>>({})
+
+  const loadMoreLibraryItems = useCallback(async (libId: string): Promise<void> => {
+    // 防止重复加载
+    if (loadMoreLoadingRef.current[libId]) return
+    loadMoreLoadingRef.current[libId] = true
+    const currentCount = libraryLoadCounts[libId] || 0
+    setLibraryLoadingMore(prev => ({ ...prev, [libId]: true }))
+    try {
+      const itemsResult = await window.api.jellyfin.getItems(libId, currentCount, LIBRARY_PAGE_SIZE)
+      if (itemsResult.success && itemsResult.data) {
+        const itemData = itemsResult.data as { Items?: MediaItem[]; TotalRecordCount?: number }
+        const newItems = itemData.Items || []
+        setLibraryItems(prev => ({
+          ...prev,
+          [libId]: [...(prev[libId] || []), ...newItems]
+        }))
+        setLibraryLoadCounts(prev => ({
+          ...prev,
+          [libId]: currentCount + newItems.length
+        }))
+        if (itemData.TotalRecordCount != null) {
+          setLibraryTotalCounts(prev => ({ ...prev, [libId]: itemData.TotalRecordCount! }))
+        }
+      }
+    } catch { /* ignore */ }
+    loadMoreLoadingRef.current[libId] = false
+    setLibraryLoadingMore(prev => ({ ...prev, [libId]: false }))
+  }, [libraryLoadCounts])
 
   const loadServers = useCallback(async (): Promise<void> => {
     try {
@@ -675,6 +745,39 @@ function Home(): ReactElement {
               </motion.button>
             </div>
           </div>
+
+          {/* P2: 网络串流 */}
+          <div className="mt-6 text-center">
+            <p className="text-[13px] text-[var(--text-tertiary)] mb-5">或输入网络串流地址</p>
+            <div className="flex justify-center gap-2 max-w-md mx-auto">
+              <input
+                type="text"
+                placeholder="rtsp://、rtmp://、http://m3u8..."
+                className="flex-1 px-4 py-2.5 rounded-lg bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-primary)] text-sm placeholder:text-[var(--text-tertiary)] outline-none focus:border-[var(--accent)] transition-colors"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const url = (e.target as HTMLInputElement).value.trim()
+                    if (url && (url.startsWith('rtsp://') || url.startsWith('rtmp://') || url.startsWith('http://') || url.startsWith('https://') || url.startsWith('mms://'))) {
+                      navigate(`/player?file=${encodeURIComponent(url)}&name=${encodeURIComponent(url.split('/').pop() || url)}`)
+                    }
+                  }
+                }}
+              />
+              <button
+                onClick={(e) => {
+                  const input = (e.currentTarget.parentElement as HTMLElement).querySelector('input') as HTMLInputElement
+                  const url = input?.value.trim()
+                  if (url && (url.startsWith('rtsp://') || url.startsWith('rtmp://') || url.startsWith('http://') || url.startsWith('https://') || url.startsWith('mms://'))) {
+                    navigate(`/player?file=${encodeURIComponent(url)}&name=${encodeURIComponent(url.split('/').pop() || url)}`)
+                  }
+                }}
+                className="ios-btn ios-btn-secondary flex items-center gap-1.5"
+              >
+                <Globe size={14} />
+                播放
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     )
@@ -847,6 +950,10 @@ function Home(): ReactElement {
         {/* 分类内容 */}
         {!isSearching && activeLibrary && (() => {
           const items = libraryItems[activeLibrary] || []
+          const totalCount = libraryTotalCounts[activeLibrary] || 0
+          const loadedCount = libraryLoadCounts[activeLibrary] || items.length
+          const hasMore = loadedCount < totalCount && items.length > 0
+          const isLoadingMore = libraryLoadingMore[activeLibrary] || false
           const activeLib = libraries.find(l => l.Id === activeLibrary)
           return (
             <section className="mb-12">
@@ -855,7 +962,7 @@ function Home(): ReactElement {
                   <ArrowLeft size={14} /> 返回全部
                 </button>
                 <span className="text-[13px] text-[var(--text-tertiary)]">
-                  {activeLib?.Name || activeLibrary} — {items.length} 部
+                  {activeLib?.Name || activeLibrary} — {totalCount > 0 ? `${loadedCount}/${totalCount}` : `${items.length} 部`}
                 </span>
               </div>
               {items.length === 0 ? (
@@ -873,6 +980,22 @@ function Home(): ReactElement {
                       onScrape={() => handleScrape(item)}
                     />
                   ))}
+                </div>
+              )}
+              {hasMore && (
+                <div className="flex justify-center mt-6">
+                  <motion.button
+                    onClick={() => loadMoreLibraryItems(activeLibrary)}
+                    disabled={isLoadingMore}
+                    className="ios-btn ios-btn-secondary"
+                    whileTap={{ scale: 0.96 }}
+                  >
+                    {isLoadingMore ? (
+                      <><Loader2 size={15} className="animate-spin" strokeWidth={1.5} /> 加载中...</>
+                    ) : (
+                      `加载更多 (${totalCount - loadedCount} 项)`
+                    )}
+                  </motion.button>
                 </div>
               )}
             </section>
@@ -999,12 +1122,17 @@ function Home(): ReactElement {
                 <Clock size={14} />
                 最近播放
               </h2>
-              {historyItems.length > 0 && (
-                <button onClick={handleHistoryClear} className="text-[13px] text-[var(--accent)] hover:text-[var(--accent-light)] transition-colors flex items-center gap-1">
-                  <Trash2 size={12} />
-                  清空
-                </button>
-              )}
+              <div className="flex items-center gap-3">
+                <Link to="/history" className="text-[13px] text-[var(--accent)] hover:text-[var(--accent-light)] transition-colors">
+                  查看全部
+                </Link>
+                {historyItems.length > 0 && (
+                  <button onClick={handleHistoryClear} className="text-[13px] text-[var(--error)] hover:text-[var(--error)]/80 transition-colors flex items-center gap-1">
+                    <Trash2 size={12} />
+                    清空
+                  </button>
+                )}
+              </div>
             </div>
             {historyLoading ? (
               <div className="flex items-center justify-center py-12">
@@ -1076,10 +1204,17 @@ function Home(): ReactElement {
         {!isSearching && !activeLibrary && !drillLoading && !currentDrill && pageState === 'ready' &&
           libraries.map((lib) => {
             const items = libraryItems[lib.Id] || []
+            const totalCount = libraryTotalCounts[lib.Id] || 0
+            const loadedCount = libraryLoadCounts[lib.Id] || items.length
+            const hasMore = loadedCount < totalCount && items.length > 0
+            const isLoadingMore = libraryLoadingMore[lib.Id] || false
             if (items.length === 0) return null
             return (
               <section key={lib.Id} className="mb-12">
-                <h2 className="section-title mb-4">{lib.Name}</h2>
+                <h2 className="section-title mb-4">
+                  {lib.Name}
+                  {totalCount > 0 && <span className="text-[12px] text-[var(--text-quaternary)] font-normal ml-2">({loadedCount}/{totalCount})</span>}
+                </h2>
                 <div className="responsive-grid">
                   {items.map((item) => (
                     <MediaCard
@@ -1099,6 +1234,23 @@ function Home(): ReactElement {
                     />
                   ))}
                 </div>
+                {/* 加载更多 */}
+                {hasMore && (
+                  <div className="flex justify-center mt-6">
+                    <motion.button
+                      onClick={() => loadMoreLibraryItems(lib.Id)}
+                      disabled={isLoadingMore}
+                      className="ios-btn ios-btn-secondary"
+                      whileTap={{ scale: 0.96 }}
+                    >
+                      {isLoadingMore ? (
+                        <><Loader2 size={15} className="animate-spin" strokeWidth={1.5} /> 加载中...</>
+                      ) : (
+                        `加载更多 (${totalCount - loadedCount} 项)`
+                      )}
+                    </motion.button>
+                  </div>
+                )}
               </section>
             )
           })}

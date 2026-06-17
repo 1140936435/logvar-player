@@ -14,6 +14,20 @@ const api: Api = {
     setVolume: (volume: number) => ipcRenderer.invoke('mpv:set-volume', volume),
     setSpeed: (speed: number) => ipcRenderer.invoke('mpv:set-speed', speed),
     toggleFullscreen: () => ipcRenderer.invoke('mpv:toggle-fullscreen'),
+    getState: () => ipcRenderer.invoke('mpv:get-state'),
+    getTracks: () => ipcRenderer.invoke('mpv:get-tracks'),
+    selectTrack: (trackId: number) => ipcRenderer.invoke('mpv:select-track', trackId),
+    selectSubtitle: (trackId: number) => ipcRenderer.invoke('mpv:select-subtitle', trackId),
+    disableSubtitle: () => ipcRenderer.invoke('mpv:disable-subtitle'),
+    loadExternalSubtitle: (subtitlePath: string) => ipcRenderer.invoke('mpv:load-subtitle', subtitlePath),
+    getProperty: (name: string) => ipcRenderer.invoke('mpv:get-property', name),
+    setProperty: (name: string, value: unknown) => ipcRenderer.invoke('mpv:set-property', name, value),
+    screenshot: (filePath: string) => ipcRenderer.invoke('mpv:screenshot', filePath),
+    screenshotSave: () => ipcRenderer.invoke('mpv:screenshot-save'),
+    thumbnail: (timePos: number) => ipcRenderer.invoke('mpv:thumbnail', timePos),
+    isAvailable: () => ipcRenderer.invoke('mpv:is-available'),
+    embed: (x: number, y: number, width: number, height: number) => ipcRenderer.invoke('mpv:embed', x, y, width, height),
+    updateEmbed: (x: number, y: number, width: number, height: number) => ipcRenderer.invoke('mpv:update-embed', x, y, width, height),
     onEvent: (callback: (event: string, data: any) => void) => {
       ipcRenderer.on('mpv:event', (_event, data) => callback(data.event, data))
     }
@@ -111,7 +125,8 @@ const api: Api = {
   window: {
     minimize: () => ipcRenderer.invoke('window:minimize'),
     maximize: () => ipcRenderer.invoke('window:maximize'),
-    close: () => ipcRenderer.invoke('window:close')
+    close: () => ipcRenderer.invoke('window:close'),
+    alwaysOnTop: (enabled?: boolean) => ipcRenderer.invoke('window:always-on-top', enabled)
   },
 
   // 日志

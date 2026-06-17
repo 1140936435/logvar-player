@@ -1,5 +1,5 @@
 import { HashRouter, Routes, Route, Link, useLocation } from 'react-router-dom'
-import { Settings, Play, Home as HomeIcon, Minus, X as XIcon, Copy, Sun, Moon } from 'lucide-react'
+import { Settings, Play, Home as HomeIcon, History as HistoryIcon, Minus, X as XIcon, Copy, Sun, Moon } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useState, useEffect, lazy, Suspense, type ReactElement } from 'react'
 import AppLogo from './components/AppLogo'
@@ -9,6 +9,7 @@ const Home = lazy(() => import('./pages/Home'))
 const Player = lazy(() => import('./pages/Player'))
 const Detail = lazy(() => import('./pages/Detail'))
 const SettingsPage = lazy(() => import('./pages/Settings'))
+const HistoryPage = lazy(() => import('./pages/History'))
 
 function LoadingFallback(): ReactElement {
   return <div className="flex-1 flex items-center justify-center"><div className="w-6 h-6 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" /></div>
@@ -83,6 +84,7 @@ function TopBar({ dark, toggleTheme }: { dark: boolean; toggleTheme: () => void 
       {!isPlayer && (
         <nav className="ml-3 flex items-center gap-0.5 no-drag">
           <NavItem to="/" icon={HomeIcon} label="媒体库" active={location.pathname === '/'} />
+          <NavItem to="/history" icon={HistoryIcon} label="历史" active={location.pathname === '/history'} />
           <NavItem to="/settings" icon={Settings} label="设置" active={location.pathname === '/settings'} />
         </nav>
       )}
@@ -112,9 +114,8 @@ function TopBar({ dark, toggleTheme }: { dark: boolean; toggleTheme: () => void 
         </motion.button>
       )}
 
-      {/* Window controls */}
-      {!isPlayer && <WindowControls />}
-      {isPlayer && <div className="drag-region h-full w-40" />}
+      {/* Window controls — 所有页面都显示 */}
+      <WindowControls />
     </header>
   )
 }
@@ -181,12 +182,21 @@ function AppLayout(): ReactElement {
   const location = useLocation()
   const { dark, toggle } = useTheme()
 
+  // 修复: Electron loadFile 产生的 file:// 路径泄漏为 pathname（如 /C:/...）
+  // HashRouter 应只解析 hash，但初始加载可能出现此问题
+  useEffect(() => {
+    const p = location.pathname
+    if (p.includes('://') || /^[A-Z]:/i.test(p) || p.endsWith('.html')) {
+      window.location.hash = '#/'
+    }
+  }, [])
+
   useEffect(() => {
     applyGlassStyles()
     const observer = new MutationObserver(() => applyGlassStyles())
     observer.observe(document.body, { childList: true, subtree: true })
     return () => observer.disconnect()
-  }, [location.pathname])
+  }, [])
 
   return (
     <div className="h-screen flex flex-col overflow-hidden relative" style={{ background: 'var(--bg-page)' }}>
@@ -197,6 +207,7 @@ function AppLayout(): ReactElement {
             <Route path="/" element={<PageTransition><Suspense fallback={<LoadingFallback />}><Home /></Suspense></PageTransition>} />
             <Route path="/detail/:itemId" element={<PageTransition><Suspense fallback={<LoadingFallback />}><Detail /></Suspense></PageTransition>} />
             <Route path="/player" element={<PageTransition><Suspense fallback={<LoadingFallback />}><Player /></Suspense></PageTransition>} />
+            <Route path="/history" element={<PageTransition><Suspense fallback={<LoadingFallback />}><HistoryPage /></Suspense></PageTransition>} />
             <Route path="/settings" element={<PageTransition><Suspense fallback={<LoadingFallback />}><SettingsPage /></Suspense></PageTransition>} />
           </Routes>
         </AnimatePresence>

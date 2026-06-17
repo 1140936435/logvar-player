@@ -1,5 +1,5 @@
 // Preload API 类型定义
-import type { DanmakuComment, DanmakuConfig, DanmakuMatchResult, DanmakuSearchResponse, JellyfinItem, JellyfinLibrary, PlayerState } from './types'
+import type { DanmakuComment, DanmakuConfig, DanmakuMatchResult, DanmakuSearchResponse, JellyfinItem, JellyfinLibrary, MpvTrack, MpvState, PlayerState } from './types'
 
 // ===== 通用响应类型 =====
 export interface ApiResponse<T = unknown> {
@@ -152,6 +152,20 @@ export interface Api {
     setVolume: (volume: number) => Promise<ApiResponse<void>>
     setSpeed: (speed: number) => Promise<ApiResponse<void>>
     toggleFullscreen: () => Promise<ApiResponse<void>>
+    getState: () => Promise<ApiResponse<MpvState>>
+    getTracks: () => Promise<ApiResponse<MpvTrack[]>>
+    selectTrack: (trackId: number) => Promise<ApiResponse<void>>
+    selectSubtitle: (trackId: number) => Promise<ApiResponse<void>>
+    disableSubtitle: () => Promise<ApiResponse<void>>
+    loadExternalSubtitle: (subtitlePath: string) => Promise<ApiResponse<void>>
+    getProperty: (name: string) => Promise<ApiResponse<unknown>>
+    setProperty: (name: string, value: unknown) => Promise<ApiResponse<void>>
+    screenshot: (filePath: string) => Promise<ApiResponse<void>>
+    screenshotSave: () => Promise<ApiResponse<string>>
+    thumbnail: (timePos: number) => Promise<ApiResponse<{ dataUrl: string }>>
+    isAvailable: () => Promise<ApiResponse<boolean>>
+    embed: (x: number, y: number, width: number, height: number) => Promise<ApiResponse<void>>
+    updateEmbed: (x: number, y: number, width: number, height: number) => Promise<ApiResponse<void>>
     onEvent: (callback: (event: string, data: MpvEvent) => void) => void
   }
 
@@ -221,6 +235,7 @@ export interface Api {
     minimize: () => Promise<void>
     maximize: () => Promise<void>
     close: () => Promise<void>
+    alwaysOnTop: (enabled?: boolean) => Promise<ApiResponse<boolean>>
   }
 }
 

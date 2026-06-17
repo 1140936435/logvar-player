@@ -111,10 +111,22 @@ function Detail(): ReactElement {
     setLoading(true)
     setError('')
 
-    // 先读取服务器地址
-    window.api.store.get('jellyfin').then((saved: any) => {
+    // 先读取服务器地址（优先旧 key，其次多服务器配置）
+    window.api.store.get('jellyfin').then(async (saved: any) => {
       if (saved?.url) setBaseUrl(saved.url.replace(/\/+$/, ''))
-      if (saved?.token) setJellyfinToken(saved.token)
+      if (saved?.token) {
+        setJellyfinToken(saved.token)
+      } else {
+        try {
+          const servers = await window.api.store.get('jellyfin:servers') as Array<{ id?: string; url?: string; token?: string }> | null
+          const activeId = await window.api.store.get('jellyfin:activeServerId') as string | null
+          if (servers && servers.length > 0) {
+            const active = activeId ? servers.find(s => s.id === activeId) : servers[0]
+            if (active?.url) setBaseUrl(active.url.replace(/\/+$/, ''))
+            if (active?.token) setJellyfinToken(active.token)
+          }
+        } catch { /* ignore */ }
+      }
     }).catch(() => {})
 
     cachedFetch(
@@ -188,10 +200,21 @@ function Detail(): ReactElement {
   }
 
   // 播放
-  const handlePlay = (epId?: string, epName?: string): void => {
-    window.api.store.get('jellyfin').then((saved: any) => {
-      const serverUrl = saved?.url || baseUrl
-      // 如果是电视剧且没有指定集数，用已加载的第一集 ID
+  const handlePlay = async (epId?: string, epName?: string): Promise<void> => {
+    const saved = await window.api.store.get('jellyfin') as any
+    let serverUrl = saved?.url || baseUrl
+    if (!serverUrl) {
+      // 从多服务器配置获取
+      try {
+        const servers = await window.api.store.get('jellyfin:servers') as Array<{ id?: string; url?: string }> | null
+        const activeId = await window.api.store.get('jellyfin:activeServerId') as string | null
+        if (servers && servers.length > 0) {
+          const active = activeId ? servers.find(s => s.id === activeId) : servers[0]
+          if (active?.url) serverUrl = active.url.replace(/\/+$/, '')
+        }
+      } catch { /* ignore */ }
+    }
+    // 如果是电视剧且没有指定集数，用已加载的第一集 ID
       let targetId = epId || ''
       let targetName = epName || detail?.Name || '未知视频'
       if (!targetId && isSeries && episodes.length > 0) {
@@ -205,7 +228,6 @@ function Detail(): ReactElement {
       const seriesId = detail?.SeriesId || ''
       const seasonId = detail?.SeasonId || ''
       navigate(`/player?itemId=${encodeURIComponent(targetId)}&name=${encodeURIComponent(targetName)}&base=${encodeURIComponent(serverUrl)}&seriesName=${encodeURIComponent(seriesName)}&seriesId=${encodeURIComponent(seriesId)}&seasonId=${encodeURIComponent(seasonId)}`)
-    })
   }
 
   const getPosterUrl = (): string | null => {

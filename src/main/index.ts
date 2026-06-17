@@ -20,6 +20,16 @@ import type { DanmakuComment, DanmakuCommentRaw, DanmakuCommentsResponse, Danmak
 import * as http from 'http'
 import * as https from 'https'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { MpvController, type MpvControllerOptions, getThumbnailMpv } from './mpv-controller'
+
+// ==================== Windows 控制台 UTF-8 ====================
+if (platform() === 'win32') {
+  try {
+    // 设置控制台输出代码页为 UTF-8，避免中文日志乱码
+    const { execSync } = require('child_process')
+    execSync('chcp 65001', { stdio: 'ignore' })
+  } catch {}
+}
 
 // ==================== 资源路径工具 ====================
 
@@ -70,7 +80,9 @@ function cleanOldLogs(): void {
     const files = readdirSync(logsDir).filter(f => f.endsWith('.log')).sort()
     for (const file of files) {
       const dateStr = file.replace('.log', '')
-      const fileDate = new Date(dateStr).getTime()
+      // 解析为本地时间而非 UTC
+      const parts = dateStr.split('-').map(Number)
+      const fileDate = new Date(parts[0], parts[1] - 1, parts[2]).getTime()
       if (now - fileDate > 7 * 24 * 60 * 60 * 1000) {
         unlinkSync(join(logsDir, file))
       }
@@ -132,6 +144,7 @@ function getLogWindow(): BrowserWindow {
     minHeight: 300,
     title: 'mplay - 日志',
     backgroundColor: '#0d0d0d',
+    icon: getResourcePath('build/icon.png'),
     show: false,
     webPreferences: {
       nodeIntegration: true,
@@ -250,7 +263,14 @@ interface JellyfinServerConfig {
 
 function getServers(): JellyfinServerConfig[] {
   const raw = configData['jellyfin:servers']
-  if (Array.isArray(raw)) return raw as JellyfinServerConfig[]
+  if (Array.isArray(raw)) {
+    // 防御性解密：确保所有服务器数据的 url/token 始终是明文
+    return (raw as JellyfinServerConfig[]).map(s => ({
+      ...s,
+      url: decryptValue(s.url),
+      token: decryptValue(s.token)
+    }))
+  }
   return []
 }
 
@@ -299,7 +319,10 @@ async function connectToServer(id: string): Promise<{ success: boolean; data?: J
   if (!server) return { success: false, error: '服务器不存在' }
 
   try {
-    const auth: JellyfinAuth = { url: server.url, token: server.token, userId: '' }
+    // 防御性解密：确保 url/token 始终是明文
+    const url = decryptValue(server.url)
+    const token = decryptValue(server.token)
+    const auth: JellyfinAuth = { url, token, userId: '' }
     const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
       auth, '/System/Info'
     )
@@ -316,7 +339,7 @@ async function connectToServer(id: string): Promise<{ success: boolean; data?: J
     setActiveServerId(id)
 
     // 同步旧 key（兼容性）
-    configData['jellyfin'] = { url: server.url, token: server.token }
+    configData['jellyfin'] = { url, token }
     saveConfigFile()
 
     console.log(`[server] 已连接: ${info.ServerName} v${info.Version}, userId=${auth.userId}`)
@@ -330,8 +353,11 @@ async function connectToServer(id: string): Promise<{ success: boolean; data?: J
 
 ipcMain.handle('jellyfin:connect', async (_event, url: string, token: string) => {
   try {
-    console.log(`Attempting Jellyfin connection to ${url}`)
-    const auth: JellyfinAuth = { url, token, userId: '' }
+    // 防御性解密：渲染进程可能传入加密值
+    const decryptedUrl = decryptValue(url)
+    const decryptedToken = decryptValue(token)
+    console.log(`Attempting Jellyfin connection to ${decryptedUrl}`)
+    const auth: JellyfinAuth = { url: decryptedUrl, token: decryptedToken, userId: '' }
 
     const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
       auth,
@@ -402,6 +428,8 @@ ipcMain.handle('server:remove', async (_event, id: string) => {
   if (getActiveServerId() === id) {
     if (servers.length > 0) {
       setActiveServerId(servers[0].id)
+      // 连接到新的活跃服务器
+      await connectToServer(servers[0].id).catch(() => {})
     } else {
       setActiveServerId('')
       jellyfinAuth = null
@@ -418,7 +446,9 @@ ipcMain.handle('server:switch', async (_event, id: string) => {
 ipcMain.handle('server:test', async (_event, url: string, token: string) => {
   const startTime = Date.now()
   try {
-    const auth: JellyfinAuth = { url: url.replace(/\/+$/, ''), token, userId: '' }
+    const decryptedUrl = decryptValue(url).replace(/\/+$/, '')
+    const decryptedToken = decryptValue(token)
+    const auth: JellyfinAuth = { url: decryptedUrl, token: decryptedToken, userId: '' }
     const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
       auth, '/System/Info'
     )
@@ -527,10 +557,10 @@ ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
   if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
 
   try {
-    // 第1步：获取 item 详情，提取真实 MediaSourceId
+    // 第1步：获取 item 详情，提取真实 MediaSourceId（必须请求 Fields=MediaSources）
     const item = await jellyfinRequest<{
       MediaSources?: { Id: string; Name?: string; Container?: string }[]
-    }>(jellyfinAuth, `/Users/${jellyfinAuth.userId}/Items/${itemId}`)
+    }>(jellyfinAuth, `/Users/${jellyfinAuth.userId}/Items/${itemId}?Fields=MediaSources`)
 
     const mediaSources = item?.MediaSources
     if (!mediaSources || mediaSources.length === 0) {
@@ -844,8 +874,6 @@ ipcMain.handle('jellyfin:get-genre-items', async (_event, genre: string, startIn
 
 /** 需要加密存储的 key 列表 */
 const ENCRYPTED_KEYS = new Set([
-  'jellyfin.token',
-  'jellyfin.url',
   'danmaku:api-primary',
   'danmaku:api-mirrors',
 ])
@@ -858,27 +886,26 @@ function sanitizeLog(msg: string): string {
 }
 
 function encryptValue(plain: string): string {
-  // 临时禁用加密，确保应用能正常工作
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      const buf = safeStorage.encryptString(plain)
+      return 'enc:' + buf.toString('base64')
+    }
+  } catch (err) {
+    console.warn('[Config] Encryption failed, storing plaintext:', (err as Error).message)
+  }
   return plain
-  // try {
-  //   if (safeStorage.isEncryptionAvailable()) {
-  //     const buf = safeStorage.encryptString(plain)
-  //     return 'enc:' + buf.toString('base64')
-  //   }
-  // } catch { /* fallthrough */ }
-  // return plain
 }
 
 function decryptValue(stored: string): string {
-  // 临时禁用解密，确保应用能正常工作
-  return stored
-  // if (!stored.startsWith('enc:')) return stored
-  // try {
-  //   const buf = Buffer.from(stored.slice(4), 'base64')
-  //   return safeStorage.decryptString(buf)
-  // } catch {
-  //   return stored
-  // }
+  if (!stored || !stored.startsWith('enc:')) return stored
+  try {
+    const buf = Buffer.from(stored.slice(4), 'base64')
+    return safeStorage.decryptString(buf)
+  } catch (err) {
+    console.warn('[Config] Decryption failed, returning empty string:', (err as Error).message)
+    return ''
+  }
 }
 
 /** 递归加密 configData 中的敏感字段 */
@@ -901,6 +928,19 @@ function encryptConfig(data: Record<string, unknown>): Record<string, unknown> {
       }
     }
     out.jellyfin = jf
+  }
+  // 多服务器格式：jellyfin:servers 数组中的 token 和 url
+  if (Array.isArray(out['jellyfin:servers'])) {
+    out['jellyfin:servers'] = (out['jellyfin:servers'] as Record<string, unknown>[]).map(server => {
+      const s = { ...server }
+      if (typeof s.token === 'string' && s.token && !(s.token as string).startsWith('enc:')) {
+        s.token = encryptValue(s.token as string)
+      }
+      if (typeof s.url === 'string' && s.url && !(s.url as string).startsWith('enc:')) {
+        s.url = encryptValue(s.url as string)
+      }
+      return s
+    })
   }
   return out
 }
@@ -925,6 +965,19 @@ function decryptConfig(data: Record<string, unknown>): Record<string, unknown> {
     }
     out.jellyfin = jf
   }
+  // 多服务器格式：jellyfin:servers 数组中的 token 和 url
+  if (Array.isArray(out['jellyfin:servers'])) {
+    out['jellyfin:servers'] = (out['jellyfin:servers'] as Record<string, unknown>[]).map(server => {
+      const s = { ...server }
+      if (typeof s.token === 'string' && (s.token as string).startsWith('enc:')) {
+        s.token = decryptValue(s.token as string)
+      }
+      if (typeof s.url === 'string' && (s.url as string).startsWith('enc:')) {
+        s.url = decryptValue(s.url as string)
+      }
+      return s
+    })
+  }
   return out
 }
 
@@ -940,7 +993,7 @@ function loadConfigFile(): void {
       console.log('[Config] Loaded successfully, keys:', Object.keys(configData))
       console.log('[Config] jellyfin:servers exists?', 'jellyfin:servers' in configData)
       if (configData['jellyfin:servers']) {
-        console.log('[Config] jellyfin:servers:', configData['jellyfin:servers'])
+        console.log('[Config] jellyfin:servers count:', Array.isArray(configData['jellyfin:servers']) ? (configData['jellyfin:servers'] as unknown[]).length : 0)
       }
       // 检查旧格式
       if (configData['jellyfin.url'] && !configData['jellyfin:servers']) {
@@ -972,12 +1025,30 @@ loadConfigFile()
 migrateLegacyConfig()
 
 ipcMain.handle('store:get', async (_event, key: string) => {
-  return configData[key] ?? null
+  const val = configData[key]
+  // 防御性解密：确保渲染进程获取的敏感字段始终是明文
+  if (val && typeof val === 'object' && key === 'jellyfin') {
+    const jf = val as Record<string, unknown>
+    return { ...jf, url: decryptValue(jf.url as string), token: decryptValue(jf.token as string) }
+  }
+  if (Array.isArray(val) && key === 'jellyfin:servers') {
+    return (val as Record<string, unknown>[]).map(s => ({
+      ...s,
+      url: decryptValue(s.url as string),
+      token: decryptValue(s.token as string)
+    }))
+  }
+  return val ?? null
 })
 
 ipcMain.handle('store:set', async (_event, key: string, value: unknown) => {
   configData[key] = value
   saveConfigFile()
+  // 如果播放器设置变更，销毁旧的 mpv 控制器以便下次使用时以新设置重新创建
+  if (key === 'player' && mpvController) {
+    mpvController.stop().catch(() => {})
+    mpvController = null
+  }
   return true
 })
 
@@ -1003,6 +1074,340 @@ ipcMain.handle('window:maximize', () => {
 
 ipcMain.handle('window:close', () => {
   mainWindow?.close()
+})
+
+// 窗口置顶（画中画 / 小窗模式）
+let isAlwaysOnTop = false
+ipcMain.handle('window:always-on-top', async (_event, enabled?: boolean) => {
+  if (!mainWindow) return { success: false, error: '主窗口未创建' }
+  isAlwaysOnTop = enabled ?? !isAlwaysOnTop
+  mainWindow.setAlwaysOnTop(isAlwaysOnTop, 'screen-saver')
+  return { success: true, data: isAlwaysOnTop }
+})
+
+// 截图保存（带文件保存对话框）
+ipcMain.handle('mpv:screenshot-save', async () => {
+  if (!mainWindow) return { success: false, error: '主窗口未创建' }
+  try {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '保存截图',
+      defaultPath: `screenshot_${Date.now()}.png`,
+      filters: [
+        { name: 'PNG 图片', extensions: ['png'] },
+        { name: 'JPEG 图片', extensions: ['jpg', 'jpeg'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    })
+    if (result.canceled || !result.filePath) return { success: false, error: '用户取消' }
+    await getMpvController().screenshot(result.filePath)
+    return { success: true, data: result.filePath }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// ==================== MPV 控制器 ====================
+
+let mpvController: MpvController | null = null
+
+function getMpvController(): MpvController {
+  if (!mpvController) {
+    const playerConfig = configData['player'] as Record<string, unknown> | undefined
+    const options: MpvControllerOptions = {
+      mpvBinary: configData['mpv:binary'] as string | undefined,
+      hardwareDecode: (playerConfig?.hardwareDecode as boolean) ?? true,
+      hdrToneMapping: (playerConfig?.hdrToneMapping as boolean) ?? false
+    }
+    mpvController = new MpvController(options)
+
+    // 监听 mpv 事件，转发到渲染进程
+    mpvController.on('ready', () => {
+      console.log('[MPV] Ready')
+      mainWindow?.webContents.send('mpv:event', { event: 'ready' })
+    })
+
+    mpvController.on('time', (time: number) => {
+      mainWindow?.webContents.send('mpv:event', { event: 'time', data: time })
+    })
+
+    mpvController.on('duration', (duration: number) => {
+      mainWindow?.webContents.send('mpv:event', { event: 'duration', data: duration })
+    })
+
+    mpvController.on('pause', (paused: boolean) => {
+      mainWindow?.webContents.send('mpv:event', { event: 'pause', data: paused })
+    })
+
+    mpvController.on('volume', (volume: number) => {
+      mainWindow?.webContents.send('mpv:event', { event: 'volume', data: volume })
+    })
+
+    mpvController.on('speed', (speed: number) => {
+      mainWindow?.webContents.send('mpv:event', { event: 'speed', data: speed })
+    })
+
+    mpvController.on('track-list', (tracks: unknown) => {
+      mainWindow?.webContents.send('mpv:event', { event: 'track-list', data: tracks })
+    })
+
+    mpvController.on('fullscreen', (fullscreen: boolean) => {
+      mainWindow?.webContents.send('mpv:event', { event: 'fullscreen', data: fullscreen })
+    })
+
+    mpvController.on('file-loaded', () => {
+      console.log('[MPV] File loaded')
+      mainWindow?.webContents.send('mpv:event', { event: 'file-loaded' })
+    })
+
+    mpvController.on('start', () => {
+      mainWindow?.webContents.send('mpv:event', { event: 'start' })
+    })
+
+    mpvController.on('stop', () => {
+      mainWindow?.webContents.send('mpv:event', { event: 'stop' })
+    })
+
+    mpvController.on('seek', () => {
+      mainWindow?.webContents.send('mpv:event', { event: 'seek' })
+    })
+
+    mpvController.on('idle', () => {
+      mainWindow?.webContents.send('mpv:event', { event: 'idle' })
+    })
+
+    mpvController.on('quit', () => {
+      console.log('[MPV] Quit')
+      mainWindow?.webContents.send('mpv:event', { event: 'quit' })
+    })
+
+    mpvController.on('error', (err: Error) => {
+      console.error('[MPV] Error:', err.message)
+      mainWindow?.webContents.send('mpv:event', { event: 'error', data: err.message })
+    })
+  }
+  return mpvController
+}
+
+// MPV 播放控制 IPC
+ipcMain.handle('mpv:play', async (_event, filePath: string) => {
+  try {
+    const controller = getMpvController()
+    if (!controller.isMpvRunning()) {
+      // mpv 未运行时，必须先通过 mpv:embed 创建子窗口后再启动
+      // 直接启动会导致 mpv 以独立窗口模式运行
+      if (!controller.hasChildWindow()) {
+        return { success: false, error: 'mpv 未嵌入，请先调用 mpv:embed' }
+      }
+      await controller.start()
+    }
+    await controller.loadFile(filePath)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:stop', async () => {
+  try {
+    const controller = getMpvController()
+    await controller.stop()
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:pause', async () => {
+  try {
+    await getMpvController().pause_()
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:resume', async () => {
+  try {
+    await getMpvController().play()
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:seek', async (_event, position: number) => {
+  try {
+    await getMpvController().seek(position)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:set-volume', async (_event, volume: number) => {
+  try {
+    await getMpvController().setVolume(volume)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:set-speed', async (_event, speed: number) => {
+  try {
+    await getMpvController().setSpeed(speed)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:toggle-fullscreen', async () => {
+  try {
+    await getMpvController().toggleFullscreen()
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:get-state', async () => {
+  try {
+    const state = getMpvController().getState()
+    return { success: true, data: state }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// MPV 轨道管理 IPC
+ipcMain.handle('mpv:get-tracks', async () => {
+  try {
+    const tracks = await getMpvController().getTrackList()
+    return { success: true, data: tracks }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:select-track', async (_event, trackId: number) => {
+  try {
+    await getMpvController().selectTrack(trackId)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:select-subtitle', async (_event, trackId: number) => {
+  try {
+    await getMpvController().selectSubtitle(trackId)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:disable-subtitle', async () => {
+  try {
+    await getMpvController().disableSubtitle()
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:load-subtitle', async (_event, subtitlePath: string) => {
+  try {
+    await getMpvController().loadExternalSubtitle(subtitlePath)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:get-property', async (_event, name: string) => {
+  try {
+    const value = await getMpvController().getProperty(name)
+    return { success: true, data: value }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:set-property', async (_event, name: string, value: unknown) => {
+  try {
+    await getMpvController().setProperty(name, value)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:screenshot', async (_event, filePath: string) => {
+  try {
+    await getMpvController().screenshot(filePath)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// MPV 缩略图获取（用于进度条悬浮预览）
+ipcMain.handle('mpv:thumbnail', async (_event, timePos: number) => {
+  try {
+    const controller = getMpvController()
+    // 使用 loadFile 时缓存的完整路径/URL，而非 mpv 的 filename 属性（仅返回最后一段）
+    const filePath = controller.getLoadedFilePath()
+    if (!filePath) {
+      return { success: false, error: 'No file loaded' }
+    }
+    const playerConfig = configData['player'] as Record<string, unknown> | undefined
+    const hardwareDecode = (playerConfig?.hardwareDecode as boolean) ?? true
+    console.log(`[IPC][mpv:thumbnail] requested timePos=${timePos.toFixed(2)} path=${filePath.substring(0, 100)}...`)
+    const dataUrl = await getThumbnailMpv().screenshot(timePos, hardwareDecode, filePath)
+    console.log(`[IPC][mpv:thumbnail] OK, dataUrl length=${dataUrl.length}`)
+    return { success: true, data: { dataUrl } }
+  } catch (err) {
+    console.error(`[IPC][mpv:thumbnail] ERROR:`, err)
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// MPV 可用性检查
+ipcMain.handle('mpv:is-available', async () => {
+  try {
+    const controller = getMpvController()
+    return { success: true, data: controller.isAvailable() }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// MPV 嵌入窗口（渲染进程调用以设置子窗口位置）
+ipcMain.handle('mpv:embed', async (_event, x: number, y: number, width: number, height: number) => {
+  try {
+    if (!mainWindow) return { success: false, error: '主窗口未创建' }
+    const controller = getMpvController()
+    // 先创建子窗口（设置 childHwnd），再启动 mpv（这样 --wid 才会被添加到参数中）
+    const created = controller.createChildWindow(mainWindow, x, y, width, height)
+    // 只有子窗口创建成功才启动 mpv，否则 mpv 会以独立窗口模式运行
+    if (created && !controller.isMpvRunning()) {
+      await controller.start()
+    }
+    return { success: created }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('mpv:update-embed', async (_event, x: number, y: number, width: number, height: number) => {
+  try {
+    getMpvController().updateChildWindowPosition(x, y, width, height)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
 })
 
 // ==================== IPC: 播放历史 ====================
@@ -1228,17 +1633,21 @@ ipcMain.handle('file:open-file', async () => {
 })
 
 ipcMain.handle('file:open-folder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow!, {
-    title: '打开文件夹',
-    properties: ['openDirectory']
-  })
-  if (result.canceled || result.filePaths.length === 0) {
-    return { success: false, error: '未选择文件夹' }
+  try {
+    if (!mainWindow) return { success: false, error: '主窗口未创建' }
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory']
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, error: '未选择文件夹' }
+    }
+    const folderPath = result.filePaths[0]
+    console.log('file:open-folder selected:', folderPath)
+    const scanResult = await scanVideoFolder(folderPath)
+    return scanResult
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
-  const folderPath = result.filePaths[0]
-  console.log('file:open-folder selected:', folderPath)
-  const scanResult = await scanVideoFolder(folderPath)
-  return scanResult
 })
 
 ipcMain.handle('file:scan-folder', async (_event, folderPath: string) => {
@@ -1264,8 +1673,8 @@ function getDanmakuApiConfig(): { primary: string; mirrors: string[] } {
   const storeMirrors = configData['danmaku:api-mirrors'] as string[] | undefined
 
   return {
-    primary: storePrimary || 'https://api.dandanplay.net',
-    mirrors: storeMirrors || ['https://danmu.smilion.cn']
+    primary: decryptValue(storePrimary || 'https://api.dandanplay.net'),
+    mirrors: (storeMirrors || ['https://danmu.smilion.cn']).map(m => decryptValue(m))
   }
 }
 
@@ -1640,7 +2049,9 @@ ipcMain.handle('danmaku:bilibili-comments', async (_event, cid: number) => {
     }
     const xml = await readResponseBody(response)
     const comments = parseBilibiliXml(xml)
-    return { success: true, data: { count: comments.length, comments } }
+    const bilibiliResult = { count: comments.length, comments }
+    writeCachedComments(cid, bilibiliResult)
+    return { success: true, data: bilibiliResult }
   } catch (err) {
     return { success: false, error: String(err) }
   }
@@ -2051,6 +2462,10 @@ function registerDoubanImageProtocol(): void {
         if (!res.ok) throw new Error('fetch failed')
         const buffer = Buffer.from(await res.arrayBuffer())
         const mime = res.headers.get('content-type') || 'image/jpeg'
+        if (DOUBAN_IMG_CACHE.size >= DOUBAN_IMG_CACHE_MAX) {
+          const firstKey = DOUBAN_IMG_CACHE.keys().next().value
+          if (firstKey) DOUBAN_IMG_CACHE.delete(firstKey)
+        }
         DOUBAN_IMG_CACHE.set(url, { buffer, mime })
         resolve(new Response(buffer, {
           status: 200,
@@ -2175,7 +2590,9 @@ function createWindow(): void {
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    // 确保 HashRouter 初始化时有正确的 hash，避免 file:// 路径泄漏为 pathname
+    const filePath = join(__dirname, '../renderer/index.html')
+    mainWindow.loadURL(pathToFileURL(filePath).href + '#/')
   }
 }
 
@@ -2264,6 +2681,33 @@ app.whenReady().then(() => {
     }
   })
 
+  // 全局快捷键 — 全局播放控制（即使窗口不在前台）
+  globalShortcut.register('CommandOrControl+Alt+Space', () => {
+    if (mainWindow && mpvController) {
+      const state = mpvController.getState()
+      if (state.paused) {
+        mpvController.play()
+      } else {
+        mpvController.pause_()
+      }
+      mainWindow.webContents.send('mpv:event', { event: 'pause', data: !state.paused })
+    }
+  })
+
+  globalShortcut.register('CommandOrControl+Alt+Right', () => {
+    if (mainWindow && mpvController) {
+      const state = mpvController.getState()
+      mpvController.seek(Math.min(state.duration, state.timePos + 10))
+    }
+  })
+
+  globalShortcut.register('CommandOrControl+Alt+Left', () => {
+    if (mainWindow && mpvController) {
+      const state = mpvController.getState()
+      mpvController.seek(Math.max(0, state.timePos - 10))
+    }
+  })
+
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -2278,13 +2722,10 @@ app.on('window-all-closed', () => {
 // 全局异常捕获，写入日志文件
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err)
+  process.exit(1)
 })
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled Rejection:', reason)
-})
-
-app.on('will-quit', () => {
-  globalShortcut.unregisterAll()
 })
 
 
