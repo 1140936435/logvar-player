@@ -1,10 +1,11 @@
-import { useNavigate } from 'react-router-dom'
 import { useState, useEffect, useCallback, type ReactElement } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Clock, Trash2, X, Loader2, Video, Search,
   ChevronRight, ArrowLeft, Play
 } from 'lucide-react'
+import { formatTime, formatTimeAgo } from '../utils/time'
 
 /* ==================== 类型 ==================== */
 
@@ -20,29 +21,6 @@ interface PlayHistoryItem {
   seriesName?: string
   seriesId?: string
   seasonId?: string
-}
-
-/* ==================== 工具函数 ==================== */
-
-function formatTimeAgo(timestamp: number): string {
-  const diff = Date.now() - timestamp
-  const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return '刚刚'
-  if (minutes < 60) return `${minutes} 分钟前`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小时前`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days} 天前`
-  return new Date(timestamp).toLocaleDateString('zh-CN')
-}
-
-function formatDuration(seconds: number): string {
-  if (!seconds || !isFinite(seconds)) return '--:--'
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = Math.floor(seconds % 60)
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-  return `${m}:${String(s).padStart(2, '0')}`
 }
 
 /* ==================== 子组件 ==================== */
@@ -94,7 +72,7 @@ const HistoryCard = function HistoryCard({ item, onClick, onDelete }: {
 
         {/* 时间标签 */}
         <div className="absolute bottom-1 right-1.5 px-1.5 py-0.5 rounded bg-black/60 text-[10px] text-white/80 font-mono">
-          {formatDuration(item.position)} / {formatDuration(item.duration)}
+          {formatTime(item.position)} / {formatTime(item.duration)}
         </div>
 
         {/* 删除按钮 */}

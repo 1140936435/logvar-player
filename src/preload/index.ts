@@ -24,12 +24,15 @@ const api: Api = {
     setProperty: (name: string, value: unknown) => ipcRenderer.invoke('mpv:set-property', name, value),
     screenshot: (filePath: string) => ipcRenderer.invoke('mpv:screenshot', filePath),
     screenshotSave: () => ipcRenderer.invoke('mpv:screenshot-save'),
-    thumbnail: (timePos: number) => ipcRenderer.invoke('mpv:thumbnail', timePos),
+
     isAvailable: () => ipcRenderer.invoke('mpv:is-available'),
     embed: (x: number, y: number, width: number, height: number) => ipcRenderer.invoke('mpv:embed', x, y, width, height),
     updateEmbed: (x: number, y: number, width: number, height: number) => ipcRenderer.invoke('mpv:update-embed', x, y, width, height),
     onEvent: (callback: (event: string, data: any) => void) => {
-      ipcRenderer.on('mpv:event', (_event, data) => callback(data.event, data))
+      ipcRenderer.on('mpv:event', (_event, msg) => callback(msg.event, msg.data))
+    },
+    offEvent: (): void => {
+      ipcRenderer.removeAllListeners('mpv:event')
     }
   },
 
@@ -83,7 +86,7 @@ const api: Api = {
     getSegmentComments: (params: any) => ipcRenderer.invoke('danmaku:get-segment-comments', params),
     prefetchSeries: (animeId: number) => ipcRenderer.invoke('danmaku:prefetch-series', animeId),
     getConfig: () => ipcRenderer.invoke('danmaku:get-config'),
-    setConfig: (config: { primary?: string; mirrors?: string[] }) =>
+    setConfig: (config: { primary?: string; mirrors?: string[]; appId?: string; appSecret?: string }) =>
       ipcRenderer.invoke('danmaku:set-config', config),
     testApi: (url: string) => ipcRenderer.invoke('danmaku:test-api', url),
     parseLocalXml: (xmlPath: string) => ipcRenderer.invoke('danmaku:parse-local-xml', xmlPath),

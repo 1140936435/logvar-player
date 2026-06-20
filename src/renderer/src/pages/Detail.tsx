@@ -1,4 +1,4 @@
-﻿import { useParams, useNavigate, Link } from 'react-router-dom'
+import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useState, useEffect, useCallback, type ReactElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -6,6 +6,7 @@ import {
   ChevronRight, Users, Info, ExternalLink
 } from 'lucide-react'
 import { cachedFetch } from '../utils/apiCache'
+import { formatDurationChinese } from '../utils/time'
 
 /* ==================== 类型 ==================== */
 
@@ -57,6 +58,7 @@ interface DetailData {
   // Episode specific
   SeriesName?: string
   SeriesId?: string
+  SeasonId?: string
   IndexNumber?: number
   ParentIndexNumber?: number
 }
@@ -65,16 +67,9 @@ interface DetailData {
 
 /* ==================== 工具函数 ==================== */
 
-function formatTime(seconds: number): string {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  if (h > 0) return `${h}小时${m}分钟`
-  return `${m}分钟`
-}
-
 function formatDuration(ticks?: number): string {
   if (!ticks) return '-'
-  return formatTime(Number(ticks) / 10000000)
+  return formatDurationChinese(Number(ticks) / 10000000)
 }
 
 
@@ -105,14 +100,16 @@ function Detail(): ReactElement {
     })
   }, [])
 
-  // 加载详情
+  // 加载详情（带竞态保护）
   useEffect(() => {
     if (!itemId) return
     setLoading(true)
     setError('')
+    let cancelled = false
 
     // 先读取服务器地址（优先旧 key，其次多服务器配置）
     window.api.store.get('jellyfin').then(async (saved: any) => {
+      if (cancelled) return
       if (saved?.url) setBaseUrl(saved.url.replace(/\/+$/, ''))
       if (saved?.token) {
         setJellyfinToken(saved.token)
@@ -135,6 +132,7 @@ function Detail(): ReactElement {
       () => window.api.jellyfin.getItemDetails(itemId!),
       5 * 60 * 1000 // 5 分钟缓存
     ).then((result) => {
+      if (cancelled) return
       if (result.success && result.data) {
         const data = result.data as DetailData
         setDetail(data)
@@ -149,9 +147,12 @@ function Detail(): ReactElement {
         setLoading(false)
       }
     }).catch((err) => {
+      if (cancelled) return
       setError(String(err))
       setLoading(false)
     })
+
+    return () => { cancelled = true }
   }, [itemId])
 
   // 加载季列表
@@ -215,19 +216,20 @@ function Detail(): ReactElement {
       } catch { /* ignore */ }
     }
     // 如果是电视剧且没有指定集数，用已加载的第一集 ID
-      let targetId = epId || ''
-      let targetName = epName || detail?.Name || '未知视频'
-      if (!targetId && isSeries && episodes.length > 0) {
-        targetId = episodes[0].Id
-        targetName = `EP${String(episodes[0].IndexNumber || 1).padStart(2, '0')} - ${episodes[0].Name}`
-      }
-      if (!targetId) {
-        targetId = itemId || ''
-      }
-      const seriesName = detail?.SeriesName || detail?.Name || ''
-      const seriesId = detail?.SeriesId || ''
-      const seasonId = detail?.SeasonId || ''
-      navigate(`/player?itemId=${encodeURIComponent(targetId)}&name=${encodeURIComponent(targetName)}&base=${encodeURIComponent(serverUrl)}&seriesName=${encodeURIComponent(seriesName)}&seriesId=${encodeURIComponent(seriesId)}&seasonId=${encodeURIComponent(seasonId)}`)
+    const isSeries = detail?.Type === 'Series' || detail?.CollectionType === 'tvshows'
+    let targetId = epId || ''
+    let targetName = epName || detail?.Name || '未知视频'
+    if (!targetId && isSeries && episodes.length > 0) {
+      targetId = episodes[0].Id
+      targetName = `EP${String(episodes[0].IndexNumber || 1).padStart(2, '0')} - ${episodes[0].Name}`
+    }
+    if (!targetId) {
+      targetId = itemId || ''
+    }
+    const seriesName = detail?.SeriesName || detail?.Name || ''
+    const seriesId = detail?.SeriesId || ''
+    const seasonId = detail?.SeasonId || ''
+    navigate(`/player?itemId=${encodeURIComponent(targetId)}&name=${encodeURIComponent(targetName)}&base=${encodeURIComponent(serverUrl)}&seriesName=${encodeURIComponent(seriesName)}&seriesId=${encodeURIComponent(seriesId)}&seasonId=${encodeURIComponent(seasonId)}`)
   }
 
   const getPosterUrl = (): string | null => {
@@ -414,7 +416,7 @@ function Detail(): ReactElement {
                 whileTap={{ scale: 0.96 }}
               >
                 <Play size={16} fill="currentColor" className="mr-1" />
-                {isSeries ? '播放 S01E01' : '播放'}
+                {isSeries ? `播放 ${episodes.length > 0 ? `S01E${String(episodes[0].IndexNumber || 1).padStart(2, '0')}` : 'S01E01'}` : '播放'}
               </motion.button>
             </div>
 
@@ -622,4 +624,3 @@ function Detail(): ReactElement {
 }
 
 export default Detail
-

@@ -1,6 +1,5 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
-import { createPortal } from 'react-dom'
-import type { DanmakuComment, DanmakuSearchResult, DanmakuSearchResponse, JellyfinItem, MpvTrack } from '../../shared/types'
+import type { DanmakuComment, DanmakuSearchResult, DanmakuSearchResponse, JellyfinItem } from '../../shared/types'
 import { useSearchParams, useNavigate, Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Volume2, VolumeX, Volume1, Gauge, List, X, ChevronLeft, ChevronRight, TvMinimalPlay, ArrowLeft } from 'lucide-react'
@@ -84,7 +83,7 @@ class DanmakuEngine {
   }
 
   loadComments(comments: DanmakuComment[]): void {
-    const sorted = [...comments].sort((a, b) => a.time - b.time)
+    const sorted = comments.sort((a, b) => a.time - b.time)
     // 保存所有原始弹幕
     this.allComments = sorted
     // 重置播放状态，确保新弹幕从头开始显示
@@ -366,20 +365,9 @@ function Player(): JSX.Element {
   const [folderVideos, setFolderVideos] = useState<{name: string; path: string}[]>([])
 
   useEffect(() => {
-    window.api.store.get('jellyfin').then(async (saved: unknown) => {
+    window.api.store.get('jellyfin').then((saved: unknown) => {
       const s = saved as { token?: string } | null
-      if (s?.token) {
-        setJellyfinToken(s.token)
-      } else {
-        try {
-          const servers = await window.api.store.get('jellyfin:servers') as Array<{ id?: string; token?: string }> | null
-          const activeId = await window.api.store.get('jellyfin:activeServerId') as string | null
-          if (servers && servers.length > 0) {
-            const active = activeId ? servers.find(s => s.id === activeId) : servers[0]
-            if (active?.token) setJellyfinToken(active.token)
-          }
-        } catch { /* ignore */ }
-      }
+      if (s?.token) setJellyfinToken(s.token)
     }).catch(() => {})
   }, [])
   
@@ -409,7 +397,7 @@ function Player(): JSX.Element {
             setCurrentEpisodeIndex(idx)
           }
         } catch (err) {
-          console.error('[EpisodeList] fetchEpisodes error:', err)
+          console.error('[EpisodeList] Error:', err)
         }
       } else if (itemId) {
         // 条件 2: seriesId 为空，先获取详情
@@ -441,7 +429,7 @@ function Player(): JSX.Element {
             }
           }
         } catch (err) {
-          console.error('[EpisodeList] fetchDetail error:', err)
+          console.error('[EpisodeList] Error:', err)
         }
       }
     }
@@ -464,7 +452,6 @@ function Player(): JSX.Element {
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const videoAreaRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engineRef = useRef<DanmakuEngine | null>(null)
   const resumePosRef = useRef(parseFloat(searchParams.get('position') || '0'))
@@ -500,50 +487,15 @@ function Player(): JSX.Element {
 
   const [playbackRate, setPlaybackRate] = useState(1)
 
-  // MPV 状态
-  const [useMpv, setUseMpv] = useState(false)
-  const [mpvReady, setMpvReady] = useState(false)
-  const [mpvTracks, setMpvTracks] = useState<MpvTrack[]>([])
-  // HTML5 轨道检测
-  const [html5AudioTracks, setHtml5AudioTracks] = useState<{ id: string; label: string; language: string; enabled: boolean }[]>([])
-  const [html5TextTracks, setHtml5TextTracks] = useState<{ id: string; label: string; language: string; mode: string }[]>([])
-  const [showTrackMenu, setShowTrackMenu] = useState(false)
-  const [trackMenuTab, setTrackMenuTab] = useState<'audio' | 'subtitle'>('audio')
-
   const [speedToast, setSpeedToast] = useState('')
   const [volumePopup, setVolumePopup] = useState(false)
   const [speedPopup, setSpeedPopup] = useState(false)
-  const [showShortcutsHelp, setShowShortcutsHelp] = useState(false)
 
   // P2: 窗口置顶
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
 
   // P2: 画中画 (PiP)
   const [pipActive, setPipActive] = useState(false)
-
-  // P2: AB 循环
-  const abPointARef = useRef<number | null>(null)
-  const abPointBRef = useRef<number | null>(null)
-  const [abLoopActive, setAbLoopActive] = useState(false)
-
-  // P2: 缩略图预览
-  const thumbVideoRef = useRef<HTMLVideoElement>(null)
-  const thumbCanvasRef = useRef<HTMLCanvasElement>(null)
-  const thumbTooltipRef = useRef<HTMLDivElement>(null)
-  const [thumbVisible, setThumbVisible] = useState(false)
-  const thumbRafRef = useRef<number>(0)
-  const thumbPendingTimeRef = useRef<number>(0)
-  const thumbCacheRef = useRef<Map<number, ImageBitmap>>(new Map())
-  const thumbReadyRef = useRef(false) // HTML5 缩略图视频是否已加载就绪
-  const thumbMpvRequestIdRef = useRef(0) // mpv 缩略图请求 ID（用于取消过期请求）
-  const thumbMpvLoadingRef = useRef(false) // mpv 缩略图是否正在加载中
-
-  // 检测是否为网络 URL
-  const isNetworkUrl = (s: string): boolean => /^https?:\/\//.test(s) || /^rtsp:\/\//.test(s) || /^rtmp:\/\//.test(s) || /^mms:\/\//.test(s) || /^udp:\/\//.test(s)
-
-  // P2: 自动连播
-  const [autoplayCountdown, setAutoplayCountdown] = useState<number | null>(null)
-  const autoplayTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   // 点击其它地方关闭弹出面板
   useEffect(() => {
@@ -565,11 +517,9 @@ function Player(): JSX.Element {
   const [itemInfoLoading, setItemInfoLoading] = useState(false)
   const [videoSourceInfo, setVideoSourceInfo] = useState<Record<string, string> | null>(null)
 
-  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const showStatus = (msg: string): void => {
-    if (statusTimerRef.current) clearTimeout(statusTimerRef.current)
     setStatusMsg(msg)
-    statusTimerRef.current = setTimeout(() => { setStatusMsg(''); statusTimerRef.current = null }, 2000)
+    setTimeout(() => setStatusMsg(''), 2000)
   }
 
   const savePlayHistory = useCallback(async () => {
@@ -638,21 +588,6 @@ function Player(): JSX.Element {
     return () => { window.removeEventListener('resize', handleResize); engineRef.current?.stop() }
   }, [canvasRef.current])
 
-  // P2: 清理自动连播计时器
-  useEffect(() => {
-    return () => {
-      if (autoplayTimerRef.current) clearInterval(autoplayTimerRef.current)
-    }
-  }, [])
-
-  // P2: 开始播放时取消自动连播倒计时
-  useEffect(() => {
-    if (playing && autoplayCountdown !== null) {
-      if (autoplayTimerRef.current) clearInterval(autoplayTimerRef.current)
-      setAutoplayCountdown(null)
-    }
-  }, [playing, autoplayCountdown])
-
   useEffect(() => {
     // 只要有 localFile 或 seriesName 就尝试加载弹幕，itemName 可以是未知视频
     if (!localFile && !seriesName && (!itemName || itemName === '未知视频')) return
@@ -660,7 +595,6 @@ function Player(): JSX.Element {
     setCurrentDanmakuCount(0)
     setDanmakuLoading(true)
     setDanmakuError('')
-    const loadId = ++danmakuLoadIdRef.current
 
     if (localFile) {
       window.api.danmaku.findLocalXml(localFile).then((xmlResult) => {
@@ -772,180 +706,9 @@ function Player(): JSX.Element {
 
   // ==================== 视频源 & 事件 ====================
 
-  // mpv 启动失败时的回退标志
-  const mpvFailedRef = useRef(false)
-  // 防止快速切换视频时的竞态
-  const videoLoadIdRef = useRef(0)
-  const danmakuLoadIdRef = useRef(0)
-
-  // 缩略图 helper：将 dataUrl/Image 绘制到 canvas 并缓存 ImageBitmap
-  const drawThumbToCanvas = useCallback((source: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement, cacheKey: number, sourceWidth: number, sourceHeight: number): void => {
-    const canvas = thumbCanvasRef.current
-    if (!canvas || !sourceWidth || !sourceHeight) return
-    const w = 160
-    const h = Math.round(160 * (sourceHeight / sourceWidth))
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w
-      canvas.height = h
-    }
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    try {
-      ctx.drawImage(source, 0, 0, w, h)
-      // 异步创建 ImageBitmap 用于缓存
-      if (!thumbCacheRef.current.has(cacheKey)) {
-        createImageBitmap(canvas).then(bmp => {
-          thumbCacheRef.current.set(cacheKey, bmp)
-          if (thumbCacheRef.current.size > 300) {
-            const firstKey = thumbCacheRef.current.keys().next().value
-            if (firstKey !== undefined) {
-              const old = thumbCacheRef.current.get(firstKey)
-              thumbCacheRef.current.delete(firstKey)
-              old?.close()
-            }
-          }
-        }).catch(() => {})
-      }
-    } catch { /* canvas may be tainted */ }
-  }, [])
-
-  // 缩略图 seek 完成后绘制到 canvas（HTML5 回退模式：直接绘制 + ImageBitmap 缓存）
-  useEffect(() => {
-    const thumbVideo = thumbVideoRef.current
-    if (!thumbVideo) return
-
-    const handleLoadedData = (): void => {
-      thumbReadyRef.current = true
-    }
-    const handleError = (): void => {
-      thumbReadyRef.current = false
-    }
-    thumbVideo.addEventListener('loadeddata', handleLoadedData)
-    thumbVideo.addEventListener('error', handleError)
-
-    const handleSeeked = (): void => {
-      requestAnimationFrame(() => {
-        if (!thumbVideo.videoWidth) return
-        const cacheKey = Math.floor(thumbVideo.currentTime * 2)
-        drawThumbToCanvas(thumbVideo, cacheKey, thumbVideo.videoWidth, thumbVideo.videoHeight)
-      })
-    }
-    thumbVideo.addEventListener('seeked', handleSeeked)
-    return () => {
-      thumbVideo.removeEventListener('seeked', handleSeeked)
-      thumbVideo.removeEventListener('loadeddata', handleLoadedData)
-      thumbVideo.removeEventListener('error', handleError)
-    }
-  }, [drawThumbToCanvas])
-
-  // 缩略图视频源同步：仅依赖 localFile（HTML5 回退模式）
-  useEffect(() => {
-    const thumbVideo = thumbVideoRef.current
-    if (!thumbVideo || !localFile) return
-    thumbReadyRef.current = false
-    thumbCacheRef.current.clear()
-    const isUrl = isNetworkUrl(localFile)
-    if (isUrl) {
-      // 网络 URL：直接加载
-      thumbVideo.src = localFile
-      thumbVideo.load()
-    } else {
-      // 本地文件：通过 file:// 协议加载（支持 Range seek）
-      window.api.file.getLocalFileUrl(localFile).then((result) => {
-        if (result.success && result.data) {
-          const data = result.data as { url: string }
-          if (data.url && thumbVideoRef.current) {
-            thumbVideoRef.current.src = data.url
-            thumbVideoRef.current.load()
-          }
-        }
-      }).catch((err) => console.warn('[Thumb] getLocalFileUrl failed:', err))
-    }
-  }, [localFile])
-
-  // MPV 嵌入窗口辅助函数：在播放前先创建子窗口，让 mpv 渲染到 Electron 窗口内
-  const embedMpvIfNeeded = async (): Promise<void> => {
-    const area = videoAreaRef.current
-    if (!area) throw new Error('视频区域未就绪')
-    const rect = area.getBoundingClientRect()
-    // 使用整数坐标，避免子窗口偏移
-    const result = await window.api.mpv.embed(Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height))
-    if (!result.success) throw new Error(result.error || '嵌入窗口失败')
-  }
-
-  // 监听视频区域大小变化，更新 mpv 子窗口尺寸
-  useEffect(() => {
-    const area = videoAreaRef.current
-    if (!area || !useMpv) return
-    const ro = new ResizeObserver(() => {
-      const rect = area.getBoundingClientRect()
-      if (rect.width > 0 && rect.height > 0) {
-        window.api.mpv.updateEmbed(Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height))
-      }
-    })
-    ro.observe(area)
-    return () => { ro.disconnect() }
-  }, [useMpv])
-
   useEffect(() => {
     setLoading(true); setError('')
-    // 切换视频源时重置 HTML5 轨道
-    setHtml5AudioTracks([]); setHtml5TextTracks([])
-    // 重置缩略图缓存
-    thumbCacheRef.current.clear()
-    // 递增加载 ID 用于竞态检测
-    const loadId = ++videoLoadIdRef.current
     if (localFile) {
-      const isUrl = isNetworkUrl(localFile)
-      // MPV 模式：直接用本地文件路径或网络 URL 加载
-      if (useMpv && !mpvFailedRef.current) {
-        embedMpvIfNeeded().then(() => window.api.mpv.play(localFile)).then(result => {
-          if (!result.success) {
-            console.warn('[Player] mpv failed, falling back to HTML5:', result.error)
-            mpvFailedRef.current = true
-            // 回退到 HTML5 模式
-            if (isUrl) {
-              if (videoRef.current) { videoRef.current.src = localFile; videoRef.current.load(); setSrcReady(true) }
-              else { setError('mpv 加载失败'); setLoading(false) }
-            } else {
-              window.api.file.getLocalFileUrl(localFile).then((r) => {
-                if (r.success && r.data && videoRef.current) {
-                  const url = (r.data as { url: string }).url
-                  videoRef.current.src = url; videoRef.current.load(); setSrcReady(true)
-                } else { setError('无法读取本地文件'); setLoading(false) }
-              }).catch(() => { setError('无法读取本地文件'); setLoading(false) })
-            }
-          } else {
-            // mpv 播放成功
-            setSrcReady(true)
-          }
-        }).catch(err => {
-          console.warn('[Player] mpv failed, falling back to HTML5:', err)
-          mpvFailedRef.current = true
-          if (isUrl) {
-            if (videoRef.current) { videoRef.current.src = localFile; videoRef.current.load(); setSrcReady(true) }
-            else { setError('mpv 加载失败'); setLoading(false) }
-          } else {
-            window.api.file.getLocalFileUrl(localFile).then((r) => {
-              if (r.success && r.data && videoRef.current) {
-                const url = (r.data as { url: string }).url
-                videoRef.current.src = url; videoRef.current.load(); setSrcReady(true)
-              } else { setError('无法读取本地文件'); setLoading(false) }
-            }).catch(() => { setError('无法读取本地文件'); setLoading(false) })
-          }
-        })
-        return
-      }
-      // HTML5 模式
-      if (isUrl) {
-        // 网络 URL：直接设置 src（支持 http/https 流）
-        if (videoRef.current) {
-          videoRef.current.src = localFile
-          videoRef.current.load()
-          setSrcReady(true)
-        } else { setError('播放器未就绪'); setLoading(false) }
-        return
-      }
       window.api.file.getLocalFileUrl(localFile).then((result) => {
         if (result.success && result.data) {
           const data = result.data as { url: string }
@@ -961,34 +724,6 @@ function Player(): JSX.Element {
       return
     }
     if (!itemId) { setLoading(false); return }
-    // MPV 模式：通过 Jellyfin API 获取播放 URL
-    if (useMpv && !mpvFailedRef.current) {
-      window.api.jellyfin.getPlaybackUrl(itemId).then((result) => {
-        if (result.success) {
-          const data = result.data as { url?: string }
-          if (data?.url) {
-            embedMpvIfNeeded().then(() => window.api.mpv.play(data.url!)).then(playResult => {
-              if (!playResult.success) {
-                console.warn('[Player] mpv play failed, falling back to HTML5:', playResult.error)
-                mpvFailedRef.current = true
-                // 回退 HTML5
-                if (videoRef.current && data.url) { videoRef.current.src = data.url; setSrcReady(true) }
-                else { setError(playResult.error || 'mpv 加载失败'); setLoading(false) }
-              }
-            }).catch(err => {
-              console.warn('[Player] mpv play failed, falling back to HTML5:', err)
-              mpvFailedRef.current = true
-              if (videoRef.current && data.url) { videoRef.current.src = data.url; setSrcReady(true) }
-              else { setError(`mpv 加载失败: ${String(err)}`); setLoading(false) }
-            })
-            return
-          }
-        }
-        setError('获取播放地址失败'); setLoading(false)
-      }).catch((err) => { setError(`获取播放地址失败: ${String(err)}`); setLoading(false) })
-      return
-    }
-    // HTML5 模式
     window.api.jellyfin.getPlaybackUrl(itemId).then((result) => {
       if (result.success) {
         const data = result.data as { url?: string }
@@ -996,7 +731,7 @@ function Player(): JSX.Element {
       }
       setError('获取播放地址失败'); setLoading(false)
     }).catch((err) => { setError(`获取播放地址失败: ${String(err)}`); setLoading(false) })
-  }, [itemId, localFile, useMpv])
+  }, [itemId, localFile])
 
   useEffect(() => {
     const video = videoRef.current; if (!video) return
@@ -1005,77 +740,16 @@ function Player(): JSX.Element {
       setDuration(video.duration || 0); setLoading(false)
       if (!hasResumedRef.current && resumePosRef.current > 0) { hasResumedRef.current = true; video.currentTime = resumePosRef.current }
       video.play().then(() => setPlaying(true)).catch(() => {})
-
-      // 检测 HTML5 音频轨道
-      try {
-        const at = (video as any).audioTracks
-        if (at && at.length > 0) {
-          const tracks = Array.from(at).map((t: any, i: number) => ({
-            id: String(t.id || i),
-            label: t.label || t.language || `音轨 ${i + 1}`,
-            language: t.language || '',
-            enabled: t.enabled
-          }))
-          setHtml5AudioTracks(tracks)
-        } else { setHtml5AudioTracks([]) }
-      } catch { setHtml5AudioTracks([]) }
-
-      // 检测 HTML5 字幕轨道
-      try {
-        const tt = video.textTracks
-        if (tt && tt.length > 0) {
-          const tracks: { id: string; label: string; language: string; mode: string }[] = []
-          for (let i = 0; i < tt.length; i++) {
-            const t = tt[i]
-            // 只显示字幕类型的轨道
-            if (t.kind === 'subtitles' || t.kind === 'captions' || t.kind === 'metadata') {
-              tracks.push({
-                id: String(t.id || i),
-                label: t.label || t.language || `字幕 ${tracks.length + 1}`,
-                language: t.language || '',
-                mode: t.mode || 'hidden'
-              })
-            }
-          }
-          setHtml5TextTracks(tracks)
-        } else { setHtml5TextTracks([]) }
-      } catch { setHtml5TextTracks([]) }
     }
     const onPlay = (): void => setPlaying(true)
     const onPause = (): void => setPlaying(false)
-    const onEnded = (): void => {
-      setPlaying(false)
-      // P2: 自动连播 — 播完后倒计时 5 秒自动播放下一集
-      const totalEpisodes = episodeList.length || folderVideos.length
-      if (autoplayTimerRef.current) clearInterval(autoplayTimerRef.current)
-      if (totalEpisodes > 0 && currentEpisodeIndex < totalEpisodes - 1) {
-        let countdown = 5
-        setAutoplayCountdown(countdown)
-        autoplayTimerRef.current = setInterval(() => {
-          countdown--
-          if (countdown <= 0) {
-            if (autoplayTimerRef.current) clearInterval(autoplayTimerRef.current)
-            setAutoplayCountdown(null)
-            handleSwitchEpisode(currentEpisodeIndex + 1)
-          } else {
-            setAutoplayCountdown(countdown)
-          }
-        }, 1000)
-      }
-    }
+    const onEnded = (): void => setPlaying(false)
     const onTimeUpdate = (): void => {
       const ct = video.currentTime
       currentTimeRef.current = ct
       // 每 250ms 更新一次 React state，减少重渲染
       if (Math.abs(ct - currentTime) > 0.5) setCurrentTime(ct)
       if (video.buffered.length > 0) setBuffered(video.buffered.end(video.buffered.length - 1))
-      // P2: AB 循环 — 到达 B 点时跳回 A 点
-      if (abLoopActive && abPointARef.current !== null && abPointBRef.current !== null) {
-        if (ct >= abPointBRef.current) {
-          video.currentTime = abPointARef.current
-          showStatus('AB 循环')
-        }
-      }
     }
     const onWaiting = (): void => setLoading(true)
     const onCanPlay = (): void => setLoading(false)
@@ -1109,338 +783,44 @@ function Player(): JSX.Element {
       video.removeEventListener('error', onError)
       video.removeEventListener('volumechange', onVolumeChange)
     }
-  }, [srcReady, danmakuEnabled, abLoopActive, currentEpisodeIndex, episodeList.length, folderVideos.length])
-
-  // ==================== MPV 事件监听 ====================
-
-  // 组件是否已挂载（防止卸载后 setState）
-  const mountedRef = useRef(true)
-
-  useEffect(() => {
-    mountedRef.current = true
-    // 检查 mpv 是否可用
-    window.api.mpv.isAvailable().then(result => {
-      if (mountedRef.current && result.success && result.data) {
-        setUseMpv(true)
-      }
-    }).catch(() => {})
-
-    // 监听 mpv 事件
-    const eventHandler = (event: string, data: unknown): void => {
-      if (!mountedRef.current) return // 组件已卸载，忽略事件
-      switch (event) {
-        case 'ready':
-          setMpvReady(true)
-          setLoading(false)
-          break
-        case 'time':
-          if (typeof data === 'number') {
-            currentTimeRef.current = data
-            if (Math.abs(data - currentTimeRef.current) > 0.5) setCurrentTime(data)
-            // P2: AB 循环 — 到达 B 点时跳回 A 点
-            if (abLoopActive && abPointARef.current !== null && abPointBRef.current !== null) {
-              if (data >= abPointBRef.current) {
-                window.api.mpv.seek(abPointARef.current)
-                showStatus('AB 循环')
-              }
-            }
-          }
-          break
-        case 'duration':
-          if (typeof data === 'number') {
-            setDuration(data)
-            setLoading(false)
-            // 恢复播放位置
-            if (!hasResumedRef.current && resumePosRef.current > 0) {
-              hasResumedRef.current = true
-              window.api.mpv.seek(resumePosRef.current)
-            }
-          }
-          break
-        case 'pause':
-          setPlaying(data !== true)
-          break
-        case 'volume':
-          if (typeof data === 'number') setVolume(Math.round(data))
-          break
-        case 'speed':
-          if (typeof data === 'number') setPlaybackRate(data)
-          break
-        case 'track-list':
-          if (Array.isArray(data)) {
-            setMpvTracks(data as MpvTrack[])
-          }
-          break
-        case 'file-loaded':
-          setLoading(false)
-          setError('')
-          // 获取轨道列表
-          window.api.mpv.getTracks().then(result => {
-            if (result.success && result.data) setMpvTracks(result.data)
-          }).catch(() => {})
-          break
-        case 'stop':
-          setPlaying(false)
-          break
-        case 'start':
-          setPlaying(true)
-          break
-        case 'error': {
-          const errMsg = typeof data === 'string' ? data : 'mpv 播放错误'
-          console.warn('[Player] mpv error, falling back to HTML5:', errMsg)
-          mpvFailedRef.current = true
-          setUseMpv(false)
-          setError(errMsg)
-          setLoading(false)
-          break
-        }
-        case 'quit': {
-          console.log('[Player] mpv process quit, falling back to HTML5')
-          mpvFailedRef.current = true
-          setUseMpv(false)
-          setMpvReady(false)
-          setPlaying(false)
-          break
-        }
-      }
-    }
-
-    window.api.mpv.onEvent(eventHandler)
-    return () => { mountedRef.current = false }
-  }, [])
+  }, [srcReady, danmakuEnabled])
 
   useEffect(() => {
     if (!danmakuEnabled || !engineRef.current) return
     let animId = 0
     const loop = (): void => {
-      if (engineRef.current) {
-        // 优先使用 mpv 时间，否则使用 HTML5 video 时间
-        const time = useMpv ? currentTimeRef.current : (videoRef.current?.currentTime || 0)
-        const isPlayingNow = useMpv ? playing : (videoRef.current && !videoRef.current.paused)
-        if (isPlayingNow) engineRef.current.update(time)
-        engineRef.current.draw()
-      }
-      animId = requestAnimationFrame(loop)
+      const video = videoRef.current
+      if (video && !video.paused && engineRef.current) engineRef.current.update(video.currentTime)
+      engineRef.current?.draw(); animId = requestAnimationFrame(loop)
     }
     animId = requestAnimationFrame(loop)
     return () => cancelAnimationFrame(animId)
-  }, [danmakuEnabled, srcReady, useMpv, playing])
+  }, [danmakuEnabled, srcReady])
 
   // ==================== 控制 ====================
 
   const handlePlayPause = (): void => {
-    if (useMpv && mpvReady) {
-      if (playing) {
-        window.api.mpv.pause()
-      } else {
-        window.api.mpv.resume()
-      }
-      return
-    }
     const video = videoRef.current; if (!video) return
     video.paused ? video.play().catch(() => showStatus('播放失败')) : video.pause()
   }
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>): void => {
+    const video = videoRef.current; if (!video || !duration) return
     const rect = e.currentTarget.getBoundingClientRect()
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-    if (useMpv && mpvReady) {
-      window.api.mpv.seek(ratio * duration)
-      return
-    }
-    const video = videoRef.current; if (!video || !duration) return
     video.currentTime = ratio * duration
   }
 
   const handleFullscreen = (): void => {
-    if (useMpv && mpvReady) {
-      window.api.mpv.toggleFullscreen()
-      return
-    }
     const container = containerRef.current; if (!container) return
     document.fullscreenElement ? document.exitFullscreen().catch(() => {}) : container.requestFullscreen().catch(() => showStatus('全屏切换失败'))
   }
 
   const handlePlaybackRateChange = (rate: number): void => {
-    if (useMpv && mpvReady) {
-      window.api.mpv.setSpeed(rate)
-      setPlaybackRate(rate)
-      setContextMenu({ x: 0, y: 0, visible: false })
-      setSpeedToast(`${rate}x`); setTimeout(() => setSpeedToast(''), 2000)
-      return
-    }
     const video = videoRef.current; if (!video) return
     video.playbackRate = rate; setPlaybackRate(rate)
     setContextMenu({ x: 0, y: 0, visible: false })
     setSpeedToast(`${rate}x`); setTimeout(() => setSpeedToast(''), 2000)
-  }
-
-  // ==================== 轨道管理 ====================
-
-  // 统一的轨道列表：mpv 模式使用 mpvTracks，HTML5 模式使用 video.audioTracks/textTracks
-  const isMpvMode = useMpv && mpvReady
-  const audioTracks = isMpvMode
-    ? mpvTracks.filter(t => t.type === 'audio')
-    : html5AudioTracks.map((t, i) => ({ id: i, type: 'audio' as const, selected: t.enabled, title: t.label, lang: t.language, codec: '', 'demux-w': 0, 'demux-h': 0 }))
-  const subtitleTracks = isMpvMode
-    ? mpvTracks.filter(t => t.type === 'sub')
-    : html5TextTracks.map((t, i) => ({ id: i, type: 'sub' as const, selected: t.mode === 'showing', title: t.label, lang: t.language, codec: '', 'demux-w': 0, 'demux-h': 0 }))
-  const hasMultipleTracks = audioTracks.length > 1 || subtitleTracks.length > 0
-
-  /**
-   * 截图：优先使用 mpv 截图，mpv 不可用时使用 Canvas 截取当前视频帧
-   */
-  const handleScreenshot = useCallback(async (): Promise<void> => {
-    // 先尝试 mpv 截图（mpv 模式下）
-    if (isMpvMode) {
-      try {
-        const result = await window.api.mpv.screenshotSave()
-        if (result.success) { showStatus('截图已保存'); return }
-      } catch { /* mpv 不可用，fallback 到 Canvas */ }
-    }
-    // Canvas 截取视频帧
-    const video = videoRef.current
-    if (!video || !video.videoWidth) { showStatus('无可截取的视频帧'); return }
-    try {
-      const canvas = document.createElement('canvas')
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
-      const ctx = canvas.getContext('2d')!
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
-      if (!blob) { showStatus('截图失败：无法生成图片'); return }
-      // 下载截图
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `screenshot_${new Date().toISOString().replace(/[:.]/g, '-')}.png`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-      showStatus('截图已保存')
-    } catch (err) {
-      showStatus('截图失败: ' + (err instanceof Error ? err.message : String(err)))
-    }
-  }, [isMpvMode, showStatus])
-
-  /**
-   * 画中画：HTML5 模式使用原生 PiP API，mpv 模式使用迷你窗口
-   */
-  const handlePictureInPicture = useCallback(async (): Promise<void> => {
-    // HTML5 模式 — 使用浏览器原生 PiP API
-    const video = videoRef.current
-    if (video && document.pictureInPictureEnabled) {
-      try {
-        if (document.pictureInPictureElement) {
-          await document.exitPictureInPicture()
-          setPipActive(false)
-          showStatus('已退出画中画')
-          return
-        }
-        if (video.readyState >= 2) {
-          await video.requestPictureInPicture()
-          setPipActive(true)
-          showStatus('画中画模式')
-          return
-        }
-      } catch (err) {
-        // PiP 失败，尝试 mpv 方案
-      }
-    }
-    // mpv 模式或 PiP 不可用 — 使用窗口置顶 + 缩小窗口
-    try {
-      const result = await window.api.window.alwaysOnTop()
-      if (result.success) {
-        setAlwaysOnTop(!!result.data)
-        setPipActive(!!result.data)
-        showStatus(result.data ? '画中画（置顶小窗）' : '退出画中画')
-      }
-    } catch {
-      showStatus('画中画不可用')
-    }
-  }, [showStatus])
-
-  // 监听 PiP 事件（原生 PiP 退出时同步状态）
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    const onEnter = (): void => setPipActive(true)
-    const onLeave = (): void => setPipActive(false)
-    video.addEventListener('enterpictureinpicture', onEnter)
-    video.addEventListener('leavepictureinpicture', onLeave)
-    return () => {
-      video.removeEventListener('enterpictureinpicture', onEnter)
-      video.removeEventListener('leavepictureinpicture', onLeave)
-    }
-  })
-
-  const handleSelectAudioTrack = (trackId: number): void => {
-    if (isMpvMode) {
-      window.api.mpv.selectTrack(trackId)
-    } else {
-      // HTML5 模式：切换 audioTracks
-      try {
-        const at = (videoRef.current as any)?.audioTracks
-        if (at) {
-          for (let i = 0; i < at.length; i++) {
-            at[i].enabled = i === trackId
-          }
-          setHtml5AudioTracks(Array.from(at).map((t: any, i: number) => ({
-            id: String(t.id || i), label: t.label || t.language || `音轨 ${i + 1}`,
-            language: t.language || '', enabled: t.enabled
-          })))
-        }
-      } catch { /* ignore */ }
-    }
-    setShowTrackMenu(false)
-  }
-
-  const handleSelectSubtitle = (trackId: number): void => {
-    if (isMpvMode) {
-      window.api.mpv.selectSubtitle(trackId)
-    } else {
-      // HTML5 模式：切换 textTrack mode
-      try {
-        const tt = videoRef.current?.textTracks
-        if (tt) {
-          for (let i = 0; i < tt.length; i++) {
-            const kind = tt[i].kind
-            if (kind === 'subtitles' || kind === 'captions' || kind === 'metadata') {
-              tt[i].mode = i === trackId ? 'showing' : 'hidden'
-            }
-          }
-          const tracks: { id: string; label: string; language: string; mode: string }[] = []
-          for (let i = 0; i < tt.length; i++) {
-            if (tt[i].kind === 'subtitles' || tt[i].kind === 'captions' || tt[i].kind === 'metadata') {
-              tracks.push({ id: String(i), label: tt[i].label || tt[i].language || `字幕 ${tracks.length + 1}`, language: tt[i].language || '', mode: tt[i].mode || 'hidden' })
-            }
-          }
-          setHtml5TextTracks(tracks)
-        }
-      } catch { /* ignore */ }
-    }
-    setShowTrackMenu(false)
-  }
-
-  const handleDisableSubtitle = (): void => {
-    if (isMpvMode) {
-      window.api.mpv.disableSubtitle()
-    } else {
-      // HTML5 模式：关闭所有字幕
-      try {
-        const tt = videoRef.current?.textTracks
-        if (tt) {
-          for (let i = 0; i < tt.length; i++) {
-            if (tt[i].kind === 'subtitles' || tt[i].kind === 'captions' || tt[i].kind === 'metadata') {
-              tt[i].mode = 'hidden'
-            }
-          }
-          setHtml5TextTracks(prev => prev.map(t => ({ ...t, mode: 'hidden' })))
-        }
-      } catch { /* ignore */ }
-    }
-    setShowTrackMenu(false)
   }
 
   // 沉浸式控制栏 — 鼠标不动 3 秒自动隐藏
@@ -1459,100 +839,8 @@ function Player(): JSX.Element {
     resetAutoHide()
   }
 
-  // 缩略图预览：鼠标在进度条上移动时生成缩略图
-  // mpv 模式：通过 IPC 调用 mpv screenshot → 适用于所有 mpv 支持的格式（MKV/HEVC/AV1 等）
-  // HTML5 模式：通过隐藏 <video> 元素 seek → 仅适用于 Chromium 支持的格式
-  const handleProgressMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>): void => {
-    resetAutoHide()
-    const rect = e.currentTarget.getBoundingClientRect()
-    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-    const hoverTime = ratio * duration
-    const thumbX = e.clientX
-    const thumbY = rect.top
-
-    // 立即通过 ref 更新 tooltip 位置（不触发 React 重渲染）
-    if (thumbTooltipRef.current) {
-      thumbTooltipRef.current.style.left = `${thumbX}px`
-      thumbTooltipRef.current.style.top = `${thumbY - 110}px`
-      const label = thumbTooltipRef.current.querySelector<HTMLElement>('.thumb-time')
-      if (label) label.textContent = formatTime(hoverTime)
-    }
-    if (!thumbVisible) setThumbVisible(true)
-
-    // 缓存查找（0.5s 粒度）
-    const cacheKey = Math.floor(hoverTime * 2)
-    const cached = thumbCacheRef.current.get(cacheKey)
-    if (cached && thumbCanvasRef.current) {
-      const ctx = thumbCanvasRef.current.getContext('2d')
-      if (ctx && cached.width > 0) {
-        if (thumbCanvasRef.current.width !== cached.width || thumbCanvasRef.current.height !== cached.height) {
-          thumbCanvasRef.current.width = cached.width
-          thumbCanvasRef.current.height = cached.height
-        }
-        ctx.drawImage(cached, 0, 0)
-      }
-      return
-    }
-
-    thumbPendingTimeRef.current = hoverTime
-
-    // 用 rAF 限流，确保每帧最多处理一次
-    if (thumbRafRef.current) return
-    thumbRafRef.current = requestAnimationFrame(() => {
-      thumbRafRef.current = 0
-      const targetTime = thumbPendingTimeRef.current
-
-      // mpv 模式：通过 IPC 获取缩略图（适用于所有格式）
-      if (useMpv && mpvReady) {
-        // 如果正在加载中，跳过（避免堆积请求）
-        if (thumbMpvLoadingRef.current) return
-        const reqId = ++thumbMpvRequestIdRef.current
-        thumbMpvLoadingRef.current = true
-        console.log(`[Thumb][mpv] requesting thumbnail for t=${targetTime.toFixed(2)} reqId=${reqId}`)
-        window.api.mpv.thumbnail(targetTime).then((result) => {
-          // 检查是否为最新请求
-          if (reqId !== thumbMpvRequestIdRef.current) { console.log(`[Thumb][mpv] stale req ${reqId}, current=${thumbMpvRequestIdRef.current}`); return }
-          console.log(`[Thumb][mpv] result: success=${result.success} hasDataUrl=${!!result.data?.dataUrl} dataUrlLen=${result.data?.dataUrl?.length || 0}`)
-          if (result.success && result.data?.dataUrl) {
-            const img = new Image()
-            img.onload = () => {
-              console.log(`[Thumb][mpv] image loaded: ${img.naturalWidth}x${img.naturalHeight}`)
-              if (reqId !== thumbMpvRequestIdRef.current) return
-              drawThumbToCanvas(img, cacheKey, img.naturalWidth, img.naturalHeight)
-              thumbMpvLoadingRef.current = false
-            }
-            img.onerror = (e) => {
-              console.error(`[Thumb][mpv] image load error`, e)
-              thumbMpvLoadingRef.current = false
-            }
-            img.src = result.data.dataUrl
-          } else {
-            console.warn(`[Thumb][mpv] no dataUrl, result error:`, result.error)
-            thumbMpvLoadingRef.current = false
-          }
-        }).catch((e) => {
-          console.error(`[Thumb][mpv] IPC error:`, e)
-          thumbMpvLoadingRef.current = false
-        })
-        return
-      }
-
-      // HTML5 回退模式
-      const thumbVideo = thumbVideoRef.current
-      if (!thumbVideo || !thumbReadyRef.current) return
-      thumbVideo.currentTime = targetTime
-    })
-  }, [duration, resetAutoHide, thumbVisible, useMpv, mpvReady, drawThumbToCanvas])
-
-  const handleProgressMouseLeave = useCallback((): void => {
-    setThumbVisible(false)
-  }, [])
-
   useEffect(() => {
-    return () => {
-      if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-      if (thumbRafRef.current) cancelAnimationFrame(thumbRafRef.current)
-    }
+    return () => { if (hideTimerRef.current) clearTimeout(hideTimerRef.current) }
   }, [])
 
   const handleContextMenu = (e: React.MouseEvent): void => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, visible: true }) }
@@ -1621,12 +909,23 @@ function Player(): JSX.Element {
 
   // 切换剧集
   const handleSwitchEpisode = (newIndex: number): void => {
-    if (newIndex < 0 || newIndex >= episodeList.length) return
+    console.log('[EpisodeSwitch] handleSwitchEpisode called with newIndex=%d, episodeList.length=%d, currentEpisodeIndex=%d', newIndex, episodeList.length, currentEpisodeIndex)
+    
+    if (newIndex < 0 || newIndex >= episodeList.length) {
+      console.log('[EpisodeSwitch] Index out of range, returning')
+      return
+    }
     
     const newEp = episodeList[newIndex]
+    console.log('[EpisodeSwitch] newEp=%o', newEp)
     // Jellyfin API 返回的是 Id (大写)，不是 id
     const episodeId = (newEp as any).Id || (newEp as any).id
-    if (!episodeId) return
+    if (!episodeId) {
+      console.log('[EpisodeSwitch] episodeId is empty, returning')
+      return
+    }
+    
+    console.log('[EpisodeSwitch] Switching to episode %d: %s', newIndex + 1, newEp.Name || episodeId)
     
     // 构建新的 URL
     const newParams = new URLSearchParams(searchParams)
@@ -1644,34 +943,91 @@ function Player(): JSX.Element {
     setLoading(true)
   }
 
+  // P2: 截图
+  const handleScreenshot = useCallback(async (): Promise<void> => {
+    try {
+      const result = await window.api.mpv.screenshotSave()
+      if (result.success) { showStatus('截图已保存'); return }
+    } catch { /* mpv 不可用 */ }
+    // Canvas fallback
+    const video = videoRef.current
+    if (!video || !video.videoWidth) { showStatus('无可截取的视频帧'); return }
+    try {
+      const canvas = document.createElement('canvas')
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+      const ctx = canvas.getContext('2d')!
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+      if (!blob) { showStatus('截图失败'); return }
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `screenshot_${new Date().toISOString().replace(/[:.]/g, '-')}.png`
+      a.click()
+      URL.revokeObjectURL(url)
+      showStatus('截图已保存')
+    } catch { showStatus('截图失败') }
+  }, [showStatus])
+
+  // P2: 画中画
+  const handlePictureInPicture = useCallback(async (): Promise<void> => {
+    const video = videoRef.current
+    if (video && document.pictureInPictureEnabled) {
+      try {
+        if (document.pictureInPictureElement) {
+          await document.exitPictureInPicture()
+          setPipActive(false)
+          showStatus('已退出画中画')
+          return
+        }
+        if (video.readyState >= 2) {
+          await video.requestPictureInPicture()
+          setPipActive(true)
+          showStatus('画中画模式')
+          return
+        }
+      } catch { /* PiP 失败，尝试 mpv 方案 */ }
+    }
+    try {
+      const result = await window.api.window.alwaysOnTop()
+      if (result.success) {
+        setAlwaysOnTop(!!result.data)
+        setPipActive(!!result.data)
+        showStatus(result.data ? '画中画（置顶小窗）' : '退出画中画')
+      }
+    } catch { showStatus('画中画不可用') }
+  }, [showStatus])
+
+  // P2: 监听 PiP 事件
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    const onEnter = (): void => setPipActive(true)
+    const onLeave = (): void => setPipActive(false)
+    video.addEventListener('enterpictureinpicture', onEnter)
+    video.addEventListener('leavepictureinpicture', onLeave)
+    return () => {
+      video.removeEventListener('enterpictureinpicture', onEnter)
+      video.removeEventListener('leavepictureinpicture', onLeave)
+    }
+  }, [])
+
   const handleKeyDown = async (e: React.KeyboardEvent): Promise<void> => {
+    const video = videoRef.current; if (!video) return
     const tag = (e.target as HTMLElement).tagName; if (tag === 'INPUT' || tag === 'TEXTAREA') return
 
-    const isMpvMode = useMpv && mpvReady
-
     switch (e.key) {
-      case 'ArrowLeft': e.preventDefault(); if (isMpvMode) { const pos = Math.max(0, currentTime - (e.ctrlKey ? 30 : 5)); window.api.mpv.seek(pos); showStatus(e.ctrlKey ? '后退 30s' : '后退 5s') } else { const video = videoRef.current; if (video) { video.currentTime = Math.max(0, video.currentTime - (e.ctrlKey ? 30 : 5)); showStatus(e.ctrlKey ? '后退 30s' : '后退 5s') } }; break
-      case 'ArrowRight': e.preventDefault(); if (isMpvMode) { const pos = Math.min(duration, currentTime + (e.ctrlKey ? 30 : 5)); window.api.mpv.seek(pos); showStatus(e.ctrlKey ? '前进 30s' : '前进 5s') } else { const video = videoRef.current; if (video) { video.currentTime = Math.min(video.duration, video.currentTime + (e.ctrlKey ? 30 : 5)); showStatus(e.ctrlKey ? '前进 30s' : '前进 5s') } }; break
+      case 'ArrowLeft': e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - (e.ctrlKey ? 30 : 5)); showStatus(e.ctrlKey ? '后退 30s' : '后退 5s'); break
+      case 'ArrowRight': e.preventDefault(); video.currentTime = Math.min(video.duration, video.currentTime + (e.ctrlKey ? 30 : 5)); showStatus(e.ctrlKey ? '前进 30s' : '前进 5s'); break
       case ' ': e.preventDefault(); handlePlayPause(); break
-      case 'ArrowUp': e.preventDefault(); if (isMpvMode) { const vol = Math.min(150, volume + 10); window.api.mpv.setVolume(vol); setVolume(vol) } else { const video = videoRef.current; if (video) { video.volume = Math.min(1, video.volume + 0.1); setVolume(Math.round(video.volume * 100)) } }; break
-      case 'ArrowDown': e.preventDefault(); if (isMpvMode) { const vol = Math.max(0, volume - 10); window.api.mpv.setVolume(vol); setVolume(vol) } else { const video = videoRef.current; if (video) { video.volume = Math.max(0, video.volume - 0.1); setVolume(Math.round(video.volume * 100)) } }; break
+      case 'ArrowUp': e.preventDefault(); video.volume = Math.min(1, video.volume + 0.1); setVolume(Math.round(video.volume * 100)); break
+      case 'ArrowDown': e.preventDefault(); video.volume = Math.max(0, video.volume - 0.1); setVolume(Math.round(video.volume * 100)); break
       case 'f': case 'F': e.preventDefault(); handleFullscreen(); break
-      case 'm': case 'M': e.preventDefault(); { const video = videoRef.current; if (isMpvMode) { const newVol = volume > 0 ? 0 : (parseInt(localStorage.getItem('prevVolume') || '50') || 50); if (volume > 0) localStorage.setItem('prevVolume', String(volume)); window.api.mpv.setVolume(newVol); setVolume(newVol); showStatus(newVol === 0 ? '已静音' : `音量 ${newVol}`) } else if (video) { if (video.volume > 0) { localStorage.setItem('prevVolume', String(Math.round(video.volume * 100))); video.volume = 0; setVolume(0); showStatus('已静音') } else { const prev = parseInt(localStorage.getItem('prevVolume') || '50') || 50; video.volume = prev / 100; setVolume(prev); showStatus(`音量 ${prev}`) } } }; break
-      case '[': e.preventDefault(); { const speeds = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2]; const idx = speeds.indexOf(playbackRate); const newRate = idx > 0 ? speeds[idx - 1] : 0.25; handlePlaybackRateChange(newRate) }; break
-      case ']': e.preventDefault(); { const speeds = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2]; const idx = speeds.indexOf(playbackRate); const newRate = idx < speeds.length - 1 ? speeds[idx + 1] : 2; handlePlaybackRateChange(newRate) }; break
-      case '\\': e.preventDefault(); handlePlaybackRateChange(1); showStatus('正常速度 1x'); break
-      case '?': e.preventDefault(); setShowShortcutsHelp(prev => !prev); break
-      case 'Escape': e.preventDefault(); if (showShortcutsHelp) { setShowShortcutsHelp(false) } else if (infoOverlay) handleCloseInfo(); else if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); break
-      // P2: 截图
       case 's': case 'S': e.preventDefault(); handleScreenshot(); break
-      // P2: 窗口置顶
       case 'p': case 'P': e.preventDefault(); { const result = await window.api.window.alwaysOnTop(); if (result.success) { setAlwaysOnTop(!!result.data); showStatus(result.data ? '窗口置顶' : '取消置顶') } }; break
-      // P2: 画中画 (PiP)
       case 'd': case 'D': e.preventDefault(); handlePictureInPicture(); break
-      // P2: AB 循环
-      case 'a': case 'A': e.preventDefault(); { const t = isMpvMode ? currentTimeRef.current : (videoRef.current?.currentTime || 0); abPointARef.current = t; showStatus(`A 点: ${formatTime(t)}`) }; break
-      case 'b': case 'B': e.preventDefault(); { const t = isMpvMode ? currentTimeRef.current : (videoRef.current?.currentTime || 0); if (abPointARef.current !== null) { abPointBRef.current = t; setAbLoopActive(true); showStatus(`AB 循环: ${formatTime(abPointARef.current)} → ${formatTime(t)}`) } else { showStatus('请先按 A 设置起点') } }; break
-      case 'x': case 'X': e.preventDefault(); if (abLoopActive) { abPointARef.current = null; abPointBRef.current = null; setAbLoopActive(false); showStatus('AB 循环已关闭') } break
+      case 'Escape': e.preventDefault(); if (infoOverlay) handleCloseInfo(); else if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); break
     }
   }
 
@@ -1697,7 +1053,7 @@ function Player(): JSX.Element {
     <div ref={containerRef} className="h-full flex flex-col bg-black relative outline-none" onKeyDown={handleKeyDown} tabIndex={0}>
 
       {/* 视频区域 */}
-      <div ref={videoAreaRef} className="flex-1 relative bg-black overflow-hidden" onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
+      <div className="flex-1 relative bg-black overflow-hidden" onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
         {/* 顶部信息栏 */}
         <div className={`absolute top-0 left-0 right-0 z-30 transition-all duration-500 ${controlsVisible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2 pointer-events-none'}`}>
           <div className="player-glass-bar bg-gradient-to-b from-black/60 to-black/30 px-4 py-3 flex items-center gap-3 border-none">
@@ -1724,13 +1080,6 @@ function Player(): JSX.Element {
         <video ref={videoRef} className="absolute inset-0 w-full h-full object-contain" controls={false} playsInline preload="metadata" crossOrigin="anonymous" />
         <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-10" />
 
-        {/* 缩略图预览：隐藏的离屏视频（canvas 在 portal 中渲染） */}
-        {/* 注意：不能用 className="hidden"（display:none 会导致 Chromium 不解码帧） */}
-        {/* 使用 overflow:hidden 容器确保视频有真实尺寸，Chromium 才会解码帧 */}
-        <div style={{ position: 'absolute', width: 0, height: 0, overflow: 'hidden' }}>
-          <video ref={thumbVideoRef} muted playsInline preload="auto" style={{ width: 320, height: 180 }} />
-        </div>
-
         {/* 弹幕状态 */}
         {danmakuLoading && (
           <div className="absolute top-4 right-4 player-glass-badge px-3 py-1.5 rounded text-[11px] text-[#bbb] z-20 flex items-center gap-2">
@@ -1750,67 +1099,6 @@ function Player(): JSX.Element {
           </div>
         )}
 
-        {/* 状态提示 */}
-        {statusMsg && !speedToast && (
-          <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
-            <div className="player-glass-toast px-4 py-2 rounded-lg">
-              <span className="text-[15px] font-medium text-white/90">{statusMsg}</span>
-            </div>
-          </div>
-        )}
-
-        {/* P2: 自动连播倒计时 */}
-        {autoplayCountdown !== null && (
-          <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-            <div className="text-center">
-              <div className="text-white/80 text-lg mb-4">{episodeList[currentEpisodeIndex + 1]?.Name || `下一集`}</div>
-              <div className="text-5xl font-bold text-[#8b82f6] mb-4 animate-pulse">{autoplayCountdown}</div>
-              <div className="text-white/50 text-sm mb-6">秒后自动播放</div>
-              <div className="flex gap-3 justify-center">
-                <button
-                  onClick={() => {
-                    if (autoplayTimerRef.current) clearInterval(autoplayTimerRef.current)
-                    setAutoplayCountdown(null)
-                    handleSwitchEpisode(currentEpisodeIndex + 1)
-                  }}
-                  className="px-6 py-2 bg-[#8b82f6] hover:bg-[#7a72e5] text-white rounded-lg text-sm font-medium transition-colors"
-                >
-                  立即播放
-                </button>
-                <button
-                  onClick={() => {
-                    if (autoplayTimerRef.current) clearInterval(autoplayTimerRef.current)
-                    setAutoplayCountdown(null)
-                  }}
-                  className="px-6 py-2 bg-white/10 hover:bg-white/15 text-white/80 rounded-lg text-sm transition-colors"
-                >
-                  取消
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* P2: 窗口置顶指示 */}
-        {alwaysOnTop && (
-          <div className="absolute top-4 left-4 z-30 pointer-events-none">
-            <div className="player-glass-badge px-2 py-1 rounded text-[10px] text-[#8b82f6] flex items-center gap-1">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
-              置顶
-            </div>
-          </div>
-        )}
-
-        {/* P2: AB 循环指示 */}
-        {abLoopActive && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
-            <div className="player-glass-badge px-3 py-1 rounded text-[11px] text-[#8b82f6] flex items-center gap-1.5">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg>
-              AB: {formatTime(abPointARef.current || 0)} → {formatTime(abPointBRef.current || 0)}
-            </div>
-          </div>
-        )}
-
         {/* 加载中 */}
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-10">
@@ -1824,56 +1112,6 @@ function Player(): JSX.Element {
             <div className="text-center">
               <p className="text-sm text-white/40 mb-6">{error}</p>
               <Link to="/" className="text-[#8b82f6] hover:text-[#a29bfe] text-xs transition-colors">返回媒体库</Link>
-            </div>
-          </div>
-        )}
-
-        {/* 快捷键帮助 */}
-        {showShortcutsHelp && (
-          <div className="absolute inset-0 z-40 flex items-center justify-center" onClick={() => setShowShortcutsHelp(false)}>
-            <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
-            <div className="relative bg-[#1a1a2e]/95 backdrop-blur-xl rounded-2xl border border-white/10 p-6 w-[420px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-              <div className="flex items-center justify-between mb-5">
-                <h3 className="text-[16px] font-semibold text-white">键盘快捷键</h3>
-                <button onClick={() => setShowShortcutsHelp(false)} className="w-7 h-7 rounded-full hover:bg-white/10 flex items-center justify-center text-white/50 hover:text-white">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-                </button>
-              </div>
-              <div className="space-y-3">
-                {[
-                  { keys: ['Space'], desc: '播放 / 暂停' },
-                  { keys: ['←'], desc: '后退 5 秒' },
-                  { keys: ['Ctrl', '←'], desc: '后退 30 秒' },
-                  { keys: ['→'], desc: '前进 5 秒' },
-                  { keys: ['Ctrl', '→'], desc: '前进 30 秒' },
-                  { keys: ['↑'], desc: '音量 +10' },
-                  { keys: ['↓'], desc: '音量 -10' },
-                  { keys: ['F'], desc: '全屏切换' },
-                  { keys: ['M'], desc: '静音切换' },
-                  { keys: ['['], desc: '减速 (0.25x)' },
-                  { keys: [']'], desc: '加速 (0.25x)' },
-                  { keys: ['\\'], desc: '恢复正常速度' },
-                  { keys: ['S'], desc: '截图保存' },
-                  { keys: ['P'], desc: '窗口置顶' },
-                  { keys: ['D'], desc: '画中画' },
-                  { keys: ['A'], desc: '设置 AB 循环起点' },
-                  { keys: ['B'], desc: '设置 AB 循环终点' },
-                  { keys: ['X'], desc: '关闭 AB 循环' },
-                  { keys: ['?'], desc: '显示此帮助' },
-                ].map((item, i) => (
-                  <div key={i} className="flex items-center justify-between">
-                    <span className="text-[13px] text-white/60">{item.desc}</span>
-                    <div className="flex items-center gap-1">
-                      {item.keys.map((k, j) => (
-                        <span key={j}>
-                          {j > 0 && <span className="text-white/20 text-[11px] mx-0.5">+</span>}
-                          <kbd className="inline-block px-2 py-0.5 rounded-md bg-white/10 border border-white/15 text-[11px] text-white/80 font-mono min-w-[28px] text-center">{k}</kbd>
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
             </div>
           </div>
         )}
@@ -1962,26 +1200,6 @@ function Player(): JSX.Element {
             <button onClick={() => { handleDanmakuToggle(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">{danmakuEnabled ? '关闭弹幕' : '开启弹幕'}</button>
             <button onClick={() => { handleOpenDanmakuSearch(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">搜索弹幕</button>
             <button onClick={() => { handleLoadLocalXml(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">加载本地弹幕</button>
-            {hasMultipleTracks && (
-              <>
-                <hr className="border-white/5 my-0.5" />
-                <div className="px-3 py-1 text-[10px] text-white/35">音频轨道</div>
-                {audioTracks.map(t => (
-                  <button key={`a${t.id}`} onClick={() => handleSelectAudioTrack(t.id)} className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${t.selected ? 'text-[#8b82f6]' : 'text-white/60 hover:bg-white/5'}`}>
-                    {t.lang || t.title || `轨道 ${t.id + 1}`}{t.selected ? ' ✓' : ''}
-                  </button>
-                ))}
-                <div className="px-3 py-1 text-[10px] text-white/35">字幕轨道</div>
-                <button onClick={handleDisableSubtitle} className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${subtitleTracks.every(t => !t.selected) ? 'text-[#8b82f6]' : 'text-white/60 hover:bg-white/5'}`}>
-                  关闭字幕{subtitleTracks.every(t => !t.selected) ? ' ✓' : ''}
-                </button>
-                {subtitleTracks.map(t => (
-                  <button key={`s${t.id}`} onClick={() => handleSelectSubtitle(t.id)} className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${t.selected ? 'text-[#8b82f6]' : 'text-white/60 hover:bg-white/5'}`}>
-                    {t.lang || t.title || `字幕 ${t.id + 1}`}{t.selected ? ' ✓' : ''}
-                  </button>
-                ))}
-              </>
-            )}
           </div>
         </>
       )}
@@ -2079,28 +1297,10 @@ function Player(): JSX.Element {
         )}
 
         {/* 进度条 */}
-        <div className="flex-1 h-6 flex items-center cursor-pointer group relative" onClick={handleSeek} onMouseMove={handleProgressMouseMove} onMouseLeave={handleProgressMouseLeave}>
+        <div className="flex-1 h-6 flex items-center cursor-pointer group relative" onClick={handleSeek}>
           <div className="absolute left-0 right-0 h-[2px] bg-white/5 rounded-full group-hover:h-[4px] transition-all">
             <div className="h-full bg-white/10 rounded-full" style={{ width: `${bufferedPercent}%` }} />
             <div className="h-full bg-[#8b82f6] rounded-full absolute top-0 left-0" style={{ width: `${progressPercent}%` }} />
-            {/* P2: AB 循环区间标记 */}
-            {abPointARef.current !== null && duration > 0 && (
-              <div
-                className="absolute top-0 h-full bg-[#8b82f6]/30"
-                style={{
-                  left: `${(abPointARef.current / duration) * 100}%`,
-                  width: abPointBRef.current !== null
-                    ? `${((abPointBRef.current - abPointARef.current) / duration) * 100}%`
-                    : `${100 - (abPointARef.current / duration) * 100}%`
-                }}
-              />
-            )}
-            {abPointARef.current !== null && duration > 0 && (
-              <div className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 bg-[#8b82f6] rounded" style={{ left: `${(abPointARef.current / duration) * 100}%` }} />
-            )}
-            {abPointBRef.current !== null && duration > 0 && (
-              <div className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 bg-[#8b82f6] rounded" style={{ left: `${(abPointBRef.current / duration) * 100}%` }} />
-            )}
             <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-[#8b82f6] rounded-full opacity-0 group-hover:opacity-100 transition-opacity" style={{ left: `${progressPercent}%` }} />
           </div>
         </div>
@@ -2144,35 +1344,12 @@ function Player(): JSX.Element {
         </button>
 
         {/* P2: 截图 */}
-        <button
-          onClick={handleScreenshot}
-          className="glass-btn-icon text-white/50 hover:text-white/80"
-          title="截图 (S)"
-        >
+        <button onClick={handleScreenshot} className="glass-btn-icon text-white/50 hover:text-white/80" title="截图 (S)">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
         </button>
 
-        {/* P2: 窗口置顶 */}
-        <button
-          onClick={async () => {
-            const result = await window.api.window.alwaysOnTop()
-            if (result.success) {
-              setAlwaysOnTop(!!result.data)
-              showStatus(result.data ? '窗口置顶' : '取消置顶')
-            }
-          }}
-          className={`glass-btn-icon ${alwaysOnTop ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/80'}`}
-          title="窗口置顶 (P)"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill={alwaysOnTop ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 1 1 0 001-1V4a2 2 0 00-2-2H9a2 2 0 00-2 2v1a1 1 0 001 1 1 1 0 011 1z"/></svg>
-        </button>
-
-        {/* P2: 画中画 (PiP) */}
-        <button
-          onClick={handlePictureInPicture}
-          className={`glass-btn-icon ${pipActive ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/80'}`}
-          title="画中画 (D)"
-        >
+        {/* P2: 画中画 */}
+        <button onClick={handlePictureInPicture} className={`glass-btn-icon ${pipActive ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/80'}`} title="画中画 (D)">
           <svg width="16" height="16" viewBox="0 0 24 24" fill={pipActive ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><rect x="11" y="9" width="9" height="7" rx="1" fill={pipActive ? 'currentColor' : 'none'} opacity="0.7"/></svg>
         </button>
 
@@ -2180,15 +1357,6 @@ function Player(): JSX.Element {
         <button onClick={handleFullscreen} className="glass-btn-icon text-white/50 hover:text-white/80" title="全屏">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
         </button>
-
-        {/* 轨道选择按钮 */}
-        {hasMultipleTracks && (
-          <div className="relative">
-            <button onClick={() => { setShowTrackMenu(!showTrackMenu); setContextMenu({ x: 0, y: 0, visible: false }) }} className="glass-btn-icon text-white/50 hover:text-white/80" title="音轨/字幕">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="8" x2="17" y2="8"/><line x1="7" y1="12" x2="17" y2="12"/><line x1="7" y1="16" x2="12" y2="16"/></svg>
-            </button>
-          </div>
-        )}
       </div>
 
       {/* 剧集列表弹窗 — fixed 定位，不受视频 overflow 影响 */}
@@ -2293,12 +1461,8 @@ function Player(): JSX.Element {
                 onChange={(e) => {
                   const v = Number(e.target.value)
                   setVolume(v)
-                  if (useMpv && mpvReady) {
-                    window.api.mpv.setVolume(v)
-                  } else {
-                    const video = videoRef.current
-                    if (video) { video.volume = v / 100; video.muted = v === 0 }
-                  }
+                  const video = videoRef.current
+                  if (video) { video.volume = v / 100; video.muted = v === 0 }
                 }}
                 className="flex-1 h-1 appearance-none bg-white/8 rounded-full cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:cursor-pointer"
               />
@@ -2306,14 +1470,8 @@ function Player(): JSX.Element {
             <div className="flex items-center gap-2 mt-2">
               <button
                 onClick={() => {
-                  if (useMpv && mpvReady) {
-                    const muted = volume === 0
-                    if (muted) { window.api.mpv.setVolume(100); setVolume(100) }
-                    else { window.api.mpv.setVolume(0); setVolume(0) }
-                  } else {
-                    const video = videoRef.current; if (!video) return
-                    const muted = !video.muted; video.muted = muted; setVolume(muted ? 0 : Math.round(video.volume * 100))
-                  }
+                  const video = videoRef.current; if (!video) return
+                  const muted = !video.muted; video.muted = muted; setVolume(muted ? 0 : Math.round(video.volume * 100))
                 }}
                 className="text-[10px] text-white/40 hover:text-white/80 transition-colors"
               >
@@ -2323,87 +1481,6 @@ function Player(): JSX.Element {
           </motion.div>
         )}
       </AnimatePresence>
-
-      {/* 轨道选择弹窗 */}
-      <AnimatePresence>
-        {showTrackMenu && (audioTracks.length > 0 || subtitleTracks.length > 0) && (
-          <motion.div
-            className="fixed bottom-20 right-4 player-glass-panel rounded-lg p-3 z-50 w-64"
-            initial={{ opacity: 0, y: 8, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 8, scale: 0.95 }}
-            transition={{ duration: 0.15 }}
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setTrackMenuTab('audio')}
-                  className={`text-[10px] px-2 py-1 rounded transition-colors ${trackMenuTab === 'audio' ? 'text-[#8b82f6] bg-white/5' : 'text-white/40 hover:text-white/60'}`}
-                >音频 ({audioTracks.length})</button>
-                <button
-                  onClick={() => setTrackMenuTab('subtitle')}
-                  className={`text-[10px] px-2 py-1 rounded transition-colors ${trackMenuTab === 'subtitle' ? 'text-[#8b82f6] bg-white/5' : 'text-white/40 hover:text-white/60'}`}
-                >字幕 ({subtitleTracks.length})</button>
-              </div>
-              <button onClick={() => setShowTrackMenu(false)} className="text-white/30 hover:text-white/80 transition-colors text-xs">&times;</button>
-            </div>
-
-            {trackMenuTab === 'audio' && (
-              <div className="space-y-0.5 max-h-40 overflow-y-auto">
-                {audioTracks.map(t => (
-                  <button
-                    key={`a${t.id}`}
-                    onClick={() => handleSelectAudioTrack(t.id)}
-                    className={`w-full text-left px-2 py-1.5 text-xs rounded transition-colors ${t.selected ? 'text-[#8b82f6] bg-white/5' : 'text-white/60 hover:bg-white/5'}`}
-                  >
-                    <span className="truncate block">{t.lang || t.title || `轨道 ${t.id + 1}`}</span>
-                    {t.codec && <span className="text-[9px] text-white/25">{t.codec}{t['demux-w'] > 0 ? ` ${t['demux-w']}x${t['demux-h']}` : ''}</span>}
-                    {t.selected && <span className="float-right text-[#8b82f6]">✓</span>}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {trackMenuTab === 'subtitle' && (
-              <div className="space-y-0.5 max-h-40 overflow-y-auto">
-                <button
-                  onClick={handleDisableSubtitle}
-                  className={`w-full text-left px-2 py-1.5 text-xs rounded transition-colors ${subtitleTracks.every(t => !t.selected) ? 'text-[#8b82f6] bg-white/5' : 'text-white/60 hover:bg-white/5'}`}
-                >
-                  关闭字幕
-                  {subtitleTracks.every(t => !t.selected) && <span className="float-right text-[#8b82f6]">✓</span>}
-                </button>
-                {subtitleTracks.map(t => (
-                  <button
-                    key={`s${t.id}`}
-                    onClick={() => handleSelectSubtitle(t.id)}
-                    className={`w-full text-left px-2 py-1.5 text-xs rounded transition-colors ${t.selected ? 'text-[#8b82f6] bg-white/5' : 'text-white/60 hover:bg-white/5'}`}
-                  >
-                    <span className="truncate block">{t.lang || t.title || `字幕 ${t.id + 1}`}</span>
-                    {t.codec && <span className="text-[9px] text-white/25">{t.codec}</span>}
-                    {t.selected && <span className="float-right text-[#8b82f6]">✓</span>}
-                  </button>
-                ))}
-              </div>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* 缩略图预览浮层 — createPortal 到 document.body + ref 直接操作 DOM */}
-      {thumbVisible && duration > 0 && createPortal(
-        <div
-          ref={thumbTooltipRef}
-          className="fixed z-[100] pointer-events-none"
-          style={{ left: 0, top: 0, transform: 'translateX(-50%)', display: thumbVisible ? 'block' : 'none' }}
-        >
-          <div className="bg-black/90 rounded-lg border border-white/20 shadow-2xl overflow-hidden">
-            <canvas ref={thumbCanvasRef} className="w-[160px] block" />
-            <div className="thumb-time text-center text-[11px] text-white/80 py-1 font-mono">{formatTime(0)}</div>
-          </div>
-        </div>,
-        document.body
-      )}
     </div>
   )
 }

@@ -46,7 +46,7 @@ export interface DanmakuMatchResponse {
   error?: string
 }
 
-export interface DanmakuSearchResponse {
+export interface DanmakuSearchApiResponse {
   success: boolean
   data?: DanmakuSearchResponse
   error?: string
@@ -62,9 +62,10 @@ export interface DanmakuCommentsResponse {
 }
 
 export interface DanmakuConfigResponse {
-  success: boolean
-  data?: DanmakuConfig
-  error?: string
+  primary: string
+  mirrors: string[]
+  appId?: string
+  appSecretHint?: string
 }
 
 // ===== 播放历史相关类型 =====
@@ -141,6 +142,35 @@ export interface MpvEvent {
   data?: unknown
 }
 
+// ===== 豆瓣相关类型 =====
+export interface DoubanRating {
+  rating?: number
+  count?: number
+}
+
+// ===== 视频信息类型 =====
+export interface VideoInfo {
+  duration?: number
+  width?: number
+  height?: number
+  codec?: string
+}
+
+// ===== 日志类型 =====
+export interface LogApi {
+  send: (level: string, source: string, ...args: unknown[]) => Promise<void>
+  toggleWindow: () => Promise<void>
+}
+
+export interface DoubanApi {
+  getRating: (title: string) => Promise<ApiResponse<DoubanRating>>
+  getRatingsBatch: (titles: string[]) => Promise<ApiResponse<Record<string, DoubanRating>>>
+}
+
+export interface VideoApi {
+  getInfo: (filePath: string) => Promise<ApiResponse<VideoInfo>>
+}
+
 // ===== API 类型定义 =====
 export interface Api {
   mpv: {
@@ -162,11 +192,12 @@ export interface Api {
     setProperty: (name: string, value: unknown) => Promise<ApiResponse<void>>
     screenshot: (filePath: string) => Promise<ApiResponse<void>>
     screenshotSave: () => Promise<ApiResponse<string>>
-    thumbnail: (timePos: number) => Promise<ApiResponse<{ dataUrl: string }>>
+
     isAvailable: () => Promise<ApiResponse<boolean>>
     embed: (x: number, y: number, width: number, height: number) => Promise<ApiResponse<void>>
     updateEmbed: (x: number, y: number, width: number, height: number) => Promise<ApiResponse<void>>
     onEvent: (callback: (event: string, data: MpvEvent) => void) => void
+    offEvent: () => void
   }
 
   history: {
@@ -183,7 +214,7 @@ export interface Api {
     getChildren: (parentId: string) => Promise<JellyfinItemsResponse>
     search: (query: string, options?: { limit?: number }) => Promise<JellyfinSearchResponse>
     getItemDetails: (itemId: string) => Promise<ApiResponse<JellyfinItem>>
-    getPlaybackUrl: (itemId: string) => Promise<ApiResponse<string>>
+    getPlaybackUrl: (itemId: string) => Promise<ApiResponse<{ url: string }>>
     reportProgress: (itemId: string, position: number, isPaused: boolean) => Promise<ApiResponse<void>>
     toggleFavorite: (itemId: string) => Promise<ApiResponse<void>>
     getEpisodes: (seriesId: string, seasonId?: string) => Promise<JellyfinItemsResponse>
@@ -197,13 +228,13 @@ export interface Api {
 
   danmaku: {
     match: (title: string) => Promise<DanmakuMatchResponse>
-    search: (keyword: string) => Promise<DanmakuSearchResponse>
+    search: (keyword: string) => Promise<DanmakuSearchApiResponse>
     getComments: (commentId: string, source?: string) => Promise<DanmakuCommentsResponse>
     getSegmentComments: (params: unknown) => Promise<DanmakuCommentsResponse>
     prefetchSeries: (animeId: number) => Promise<ApiResponse<void>>
     getConfig: () => Promise<DanmakuConfigResponse>
-    setConfig: (config: Partial<DanmakuConfig>) => Promise<ApiResponse<void>>
-    testApi: (url: string) => Promise<ApiResponse<void>>
+    setConfig: (config: { primary?: string; mirrors?: string[]; appId?: string; appSecret?: string }) => Promise<ApiResponse<void>>
+    testApi: (url: string) => Promise<ApiResponse<{ success: boolean; elapsed: number; animeCount?: number; epCount?: number; detail?: string }>>
     parseLocalXml: (xmlPath: string) => Promise<DanmakuCommentsResponse>
     findLocalXml: (videoPath: string) => Promise<ApiResponse<{ count: number; comments: DanmakuComment[]; source: string }>>
   }
@@ -225,10 +256,16 @@ export interface Api {
     test: (url: string, token: string) => Promise<ApiResponse<void>>
   }
 
+  douban: DoubanApi
+
+  video: VideoApi
+
+  log: LogApi
+
   store: {
-    get: (key: string) => Promise<ApiResponse<unknown>>
-    set: (key: string, value: unknown) => Promise<ApiResponse<void>>
-    delete: (key: string) => Promise<ApiResponse<void>>
+    get: (key: string) => Promise<unknown>
+    set: (key: string, value: unknown) => Promise<boolean>
+    delete: (key: string) => Promise<boolean>
   }
 
   window: {

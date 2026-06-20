@@ -135,6 +135,8 @@ function Settings(): ReactElement {
   // 弹幕 API
   const [danmakuPrimary, setDanmakuPrimary] = useState('')
   const [danmakuMirrors, setDanmakuMirrors] = useState('')
+  const [danmakuAppId, setDanmakuAppId] = useState('')
+  const [danmakuAppSecret, setDanmakuAppSecret] = useState('')
   const [danmakuTestResult, setDanmakuTestResult] = useState<DanmakuTestResult | null>(null)
   const [danmakuTesting, setDanmakuTesting] = useState(false)
   const [danmakuSaveMsg, setDanmakuSaveMsg] = useState('')
@@ -150,15 +152,22 @@ function Settings(): ReactElement {
   const loadServers = useCallback(async (): Promise<void> => {
     try {
       const listResult = await window.api.server.list()
+      console.log('[Settings] loadServers - listResult:', listResult)
       if (listResult.success && listResult.data) {
-        setServers(listResult.data as ServerConfig[])
+        const serversList = listResult.data as ServerConfig[]
+        console.log('[Settings] Loaded servers:', serversList.length, serversList)
+        setServers(serversList)
       }
       const activeResult = await window.api.server.getActive()
+      console.log('[Settings] loadServers - activeResult:', activeResult)
       if (activeResult.success && activeResult.data) {
         const d = activeResult.data as ServerInfo
         setActiveServerId(d.id)
+        console.log('[Settings] Active server ID:', d.id)
       }
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.error('[Settings] loadServers error:', err)
+    }
   }, [])
 
   const handleTestServer = useCallback(async (): Promise<void> => {
@@ -253,6 +262,8 @@ function Settings(): ReactElement {
     window.api.danmaku.getConfig().then((cfg) => {
       setDanmakuPrimary(cfg.primary)
       setDanmakuMirrors(cfg.mirrors.join('\n'))
+      if (cfg.appId) setDanmakuAppId(cfg.appId)
+      if (cfg.appSecretHint) setDanmakuInfo(`已保存密钥: ${cfg.appSecretHint}`)
     }).catch(() => {})
 
     // 加载播放器设置
@@ -284,7 +295,13 @@ function Settings(): ReactElement {
 
   const handleDanmakuSave = async (): Promise<void> => {
     const mirrors = danmakuMirrors.split('\n').map((s) => s.trim()).filter((s) => s.length > 0)
-    await window.api.danmaku.setConfig({ primary: danmakuPrimary.trim(), mirrors })
+    const updates: { primary: string; mirrors: string[]; appId?: string; appSecret?: string } = {
+      primary: danmakuPrimary.trim(),
+      mirrors
+    }
+    if (danmakuAppId.trim()) updates.appId = danmakuAppId.trim()
+    if (danmakuAppSecret.trim() && danmakuAppSecret.trim() !== '••••') updates.appSecret = danmakuAppSecret.trim()
+    await window.api.danmaku.setConfig(updates)
     setDanmakuSaveMsg('已保存')
     setTimeout(() => setDanmakuSaveMsg(''), 2000)
   }
@@ -573,6 +590,34 @@ function Settings(): ReactElement {
                     placeholder="https://danmu.smilion.cn"
                     rows={3}
                     className="ios-textarea"
+                  />
+                </Field>
+
+                <div className="h-px bg-[var(--separator)]" />
+
+                <div className="flex items-center gap-2 mb-1">
+                  <Key size={14} className="text-[var(--text-tertiary)]" strokeWidth={1.5} />
+                  <span className="text-[13px] font-medium text-[var(--text-secondary)]">DandanPlay 认证（可选）</span>
+                </div>
+                <p className="text-[11px] text-[var(--text-tertiary)] -mt-3 mb-1">
+                  API 需要 AppId/AppSecret 认证。前往 <a href="https://dev.dandanplay.com/" target="_blank" rel="noreferrer" className="text-[var(--accent)] underline">开发者中心</a> 申请
+                </p>
+                <Field label="AppId">
+                  <input
+                    type="text"
+                    value={danmakuAppId}
+                    onChange={(e) => setDanmakuAppId(e.target.value)}
+                    placeholder="在开发者中心申请"
+                    className="ios-input"
+                  />
+                </Field>
+                <Field label="AppSecret">
+                  <input
+                    type="password"
+                    value={danmakuAppSecret}
+                    onChange={(e) => setDanmakuAppSecret(e.target.value)}
+                    placeholder={danmakuInfo.includes('••••') ? '已保存（留空保持不变）' : '在开发者中心申请'}
+                    className="ios-input"
                   />
                 </Field>
 
