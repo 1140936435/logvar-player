@@ -152,22 +152,15 @@ function Settings(): ReactElement {
   const loadServers = useCallback(async (): Promise<void> => {
     try {
       const listResult = await window.api.server.list()
-      console.log('[Settings] loadServers - listResult:', listResult)
       if (listResult.success && listResult.data) {
-        const serversList = listResult.data as ServerConfig[]
-        console.log('[Settings] Loaded servers:', serversList.length, serversList)
-        setServers(serversList)
+        setServers(listResult.data as ServerConfig[])
       }
       const activeResult = await window.api.server.getActive()
-      console.log('[Settings] loadServers - activeResult:', activeResult)
       if (activeResult.success && activeResult.data) {
         const d = activeResult.data as ServerInfo
         setActiveServerId(d.id)
-        console.log('[Settings] Active server ID:', d.id)
       }
-    } catch (err) {
-      console.error('[Settings] loadServers error:', err)
-    }
+    } catch { /* ignore */ }
   }, [])
 
   const handleTestServer = useCallback(async (): Promise<void> => {
@@ -267,7 +260,7 @@ function Settings(): ReactElement {
     }).catch(() => {})
 
     // 加载播放器设置
-    window.api.store.get('player').then((data: any) => {
+    window.api.store.get('player').then((data: { hardwareDecode?: boolean; hdrToneMapping?: boolean } | null) => {
       if (data) {
         if (typeof data.hardwareDecode === 'boolean') setHardwareDecode(data.hardwareDecode)
         if (typeof data.hdrToneMapping === 'boolean') setHdrToneMapping(data.hdrToneMapping)

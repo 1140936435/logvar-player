@@ -112,7 +112,7 @@ const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, commun
               if (parent && !parent.querySelector('.fallback-icon')) {
                 const div = document.createElement('div')
                 div.className = 'fallback-icon w-full h-full flex items-center justify-center bg-[var(--bg-elevated)]'
-                div.innerHTML = isFolder ? '📁' : '🎬'
+                div.textContent = isFolder ? '📁' : '🎬'
                 parent.appendChild(div)
               }
             }}
@@ -426,7 +426,7 @@ function Home(): ReactElement {
           setLibraryTotalCounts(prev => ({ ...prev, [libId]: itemData.TotalRecordCount! }))
         }
       }
-    } catch { /* ignore */ }
+    } catch (err) { console.error('[Library] 加载更多失败:', err) }
     loadMoreLoadingRef.current[libId] = false
     setLibraryLoadingMore(prev => ({ ...prev, [libId]: false }))
   }, [libraryLoadCounts])

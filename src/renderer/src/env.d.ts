@@ -1,5 +1,8 @@
 /// <reference types="electron-vite/renderer" />
 
+// Store value types
+type StoreValue = string | number | boolean | Record<string, unknown> | unknown[] | null
+
 interface JellyfinConnectResult {
   success: boolean
   data?: unknown
@@ -75,7 +78,7 @@ interface WindowApi {
     setVolume: (volume: number) => Promise<ApiResponse>
     setSpeed: (speed: number) => Promise<ApiResponse>
     toggleFullscreen: () => Promise<ApiResponse>
-    onEvent: (callback: (event: string, data: any) => void) => void
+    onEvent: (callback: (event: string, data: unknown) => void) => void
   }
   history: {
     save: (item: PlayHistoryItem) => Promise<ApiResponse>
@@ -103,7 +106,7 @@ interface WindowApi {
     match: (title: string) => Promise<ApiResponse>
     search: (keyword: string) => Promise<ApiResponse>
     getComments: (commentId: string, source?: string) => Promise<ApiResponse>
-    getSegmentComments: (params: any) => Promise<ApiResponse>
+    getSegmentComments: (params: Record<string, unknown>) => Promise<ApiResponse>
     getConfig: () => Promise<DanmakuConfig>
     setConfig: (config: { primary?: string; mirrors?: string[] }) => Promise<boolean>
     testApi: (url: string) => Promise<DanmakuTestResult>
@@ -121,8 +124,8 @@ interface WindowApi {
     getInfo: (filePath: string) => Promise<VideoInfoResponse>
   }
   store: {
-    get: (key: string) => Promise<any>
-    set: (key: string, value: any) => Promise<boolean>
+    get: (key: string) => Promise<StoreValue>
+    set: (key: string, value: StoreValue) => Promise<boolean>
     delete: (key: string) => Promise<boolean>
   }
   window: {
@@ -131,7 +134,7 @@ interface WindowApi {
     close: () => Promise<void>
   }
   log: {
-    send: (level: string, source: string, ...args: any[]) => Promise<void>
+    send: (level: string, source: string, ...args: unknown[]) => Promise<void>
     toggleWindow: () => Promise<void>
   }
 }

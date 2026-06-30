@@ -214,7 +214,8 @@ export interface Api {
     getChildren: (parentId: string) => Promise<JellyfinItemsResponse>
     search: (query: string, options?: { limit?: number }) => Promise<JellyfinSearchResponse>
     getItemDetails: (itemId: string) => Promise<ApiResponse<JellyfinItem>>
-    getPlaybackUrl: (itemId: string) => Promise<ApiResponse<{ url: string }>>
+    getPlaybackUrl: (itemId: string) => Promise<ApiResponse<{ url: string; subtitles: { index: number; label: string; language: string; codec: string; url: string }[] }>>
+    fetchSubtitle: (url: string) => Promise<ApiResponse<string>>
     reportProgress: (itemId: string, position: number, isPaused: boolean) => Promise<ApiResponse<void>>
     toggleFavorite: (itemId: string) => Promise<ApiResponse<void>>
     getEpisodes: (seriesId: string, seasonId?: string) => Promise<JellyfinItemsResponse>

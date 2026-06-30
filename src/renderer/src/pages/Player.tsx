@@ -5,6 +5,51 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Volume2, VolumeX, Volume1, Gauge, List, X, ChevronLeft, ChevronRight, TvMinimalPlay, ArrowLeft } from 'lucide-react'
 import { cachedFetch } from '../utils/apiCache'
 
+// ==================== 字幕类型 ====================
+
+interface SubtitleCue {
+  start: number
+  end: number
+  text: string
+}
+
+function parseVTT(vtt: string): SubtitleCue[] {
+  const cues: SubtitleCue[] = []
+  const lines = vtt.split(/\r?\n/)
+  // 跳过 WEBVTT 头部
+  let i = 0
+  while (i < lines.length && (lines[i].trim() === '' || lines[i].startsWith('WEBVTT') || lines[i].startsWith('Kind:') || lines[i].startsWith('Language:'))) {
+    i++
+  }
+  // 解析时间轴块
+  const timeRe = /^(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})/
+  function parseTime(s: string): number {
+    const parts = s.split(':')
+    const secParts = parts[2].split(/[.,]/)
+    return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(secParts[0]) + parseInt(secParts[1]) / 1000
+  }
+  while (i < lines.length) {
+    const line = lines[i].trim()
+    const m = line.match(timeRe)
+    if (m) {
+      const start = parseTime(m[1])
+      const end = parseTime(m[2])
+      i++
+      const textLines: string[] = []
+      while (i < lines.length && lines[i].trim() !== '') {
+        textLines.push(lines[i].trim())
+        i++
+      }
+      // 过滤掉 VTT 标签（如 <v ...>）
+      const text = textLines.join('\n').replace(/<[^>]+>/g, '').trim()
+      if (text) cues.push({ start, end, text })
+    } else {
+      i++
+    }
+  }
+  return cues
+}
+
 // ==================== 弹幕类型 ====================
 
 interface ActiveComment {
@@ -22,7 +67,6 @@ interface ActiveComment {
 // ==================== 弹幕引擎 ====================
 
 const DANMAKU_TRACK_COUNT = 12
-const DANMAKU_TRACK_HEIGHT = 32
 const DANMAKU_FIXED_DURATION = 4
 
 // 弹幕颜色缓存（避免重复转换）
@@ -46,6 +90,7 @@ class DanmakuEngine {
   private displayedIndex = 0  // 记录已经处理到哪一条弹幕（不删除）
   private active: ActiveComment[] = []
   private trackOccupied: number[] = new Array(DANMAKU_TRACK_COUNT).fill(0)
+  private trackHeight = 36
   private lastTime = 0
   private enabled = true
   private opacity = 1.0
@@ -56,6 +101,7 @@ class DanmakuEngine {
   private lastAddTime = 0
   private addedThisSecond = 0
   private lastVideoTime = 0 // 用于检测跳播
+  private timeOffset = 0 // 弹幕时间偏移（秒），正数=延后，负数=提前
 
   // 密度值 → 活跃轨道数（线性映射 50→3, 500→12）
   private activeTrackCount(): number {
@@ -83,7 +129,8 @@ class DanmakuEngine {
   }
 
   loadComments(comments: DanmakuComment[]): void {
-    const sorted = comments.sort((a, b) => a.time - b.time)
+    // 不突变传入的数组，复制后排序
+    const sorted = [...comments].sort((a, b) => a.time - b.time)
     // 保存所有原始弹幕
     this.allComments = sorted
     // 重置播放状态，确保新弹幕从头开始显示
@@ -105,6 +152,7 @@ class DanmakuEngine {
     this.lastAddTime = 0
     this.addedThisSecond = 0
     this.lastVideoTime = 0
+    this.timeOffset = 0
   }
 
   setOpacity(opacity: number): void {
@@ -113,7 +161,13 @@ class DanmakuEngine {
 
   setFontSize(size: number): void {
     this.fontSize = Math.max(12, Math.min(48, size))
+    this.trackHeight = Math.round(this.fontSize * 1.5)
     this.buildFont()
+    // 重算所有活跃弹幕的 Y 坐标，避免字号变大后重叠
+    for (const a of this.active) {
+      const track = Math.round(a.y / (this.trackHeight / 1.5)) // 用旧比例反推轨道号
+      a.y = track * this.trackHeight + this.trackHeight * 0.8
+    }
   }
 
   setSpeed(speed: number): void {
@@ -127,7 +181,7 @@ class DanmakuEngine {
     // 降低密度：移除超出新轨道范围的弹幕，即时视觉反馈
     if (newTracks < oldTracks) {
       this.active = this.active.filter(a => {
-        const track = Math.floor(a.y / DANMAKU_TRACK_HEIGHT)
+        const track = Math.floor(a.y / this.trackHeight)
         return track < newTracks
       })
     }
@@ -135,6 +189,14 @@ class DanmakuEngine {
 
   setTimeDensity(density: number): void {
     this.timeDensity = Math.max(5, Math.min(50, density))
+  }
+
+  setTimeOffset(offset: number): void {
+    this.timeOffset = Math.max(-30, Math.min(30, offset))
+  }
+
+  getTimeOffset(): number {
+    return this.timeOffset
   }
 
   private getTrackForScroll(): number {
@@ -178,7 +240,7 @@ class DanmakuEngine {
 
     if (c.mode === 1) {
       const track = this.getTrackForScroll()
-      const y = track * DANMAKU_TRACK_HEIGHT + DANMAKU_TRACK_HEIGHT * 0.8
+      const y = track * this.trackHeight + this.trackHeight * 0.8
       // 在前一条弹幕后紧跟，间距 = 字号，绝不重叠
       const startX = Math.max(this.canvas.width + 10, this.trackOccupied[track] + this.fontSize)
       this.trackOccupied[track] = startX + textWidth
@@ -202,7 +264,7 @@ class DanmakuEngine {
           bestTrack = i
         }
       }
-      const y = bestTrack * DANMAKU_TRACK_HEIGHT + DANMAKU_TRACK_HEIGHT * 0.8
+      const y = bestTrack * this.trackHeight + this.trackHeight * 0.8
       this.trackOccupied[bestTrack] = textWidth
       this.active.push({
         text: c.text, x: (this.canvas.width - textWidth) / 2, y,
@@ -216,26 +278,28 @@ class DanmakuEngine {
   update(videoTime: number): void {
     if (this.allComments.length === 0 || !this.enabled) return
 
+    const effectiveTime = videoTime - this.timeOffset
     const delta = videoTime - this.lastVideoTime
 
     // 检测跳播（时间跳跃超过 1 秒视为 seek 操作）
     if (Math.abs(delta) > 1) {
       this.active = []
-      this.trackOccupied = new Array(DANMAKU_TRACK_COUNT).fill(0)
+      // 复用已有数组，避免频繁 GC
+      for (let i = 0; i < this.trackOccupied.length; i++) this.trackOccupied[i] = 0
       this.lastAddTime = videoTime
       this.addedThisSecond = 0
 
       if (delta > 0) {
         // 前进跳播：快速跳过已错过的弹幕（预留 2 秒缓冲，显示即将出现的弹幕）
         while (this.displayedIndex < this.allComments.length &&
-               this.allComments[this.displayedIndex].time < videoTime - 2) {
+               this.allComments[this.displayedIndex].time < effectiveTime - 2) {
           this.displayedIndex++
         }
       } else {
         // 后退跳播：从头定位到当前时间附近的弹幕
         this.displayedIndex = 0
         while (this.displayedIndex < this.allComments.length &&
-               this.allComments[this.displayedIndex].time < videoTime - 2) {
+               this.allComments[this.displayedIndex].time < effectiveTime - 2) {
           this.displayedIndex++
         }
       }
@@ -246,7 +310,7 @@ class DanmakuEngine {
     // 从 allComments 中取出应该显示的弹幕（连续流动，不丢弃被阻塞的弹幕）
     let addedThisFrame = 0
     while (this.displayedIndex < this.allComments.length &&
-           this.allComments[this.displayedIndex].time <= videoTime &&
+           this.allComments[this.displayedIndex].time <= effectiveTime &&
            addedThisFrame < 3) {
       const c = this.allComments[this.displayedIndex]
       if (this.addComment(c, videoTime)) {
@@ -275,7 +339,7 @@ class DanmakuEngine {
       if (a.mode === 1) {
         a.x -= a.speed * dt
         if (a.x <= -a.width - 20) continue
-        const tk = Math.floor(a.y / DANMAKU_TRACK_HEIGHT)
+        const tk = Math.floor(a.y / this.trackHeight)
         if (tk >= 0 && tk < DANMAKU_TRACK_COUNT) {
           const r = a.x + a.width
           if (r > occ[tk]) occ[tk] = r
@@ -290,20 +354,25 @@ class DanmakuEngine {
   }
 
   draw(): void {
+    if (!this.enabled) {
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
+      return
+    }
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
-    if (!this.enabled) return
-    this.ctx.globalAlpha = this.opacity
     this.ctx.font = this.fontString
     this.ctx.textBaseline = 'middle'
-    this.ctx.strokeStyle = 'rgba(0,0,0,0.6)'
-    this.ctx.lineWidth = 3
-
+    
+    // 透明度为 1 时跳过 globalAlpha 设置，减少 Canvas 状态变更
+    if (this.opacity < 1) this.ctx.globalAlpha = this.opacity
+    
     for (const a of this.active) {
+      this.ctx.strokeStyle = 'rgba(0,0,0,0.6)'
+      this.ctx.lineWidth = 3
       this.ctx.strokeText(a.text, a.x, a.y)
       this.ctx.fillStyle = a.color
       this.ctx.fillText(a.text, a.x, a.y)
     }
-    this.ctx.globalAlpha = 1.0
+    if (this.opacity < 1) this.ctx.globalAlpha = 1.0
   }
 
   enable(): void { this.enabled = true; this.lastTime = 0 }
@@ -316,8 +385,10 @@ class DanmakuEngine {
 // ==================== 工具 ====================
 
 function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60)
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
   const s = Math.floor(seconds % 60)
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
@@ -453,6 +524,9 @@ function Player(): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const subtitleCuesRef = useRef<SubtitleCue[][]>([])
+  const activeSubIdxRef = useRef(-1)
+  const currentSubTextRef = useRef('')
   const engineRef = useRef<DanmakuEngine | null>(null)
   const resumePosRef = useRef(parseFloat(searchParams.get('position') || '0'))
   const hasResumedRef = useRef(false)
@@ -482,6 +556,8 @@ function Player(): JSX.Element {
   const [danmakuFontSize, setDanmakuFontSize] = useState(24)
   const [danmakuSpeed, setDanmakuSpeed] = useState(120)
   const [danmakuMaxCount, setDanmakuMaxCount] = useState(300)
+  const [danmakuOffset, setDanmakuOffset] = useState(0) // 弹幕时间偏移（秒），正数=延后，负数=提前
+  const danmakuOffsetRef = useRef(0)
   // const [danmakuSmartMode, setDanmakuSmartMode] = useState(false) // removed
   // const [danmakuTimeDensity, setDanmakuTimeDensity] = useState(20) // removed // 每秒最多显示条数
 
@@ -490,6 +566,15 @@ function Player(): JSX.Element {
   const [speedToast, setSpeedToast] = useState('')
   const [volumePopup, setVolumePopup] = useState(false)
   const [speedPopup, setSpeedPopup] = useState(false)
+  const [subtitlePopup, setSubtitlePopup] = useState(false)
+  const [subtitleTracks, setSubtitleTracks] = useState<{ index: number; label: string; language: string; url: string }[]>([])
+  const [activeSubtitleIndex, setActiveSubtitleIndex] = useState(-1)
+  const [subtitleCues, setSubtitleCues] = useState<SubtitleCue[]>([])
+  const [currentSubtitleText, setCurrentSubtitleText] = useState('')
+  const [subtitleBottom, setSubtitleBottom] = useState(8) // 字幕距底部百分比
+  const [subtitleFontSize, setSubtitleFontSize] = useState(22) // 字幕字体大小 px
+  const [subtitleLetterSpacing, setSubtitleLetterSpacing] = useState(0) // 字间距 px
+  const [subtitleSettingsOpen, setSubtitleSettingsOpen] = useState(false)
 
   // P2: 窗口置顶
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
@@ -497,19 +582,28 @@ function Player(): JSX.Element {
   // P2: 画中画 (PiP)
   const [pipActive, setPipActive] = useState(false)
 
+  // 关闭所有弹出面板
+  const closeAllPopups = useCallback(() => {
+    setVolumePopup(false)
+    setSpeedPopup(false)
+    setSubtitlePopup(false)
+    setSubtitleSettingsOpen(false)
+    setSettingsOpen(false)
+    setSearchOpen(false)
+  }, [])
+
   // 点击其它地方关闭弹出面板
   useEffect(() => {
-    if (!volumePopup && !speedPopup) return
+    if (!volumePopup && !speedPopup && !subtitlePopup && !subtitleSettingsOpen && !settingsOpen && !searchOpen) return
     const handleClick = (e: MouseEvent): void => {
       const target = e.target as HTMLElement
-      if (!target.closest('.volume-popup') && !target.closest('.speed-popup')) {
-        setVolumePopup(false)
-        setSpeedPopup(false)
+      if (!target.closest('.volume-popup') && !target.closest('.speed-popup') && !target.closest('.subtitle-popup') && !target.closest('.subtitle-settings-popup') && !target.closest('.danmaku-settings-popup') && !target.closest('.danmaku-search-popup')) {
+        closeAllPopups()
       }
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
-  }, [volumePopup, speedPopup])
+  }, [volumePopup, speedPopup, subtitlePopup, subtitleSettingsOpen, settingsOpen, searchOpen, closeAllPopups])
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; visible: boolean }>({ x: 0, y: 0, visible: false })
   const [infoOverlay, setInfoOverlay] = useState(false)
@@ -543,11 +637,12 @@ function Player(): JSX.Element {
 
   useEffect(() => {
     if (duration <= 0 || currentTime < 5) return
-    const interval = setInterval(savePlayHistory, 5000)
-    return () => clearInterval(interval)
+    const interval = setInterval(savePlayHistory, 30000)
+    return () => {
+      clearInterval(interval)
+      savePlayHistory()
+    }
   }, [savePlayHistory])
-
-  useEffect(() => { return () => { savePlayHistory() } }, [savePlayHistory])
 
   useEffect(() => { containerRef.current?.focus() }, [])
 
@@ -579,6 +674,15 @@ function Player(): JSX.Element {
         if (speed !== null) { setDanmakuSpeed(Number(speed)); engineRef.current?.setSpeed(Number(speed)) }
         const maxCount = await window.api.store.get('danmakuMaxCount')
         if (maxCount !== null) { setDanmakuMaxCount(Number(maxCount)); engineRef.current?.setMaxCount(Number(maxCount)) }
+        const offset = await window.api.store.get('danmakuOffset')
+        if (offset !== null) { const v = Number(offset); setDanmakuOffset(v); danmakuOffsetRef.current = v; engineRef.current?.setTimeOffset(v) }
+        // 字幕设置持久化
+        const savedSubBottom = await window.api.store.get('subtitleBottom')
+        if (savedSubBottom !== null) setSubtitleBottom(Number(savedSubBottom))
+        const savedSubFontSize = await window.api.store.get('subtitleFontSize')
+        if (savedSubFontSize !== null) setSubtitleFontSize(Number(savedSubFontSize))
+        const savedSubLetterSpacing = await window.api.store.get('subtitleLetterSpacing')
+        if (savedSubLetterSpacing !== null) setSubtitleLetterSpacing(Number(savedSubLetterSpacing))
       } catch (err) { /* ignore */ }
     }
     loadSettings()
@@ -654,9 +758,17 @@ function Player(): JSX.Element {
     }
   }
 
+  // 弹幕时间偏移控制
+  const handleOffsetChange = (value: number): void => {
+    setDanmakuOffset(value)
+    danmakuOffsetRef.current = value
+    engineRef.current?.setTimeOffset(value)
+    window.api.store.set('danmakuOffset', value)
+  }
+
   const handleDanmakuSearch = async (keyword?: string): Promise<void> => {
-    const kw = (keyword || searchKeyword).trim()
-    if (!kw) return; setSearchLoading(true)
+    const kw = (typeof keyword === 'string' ? keyword : searchKeyword).trim()
+    if (!kw) return; setSearchLoading(true); setSearchResults([])
     try {
       const result = await window.api.danmaku.search(kw)
       if (result.success && result.data) {
@@ -675,12 +787,13 @@ function Player(): JSX.Element {
   const handleOpenDanmakuSearch = (): void => {
     const searchTitle = seriesName || (localFile ? extractSeriesNameFromFilename(localFile.split(/[/\\]/).pop() || itemName) || itemName : itemName)
     setSearchKeyword(searchTitle)
+    closeAllPopups()
     setSearchOpen(true)
     handleDanmakuSearch(searchTitle)
   }
 
   const handleDanmakuSelect = async (ep: DanmakuSearchResult): Promise<void> => {
-    setSearchOpen(false); setSearchResults([]); setDanmakuLoading(true); setDanmakuError('')
+    closeAllPopups(); setSearchResults([]); setDanmakuLoading(true); setDanmakuError('')
     try {
       const result = await window.api.danmaku.getComments(String(ep.episodeId))
       if (result.success && result.data) {
@@ -693,7 +806,7 @@ function Player(): JSX.Element {
 
   const handleLoadLocalXml = async (): Promise<void> => {
     if (!localFile) { showStatus('仅本地文件支持加载 XML 弹幕'); return }
-    setSearchOpen(false); setDanmakuLoading(true); setDanmakuError('')
+    closeAllPopups(); setDanmakuLoading(true); setDanmakuError('')
     try {
       const result = await window.api.danmaku.findLocalXml(localFile)
       if (result.success && result.data) {
@@ -726,8 +839,48 @@ function Player(): JSX.Element {
     if (!itemId) { setLoading(false); return }
     window.api.jellyfin.getPlaybackUrl(itemId).then((result) => {
       if (result.success) {
-        const data = result.data as { url?: string }
-        if (data?.url && videoRef.current) { videoRef.current.src = data.url; setSrcReady(true); return }
+        const data = result.data as { url?: string; subtitles?: { index: number; label: string; language: string; codec: string; url: string }[] }
+        if (data?.url && videoRef.current) {
+          const video = videoRef.current
+          // 清除旧字幕轨道（不再使用 track 元素，改用自定义渲染）
+          const oldTracks = video.querySelectorAll('track')
+          oldTracks.forEach(t => t.remove())
+          const subs = data.subtitles || []
+          setSubtitleTracks(subs)
+          // 确定默认字幕
+          let defaultIdx = -1
+          for (let i = 0; i < subs.length; i++) {
+            const sub = subs[i]
+            const isDefault = subs.length === 1 || sub.language === 'chi' || sub.language === 'zho' || sub.language === 'chs' || sub.language === 'cht'
+            if (isDefault && defaultIdx === -1) defaultIdx = i
+          }
+          // 加载视频（不等待字幕）
+          video.src = data.url
+          video.load()
+          setSrcReady(true)
+          // 后台异步获取字幕内容，解析 VTT 存入 state
+          if (subs.length > 0) {
+            subs.forEach((sub, i) => {
+              window.api.jellyfin.fetchSubtitle(sub.url).then((result) => {
+                if (result.success && result.data) {
+                  const cues = parseVTT(result.data)
+                  if (i === defaultIdx) {
+                    setSubtitleCues(cues)
+                    setActiveSubtitleIndex(i)
+                    activeSubIdxRef.current = i
+                  }
+                  // 存储 cues 到 ref 以便切换时使用
+                  subtitleCuesRef.current[i] = cues
+                } else {
+                  console.warn(`字幕加载失败: ${sub.label}`, result.error)
+                }
+              }).catch((err) => {
+                console.warn(`字幕加载异常: ${sub.label}`, err)
+              })
+            })
+          }
+          return
+        }
       }
       setError('获取播放地址失败'); setLoading(false)
     }).catch((err) => { setError(`获取播放地址失败: ${String(err)}`); setLoading(false) })
@@ -746,10 +899,27 @@ function Player(): JSX.Element {
     const onEnded = (): void => setPlaying(false)
     const onTimeUpdate = (): void => {
       const ct = video.currentTime
+      // 使用 ref 而非 state 做比较，避免闭包陈旧
+      if (Math.abs(ct - currentTimeRef.current) > 0.5) setCurrentTime(ct)
       currentTimeRef.current = ct
-      // 每 250ms 更新一次 React state，减少重渲染
-      if (Math.abs(ct - currentTime) > 0.5) setCurrentTime(ct)
       if (video.buffered.length > 0) setBuffered(video.buffered.end(video.buffered.length - 1))
+      // 自定义字幕：查找当前时间对应的 cue
+      const cues = subtitleCuesRef.current[activeSubIdxRef.current]
+      if (cues && cues.length > 0) {
+        // 二分查找当前字幕
+        let lo = 0, hi = cues.length - 1, found = -1
+        while (lo <= hi) {
+          const mid = (lo + hi) >>> 1
+          if (ct >= cues[mid].start && ct < cues[mid].end) { found = mid; break }
+          if (ct < cues[mid].start) hi = mid - 1
+          else lo = mid + 1
+        }
+        const newText = found >= 0 ? cues[found].text : ''
+        if (newText !== currentSubTextRef.current) {
+          currentSubTextRef.current = newText
+          setCurrentSubtitleText(newText)
+        }
+      }
     }
     const onWaiting = (): void => setLoading(true)
     const onCanPlay = (): void => setLoading(false)
@@ -809,6 +979,24 @@ function Player(): JSX.Element {
     const rect = e.currentTarget.getBoundingClientRect()
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
     video.currentTime = ratio * duration
+  }
+
+  // 字幕轨道选择（自定义渲染，不使用 textTracks）
+  const handleSubtitleSelect = (index: number): void => {
+    if (index >= 0 && index < subtitleCuesRef.current.length) {
+      setSubtitleCues(subtitleCuesRef.current[index])
+      setActiveSubtitleIndex(index)
+      activeSubIdxRef.current = index
+      currentSubTextRef.current = ''
+      setCurrentSubtitleText('')
+    } else {
+      setSubtitleCues([])
+      setActiveSubtitleIndex(-1)
+      activeSubIdxRef.current = -1
+      currentSubTextRef.current = ''
+      setCurrentSubtitleText('')
+    }
+    setSubtitlePopup(false)
   }
 
   const handleFullscreen = (): void => {
@@ -908,10 +1096,13 @@ function Player(): JSX.Element {
   // ==================== 键盘 ====================
 
   // 切换剧集
+  const [videoLoadKey, setVideoLoadKey] = useState(0)
+  
   const handleSwitchEpisode = (newIndex: number): void => {
     console.log('[EpisodeSwitch] handleSwitchEpisode called with newIndex=%d, episodeList.length=%d, currentEpisodeIndex=%d', newIndex, episodeList.length, currentEpisodeIndex)
     
-    if (newIndex < 0 || newIndex >= episodeList.length) {
+    const totalEpisodes = Math.max(episodeList.length, folderVideos.length)
+    if (newIndex < 0 || newIndex >= totalEpisodes) {
       console.log('[EpisodeSwitch] Index out of range, returning')
       return
     }
@@ -934,6 +1125,9 @@ function Player(): JSX.Element {
     
     // 跳转到新集
     navigate({ search: newParams.toString() }, { replace: true })
+    
+    // 递增 videoLoadKey 触发 useEffect 重新加载视频（navigate replace 不会卸载组件）
+    setVideoLoadKey(prev => prev + 1)
     
     // 重置状态
     setCurrentEpisodeIndex(newIndex)
@@ -1025,8 +1219,11 @@ function Player(): JSX.Element {
       case 'ArrowDown': e.preventDefault(); video.volume = Math.max(0, video.volume - 0.1); setVolume(Math.round(video.volume * 100)); break
       case 'f': case 'F': e.preventDefault(); handleFullscreen(); break
       case 's': case 'S': e.preventDefault(); handleScreenshot(); break
-      case 'p': case 'P': e.preventDefault(); { const result = await window.api.window.alwaysOnTop(); if (result.success) { setAlwaysOnTop(!!result.data); showStatus(result.data ? '窗口置顶' : '取消置顶') } }; break
+      case 'p': case 'P': e.preventDefault(); window.api.window.alwaysOnTop().then(result => { if (result.success) { setAlwaysOnTop(!!result.data); showStatus(result.data ? '窗口置顶' : '取消置顶') } }).catch(() => {}); break
       case 'd': case 'D': e.preventDefault(); handlePictureInPicture(); break
+      case '[': e.preventDefault(); { const v = Math.max(-30, danmakuOffsetRef.current - 0.5); handleOffsetChange(v); showStatus(`弹幕偏移 ${v.toFixed(1)}s`); } break
+      case ']': e.preventDefault(); { const v = Math.min(30, danmakuOffsetRef.current + 0.5); handleOffsetChange(v); showStatus(`弹幕偏移 ${v.toFixed(1)}s`); } break
+      case 'v': case 'V': e.preventDefault(); { if (subtitleTracks.length > 0) { const nextIdx = activeSubtitleIndex + 1 >= subtitleTracks.length ? -1 : activeSubtitleIndex + 1; handleSubtitleSelect(nextIdx); showStatus(nextIdx === -1 ? '字幕关闭' : `字幕: ${subtitleTracks[nextIdx].label}`); } } break
       case 'Escape': e.preventDefault(); if (infoOverlay) handleCloseInfo(); else if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); break
     }
   }
@@ -1055,7 +1252,7 @@ function Player(): JSX.Element {
       {/* 视频区域 */}
       <div className="flex-1 relative bg-black overflow-hidden" onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
         {/* 顶部信息栏 */}
-        <div className={`absolute top-0 left-0 right-0 z-30 transition-all duration-500 ${controlsVisible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2 pointer-events-none'}`}>
+        <div className={`absolute top-0 left-0 right-0 z-30 transition-opacity duration-300 ease-in-out ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
           <div className="player-glass-bar bg-gradient-to-b from-black/60 to-black/30 px-4 py-3 flex items-center gap-3 border-none">
             <button
               onClick={() => navigate(-1)}
@@ -1079,6 +1276,23 @@ function Player(): JSX.Element {
 
         <video ref={videoRef} className="absolute inset-0 w-full h-full object-contain" controls={false} playsInline preload="metadata" crossOrigin="anonymous" />
         <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-10" />
+
+        {/* 自定义字幕渲染（位置/大小/字间距可调） */}
+        {currentSubtitleText && activeSubtitleIndex >= 0 && (
+          <div className="absolute left-0 right-0 z-20 flex justify-center pointer-events-none" style={{ bottom: `${subtitleBottom}%` }}>
+            <div className="px-4 py-1.5 rounded" style={{
+              textShadow: '0 1px 3px rgba(0,0,0,0.8), 0 0 8px rgba(0,0,0,0.6)',
+              fontSize: `${subtitleFontSize}px`,
+              letterSpacing: `${subtitleLetterSpacing}px`,
+              color: '#fff',
+              textAlign: 'center',
+              lineHeight: 1.5,
+              whiteSpace: 'pre-line'
+            }}>
+              {currentSubtitleText}
+            </div>
+          </div>
+        )}
 
         {/* 弹幕状态 */}
         {danmakuLoading && (
@@ -1119,12 +1333,21 @@ function Player(): JSX.Element {
 
       {/* 弹幕搜索面板 */}
       {searchOpen && (
-        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="w-72 player-glass-panel z-50 p-4">
+        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="danmaku-search-popup w-72 player-glass-panel z-50 p-4">
           <div className="flex gap-2 mb-3">
             <input type="text" value={searchKeyword} onChange={(e) => setSearchKeyword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleDanmakuSearch() }} placeholder="搜索弹幕" className="flex-1 bg-white/5 border border-white/5 rounded-md px-3 py-2 text-xs text-white/90 placeholder-white/25 focus:outline-none focus:border-[#8b82f6]/40 focus:bg-white/8" autoFocus />
-            <button onClick={handleDanmakuSearch} disabled={searchLoading} className="px-3 py-2 bg-[#8b82f6] hover:bg-[#7a72e5] rounded-md text-xs font-medium text-white disabled:opacity-40 transition-colors">{searchLoading ? '...' : '搜索'}</button>
+            <button onClick={() => handleDanmakuSearch()} disabled={searchLoading} className="px-3 py-2 bg-[#8b82f6] hover:bg-[#7a72e5] rounded-md text-xs font-medium text-white disabled:opacity-40 transition-colors">{searchLoading ? '...' : '搜索'}</button>
           </div>
-          {searchResults.length > 0 && (
+          {searchLoading && (
+            <div className="flex items-center justify-center py-6">
+              <svg className="animate-spin h-5 w-5 text-[#8b82f6]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <span className="ml-2 text-xs text-white/40">搜索中...</span>
+            </div>
+          )}
+          {!searchLoading && searchResults.length > 0 && (
             <div className="max-h-60 overflow-y-auto space-y-0.5">
               {searchResults.map((ep, i) => (
                 <button key={`${ep.episodeId}-${i}`} onClick={() => handleDanmakuSelect(ep)} className="w-full text-left px-3 py-2 rounded hover:bg-white/5 transition-colors">
@@ -1134,19 +1357,22 @@ function Player(): JSX.Element {
               ))}
             </div>
           )}
+          {!searchLoading && searchResults.length === 0 && searchKeyword.trim() && (
+            <div className="text-center py-4 text-xs text-white/25">无搜索结果</div>
+          )}
           {localFile && (
             <button onClick={handleLoadLocalXml} className="mt-2 w-full text-[10px] text-white/30 hover:text-[#8b82f6] py-2 border-t border-white/5 transition-colors">加载本地 XML 弹幕</button>
           )}
-          <button onClick={() => { setSearchOpen(false); setSearchResults([]) }} className="mt-2 w-full text-[10px] text-white/25 hover:text-white/70 py-1 transition-colors">关闭</button>
+          <button onClick={() => { closeAllPopups(); setSearchResults([]) }} className="mt-2 w-full text-[10px] text-white/25 hover:text-white/70 py-1 transition-colors">关闭</button>
         </div>
       )}
 
       {/* 弹幕设置面板 */}
       {settingsOpen && (
-        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="w-60 player-glass-panel z-50 p-5">
+        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="danmaku-settings-popup w-60 player-glass-panel z-50 p-5">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-xs font-medium">弹幕设置</h3>
-            <button onClick={() => setSettingsOpen(false)} className="text-white/30 hover:text-white/80 transition-colors text-sm">&times;</button>
+            <button onClick={closeAllPopups} className="text-white/30 hover:text-white/80 transition-colors text-sm">&times;</button>
           </div>
           <div className="space-y-4">
             <div>
@@ -1180,6 +1406,66 @@ function Player(): JSX.Element {
                 <span>密集 (500)</span>
               </div>
             </div>
+            <div>
+              <div className="flex justify-between text-[10px] text-white/35 mb-1.5">
+                <span>时间偏移</span>
+                <span className={danmakuOffset !== 0 ? 'text-[#8b82f6]' : ''}>{danmakuOffset > 0 ? `+${danmakuOffset.toFixed(1)}` : danmakuOffset.toFixed(1)}s</span>
+              </div>
+              <input
+                type="range"
+                min="-30"
+                max="30"
+                step="0.5"
+                value={danmakuOffset}
+                onChange={(e) => handleOffsetChange(parseFloat(e.target.value))}
+                className="w-full"
+              />
+              <div className="flex justify-between text-[9px] text-white/25 mt-1">
+                <span>提前 (-30s)</span>
+                <span>延后 (+30s)</span>
+              </div>
+              {danmakuOffset !== 0 && (
+                <button
+                  onClick={() => handleOffsetChange(0)}
+                  className="mt-2 w-full text-[10px] text-[#8b82f6] hover:text-[#a29bfe] py-1 transition-colors"
+                >
+                  重置偏移
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 字幕设置面板 */}
+      {subtitleSettingsOpen && (
+        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="subtitle-settings-popup w-60 player-glass-panel z-50 p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-xs font-medium">字幕设置</h3>
+            <button onClick={closeAllPopups} className="text-white/30 hover:text-white/80 transition-colors text-sm">&times;</button>
+          </div>
+          <div className="space-y-4">
+            <div>
+              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>上下位置</span><span>{subtitleBottom}%</span></div>
+              <input type="range" min="0" max="30" step="1" value={subtitleBottom} onChange={(e) => { const v = parseInt(e.target.value); setSubtitleBottom(v); window.api.store.set('subtitleBottom', v) }} className="w-full" />
+              <div className="flex justify-between text-[9px] text-white/25 mt-1"><span>靠上</span><span>靠下</span></div>
+            </div>
+            <div>
+              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>字体大小</span><span>{subtitleFontSize}px</span></div>
+              <input type="range" min="12" max="48" step="1" value={subtitleFontSize} onChange={(e) => { const v = parseInt(e.target.value); setSubtitleFontSize(v); window.api.store.set('subtitleFontSize', v) }} className="w-full" />
+              <div className="flex justify-between text-[9px] text-white/25 mt-1"><span>小</span><span>大</span></div>
+            </div>
+            <div>
+              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>字间距</span><span>{subtitleLetterSpacing}px</span></div>
+              <input type="range" min="0" max="12" step="0.5" value={subtitleLetterSpacing} onChange={(e) => { const v = parseFloat(e.target.value); setSubtitleLetterSpacing(v); window.api.store.set('subtitleLetterSpacing', v) }} className="w-full" />
+              <div className="flex justify-between text-[9px] text-white/25 mt-1"><span>紧凑</span><span>宽松</span></div>
+            </div>
+            <button
+              onClick={() => { setSubtitleBottom(8); setSubtitleFontSize(22); setSubtitleLetterSpacing(0); window.api.store.set('subtitleBottom', 8); window.api.store.set('subtitleFontSize', 22); window.api.store.set('subtitleLetterSpacing', 0) }}
+              className="w-full text-[10px] text-[#8b82f6] hover:text-[#a29bfe] py-1 transition-colors"
+            >
+              恢复默认
+            </button>
           </div>
         </div>
       )}
@@ -1251,8 +1537,8 @@ function Player(): JSX.Element {
           </div>
         </div>
       )}
-      {/* 控制栏 — 64px 纯黑 95% 不透明 */}
-      <div className={`player-glass-bar h-16 flex items-center px-5 gap-6 shrink-0 relative z-20 transition-all duration-500 ${controlsVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3 pointer-events-none'}`} onMouseMove={handleMouseMove}>
+      {/* 控制栏 — 固定高度，用 opacity + pointer-events 隐藏，避免 flex 布局抖动 */}
+      <div className={`player-glass-bar h-16 flex items-center px-5 gap-6 shrink-0 relative z-20 transition-opacity duration-300 ease-in-out ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onMouseMove={handleMouseMove}>
         {/* 播放/暂停 */}
         <button onClick={handlePlayPause} className="glass-btn-sm text-white/80 hover:text-white" title={playing ? '暂停' : '播放'}>
           {playing ? (
@@ -1313,7 +1599,7 @@ function Player(): JSX.Element {
         {/* 倍速 */}
         <div className="speed-popup">
           <button
-            onClick={() => { setSpeedPopup(!speedPopup); setVolumePopup(false) }}
+            onClick={() => { if (speedPopup) { setSpeedPopup(false) } else { closeAllPopups(); setSpeedPopup(true) } }}
             className={`glass-btn-sm text-xs font-medium ${playbackRate !== 1 ? 'text-[#8b82f6]' : 'text-white/60 hover:text-white/80'}`}
             title="播放速度"
           >
@@ -1324,13 +1610,33 @@ function Player(): JSX.Element {
         {/* 音量 */}
         <div className="volume-popup">
           <button
-            onClick={() => { setVolumePopup(!volumePopup); setSpeedPopup(false) }}
+            onClick={() => { if (volumePopup) { setVolumePopup(false) } else { closeAllPopups(); setVolumePopup(true) } }}
             className="glass-btn-icon text-white/50 hover:text-white/80"
             title="音量"
           >
             {volume === 0 ? <VolumeX size={17} /> : volume < 50 ? <Volume1 size={17} /> : <Volume2 size={17} />}
           </button>
         </div>
+
+        {/* 字幕选择按钮 */}
+        {subtitleTracks.length > 0 && (
+          <button
+            onClick={() => { if (subtitlePopup) { setSubtitlePopup(false) } else { closeAllPopups(); setSubtitlePopup(true) } }}
+            className={`glass-btn-icon ${activeSubtitleIndex >= 0 ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/80'}`}
+            title="字幕轨道"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 15h2M11 15h6M7 11h10"/></svg>
+          </button>
+        )}
+        {activeSubtitleIndex >= 0 && (
+          <button
+            onClick={() => { if (subtitleSettingsOpen) { setSubtitleSettingsOpen(false) } else { closeAllPopups(); setSubtitleSettingsOpen(true) } }}
+            className={`glass-btn-icon ${subtitleSettingsOpen ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/80'}`}
+            title="字幕设置"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>
+          </button>
+        )}
 
         {/* 弹幕按钮 */}
         <button onClick={handleDanmakuToggle} className={`glass-btn-sm text-xs ${danmakuEnabled ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/70'}`} title="弹幕">
@@ -1339,7 +1645,12 @@ function Player(): JSX.Element {
         <button onClick={handleOpenDanmakuSearch} className="glass-btn-icon text-white/50 hover:text-white/80" title="搜索弹幕">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         </button>
-        <button onClick={() => setSettingsOpen((v) => !v)} className="glass-btn-icon text-white/50 hover:text-white/80" title="弹幕设置">
+        {danmakuOffset !== 0 && (
+          <button onClick={() => handleOffsetChange(0)} className="glass-btn-sm text-[10px] text-[#8b82f6] hover:text-[#a29bfe]" title={`弹幕偏移 ${danmakuOffset > 0 ? '+' : ''}${danmakuOffset.toFixed(1)}s，点击重置`}>
+            {danmakuOffset > 0 ? '+' : ''}{danmakuOffset.toFixed(1)}s
+          </button>
+        )}
+        <button onClick={() => { if (settingsOpen) { setSettingsOpen(false) } else { closeAllPopups(); setSettingsOpen(true) } }} className="glass-btn-icon text-white/50 hover:text-white/80" title="弹幕设置">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
         </button>
 
@@ -1478,6 +1789,37 @@ function Player(): JSX.Element {
                 {volume === 0 ? '取消静音' : '静音'}
               </button>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 字幕弹窗 */}
+      <AnimatePresence>
+        {subtitlePopup && (
+          <motion.div
+            className="fixed bottom-20 right-4 subtitle-popup player-glass-panel rounded-lg py-1 min-w-[160px] z-50"
+            initial={{ opacity: 0, y: 8, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.95 }}
+            transition={{ duration: 0.15 }}
+          >
+            <button
+              onClick={() => handleSubtitleSelect(-1)}
+              className={`w-full text-left px-4 py-2 text-xs hover:bg-white/5 flex items-center gap-2 ${activeSubtitleIndex === -1 ? 'text-[#8b82f6]' : 'text-white/70'}`}
+            >
+              <span className="w-3 text-center">{activeSubtitleIndex === -1 ? '✓' : ''}</span>
+              关闭字幕
+            </button>
+            {subtitleTracks.map((track, i) => (
+              <button
+                key={i}
+                onClick={() => handleSubtitleSelect(i)}
+                className={`w-full text-left px-4 py-2 text-xs hover:bg-white/5 flex items-center gap-2 ${activeSubtitleIndex === i ? 'text-[#8b82f6]' : 'text-white/70'}`}
+              >
+                <span className="w-3 text-center">{activeSubtitleIndex === i ? '✓' : ''}</span>
+                {track.label}
+              </button>
+            ))}
           </motion.div>
         )}
       </AnimatePresence>

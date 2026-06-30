@@ -95,7 +95,7 @@ function Detail(): ReactElement {
   const [localPosters, setLocalPosters] = useState<Record<string, string>>({})
 
   useEffect(() => {
-    window.api.store.get('poster-map').then((data: any) => {
+    window.api.store.get('poster-map').then((data: Record<string, string> | null) => {
       if (data && typeof data === 'object') setLocalPosters(data as Record<string, string>)
     })
   }, [])
@@ -108,7 +108,7 @@ function Detail(): ReactElement {
     let cancelled = false
 
     // 先读取服务器地址（优先旧 key，其次多服务器配置）
-    window.api.store.get('jellyfin').then(async (saved: any) => {
+    window.api.store.get('jellyfin').then(async (saved: { url?: string; token?: string } | null) => {
       if (cancelled) return
       if (saved?.url) setBaseUrl(saved.url.replace(/\/+$/, ''))
       if (saved?.token) {

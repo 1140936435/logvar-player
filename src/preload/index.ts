@@ -28,7 +28,7 @@ const api: Api = {
     isAvailable: () => ipcRenderer.invoke('mpv:is-available'),
     embed: (x: number, y: number, width: number, height: number) => ipcRenderer.invoke('mpv:embed', x, y, width, height),
     updateEmbed: (x: number, y: number, width: number, height: number) => ipcRenderer.invoke('mpv:update-embed', x, y, width, height),
-    onEvent: (callback: (event: string, data: any) => void) => {
+    onEvent: (callback: (event: string, data: unknown) => void) => {
       ipcRenderer.on('mpv:event', (_event, msg) => callback(msg.event, msg.data))
     },
     offEvent: (): void => {
@@ -38,7 +38,7 @@ const api: Api = {
 
   // 播放历史
   history: {
-    save: (item: any) => ipcRenderer.invoke('history:save', item),
+    save: (item: Record<string, unknown>) => ipcRenderer.invoke('history:save', item),
     list: () => ipcRenderer.invoke('history:list'),
     delete: (itemId: string) => ipcRenderer.invoke('history:delete', itemId),
     clear: () => ipcRenderer.invoke('history:clear')
@@ -55,6 +55,7 @@ const api: Api = {
     search: (query: string) => ipcRenderer.invoke('jellyfin:search', query),
     getItemDetails: (itemId: string) => ipcRenderer.invoke('jellyfin:get-item-details', itemId),
     getPlaybackUrl: (itemId: string) => ipcRenderer.invoke('jellyfin:get-playback-url', itemId),
+    fetchSubtitle: (url: string) => ipcRenderer.invoke('jellyfin:fetch-subtitle', url),
     reportProgress: (itemId: string, position: number, isPaused: boolean) =>
       ipcRenderer.invoke('jellyfin:report-progress', itemId, position, isPaused),
     toggleFavorite: (itemId: string) => ipcRenderer.invoke('jellyfin:toggle-favorite', itemId),
@@ -83,7 +84,7 @@ const api: Api = {
     search: (keyword: string) => ipcRenderer.invoke('danmaku:search', keyword),
     getComments: (commentId: string, source?: string) =>
       ipcRenderer.invoke('danmaku:get-comments', commentId, source),
-    getSegmentComments: (params: any) => ipcRenderer.invoke('danmaku:get-segment-comments', params),
+    getSegmentComments: (params: Record<string, unknown>) => ipcRenderer.invoke('danmaku:get-segment-comments', params),
     prefetchSeries: (animeId: number) => ipcRenderer.invoke('danmaku:prefetch-series', animeId),
     getConfig: () => ipcRenderer.invoke('danmaku:get-config'),
     setConfig: (config: { primary?: string; mirrors?: string[]; appId?: string; appSecret?: string }) =>
@@ -120,7 +121,7 @@ const api: Api = {
   // 配置存储
   store: {
     get: (key: string) => ipcRenderer.invoke('store:get', key),
-    set: (key: string, value: any) => ipcRenderer.invoke('store:set', key, value),
+    set: (key: string, value: StoreValue) => ipcRenderer.invoke('store:set', key, value),
     delete: (key: string) => ipcRenderer.invoke('store:delete', key)
   },
 
@@ -134,7 +135,7 @@ const api: Api = {
 
   // 日志
   log: {
-    send: (level: string, source: string, ...args: any[]) =>
+    send: (level: string, source: string, ...args: unknown[]) =>
       ipcRenderer.invoke('log:send', level, source, ...args),
     toggleWindow: () => ipcRenderer.invoke('log:toggle')
   }

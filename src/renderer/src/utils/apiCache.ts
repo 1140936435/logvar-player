@@ -14,6 +14,9 @@ const DEFAULT_TTL = 5 * 60 * 1000
 // 短 TTL：30 秒（适用于频繁变化的数据）
 const SHORT_TTL = 30 * 1000
 
+// 缓存上限：防止内存无限增长
+const MAX_CACHE_ENTRIES = 200
+
 const cache = new Map<string, CacheEntry<unknown>>()
 // 正在进行中的请求（用于去重）
 const inflight = new Map<string, Promise<unknown>>()
@@ -53,6 +56,11 @@ export async function cachedFetch<T>(
   const promise = fetcher()
     .then((data) => {
       cache.set(key, { data, timestamp: Date.now() })
+      // 缓存满时淘汰最旧的条目
+      if (cache.size > MAX_CACHE_ENTRIES) {
+        const oldestKey = cache.keys().next().value
+        if (oldestKey) cache.delete(oldestKey)
+      }
       return data
     })
     .finally(() => {

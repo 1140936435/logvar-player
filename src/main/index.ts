@@ -85,6 +85,8 @@ function addLog(level: LogEntry['level'], source: string, ...args: unknown[]): v
   const rawMessage = args
     .map((a) => {
       if (a instanceof Error) return a.stack || a.message
+      // 已经是字符串则直接使用，避免重复序列化
+      if (typeof a === 'string') return a
       if (typeof a === 'object') {
         try { return JSON.stringify(a) } catch { return String(a) }
       }
@@ -543,19 +545,21 @@ ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
   if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
 
   try {
-    // 第1步：获取 item 详情，提取真实 MediaSourceId
+    // 第1步：获取 item 详情，提取真实 MediaSourceId 和字幕轨道
     const item = await jellyfinRequest<{
-      MediaSources?: { Id: string; Name?: string; Container?: string }[]
-    }>(jellyfinAuth, `/Users/${jellyfinAuth.userId}/Items/${itemId}`)
+      MediaSources?: {
+        Id: string; Name?: string; Container?: string
+        MediaStreams?: { Index: number; Type: string; DisplayTitle?: string; Language?: string; Codec?: string; IsExternal?: boolean; DeliveryUrl?: string }[]
+      }[]
+    }>(jellyfinAuth, `/Users/${jellyfinAuth.userId}/Items/${itemId}?Fields=MediaSources,MediaStreams`)
 
     const mediaSources = item?.MediaSources
     if (!mediaSources || mediaSources.length === 0) {
       console.warn(`No MediaSources for item ${itemId}, trying itemId as fallback`)
-      // fallback: 某些情况下 itemId 就是 MediaSourceId
       const baseUrl = normalizeUrl(jellyfinAuth.url)
       const url = `${baseUrl}/Videos/${itemId}/stream?Static=true&api_key=${jellyfinAuth.token}`
       console.log(`get-playback-url (fallback): ${url}`)
-      return { success: true, data: { url } }
+      return { success: true, data: { url, subtitles: [] } }
     }
 
     const mediaSourceId = mediaSources[0].Id
@@ -563,13 +567,66 @@ ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
     console.log(`get-playback-url: mediaSourceId=${mediaSourceId}, container=${container}, itemId=${itemId}`)
 
     const baseUrl = normalizeUrl(jellyfinAuth.url)
+
+    // 提取字幕轨道信息
+    const streams = mediaSources[0].MediaStreams || []
+    const subtitleStreams = streams.filter(s => s.Type === 'Subtitle')
+    console.log(`get-playback-url: total streams=${streams.length}, subtitles=${subtitleStreams.map(s => ({ Index: s.Index, DisplayTitle: s.DisplayTitle, Language: s.Language, Codec: s.Codec, IsExternal: s.IsExternal, DeliveryUrl: s.DeliveryUrl }))}`)
+    const subtitles = subtitleStreams.map((s, subIdx) => {
+        // 存储 API 端点路径（不含 baseUrl），由 fetch-subtitle 通过 jellyfinRequest 获取
+        // 注意：Jellyfin 字幕 API 使用 MediaStream.Index（全局流索引），而非 0-based 字幕序号
+        const streamIndex = s.Index ?? subIdx
+        const endpoint = s.DeliveryUrl || `/Videos/${itemId}/${mediaSourceId}/Subtitles/${streamIndex}/Stream.vtt`
+        console.log(`get-playback-url: subtitle[${subIdx}] streamIndex=${streamIndex} endpoint=${endpoint}`)
+        return {
+          index: subIdx,
+          label: s.DisplayTitle || s.Language || s.Codec || `字幕 ${subIdx + 1}`,
+          language: s.Language || '',
+          codec: s.Codec || '',
+          url: endpoint
+        }
+      })
+
     const url = `${baseUrl}/Videos/${itemId}/stream?Static=true&MediaSourceId=${mediaSourceId}&api_key=${jellyfinAuth.token}`
-    console.log(`get-playback-url (final): ${url}`)
-    return { success: true, data: { url } }
+    console.log(`get-playback-url (final): ${url}, subtitles: ${subtitles.length}`)
+    return { success: true, data: { url, subtitles } }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error(`jellyfin:get-playback-url failed:`, msg)
     return { success: false, error: `获取播放地址失败: ${msg}` }
+  }
+})
+
+// 通过主进程获取字幕内容（绕过 CORS）
+// 注意：不能用 jellyfinRequest，因为它强制 Accept: application/json，
+// 而字幕接口返回 text/vtt，Jellyfin 会因无法返回 JSON 而 404
+ipcMain.handle('jellyfin:fetch-subtitle', async (_event, endpoint: string) => {
+  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  try {
+    console.log(`fetch-subtitle: requesting endpoint=${endpoint}`)
+    // 如果 endpoint 是完整 URL（DeliveryUrl），提取路径部分
+    let path = endpoint
+    if (endpoint.startsWith('http://') || endpoint.startsWith('https://')) {
+      const u = new URL(endpoint)
+      path = u.pathname + u.search
+    }
+    const baseUrl = normalizeUrl(jellyfinAuth.url)
+    const url = `${baseUrl}${path}`
+    console.log(`fetch-subtitle: full url=${url}`)
+    const response = await fetch(url, {
+      headers: { 'X-Emby-Token': jellyfinAuth.token }
+    })
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      throw new Error(`Jellyfin API error ${response.status}: ${text || response.statusText}`)
+    }
+    const content = await response.text()
+    console.log(`fetch-subtitle: got ${content.length} bytes`)
+    return { success: true, data: content }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`jellyfin:fetch-subtitle failed:`, msg)
+    return { success: false, error: msg }
   }
 })
 
@@ -1019,8 +1076,28 @@ function saveConfigFile(): void {
 loadConfigFile()
 migrateLegacyConfig()
 
+/** 递归清理值中的 enc: 前缀密文，防止解密失败时泄露加密 blob */
+function sanitizeEncryptedBlobs(value: unknown): unknown {
+  if (typeof value === 'string' && value.startsWith('enc:')) {
+    return ''
+  }
+  if (Array.isArray(value)) {
+    return value.map(sanitizeEncryptedBlobs)
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = sanitizeEncryptedBlobs(v)
+    }
+    return out
+  }
+  return value
+}
+
 ipcMain.handle('store:get', async (_event, key: string) => {
-  return configData[key] ?? null
+  const raw = configData[key] ?? null
+  // 安全检查：确保解密失败的 enc: 密文不会泄露到渲染进程
+  return sanitizeEncryptedBlobs(raw)
 })
 
 ipcMain.handle('store:set', async (_event, key: string, value: unknown) => {
@@ -1078,14 +1155,8 @@ ipcMain.handle('mpv:screenshot-save', async () => {
       ]
     })
     if (result.canceled || !result.filePath) return { success: false, error: '用户取消' }
-    // 如果有 mpv controller 就用它，否则返回失败让前端 fallback
-    try {
-      const { MpvController } = await import('./mpv-controller')
-      // 使用已有的 controller 实例（如果有的话）
-      return { success: false, error: 'mpv controller 不可用，请使用截图快捷键 Canvas 捕获' }
-    } catch {
-      return { success: false, error: 'mpv 未加载' }
-    }
+    // 返回用户选择的保存路径，让渲染进程用 Canvas 截图后写入
+    return { success: false, filePath: result.filePath, error: 'use-canvas-fallback' }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -2273,8 +2344,10 @@ function createWindow(): void {
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false,
-      allowRunningInsecureContent: true
+      // webSecurity 必须为 false：渲染进程通过 <img> 标签直接加载 Jellyfin 服务器的海报图片，
+      // 这些是用户配置的内网服务器，跨域请求会被 CORS 阻止。
+      // 所有 API 调用已通过 IPC 走主进程，不依赖渲染进程 fetch。
+      webSecurity: false
     }
   })
 
