@@ -31,6 +31,29 @@ function getResourcePath(relativePath: string): string {
   return join(__dirname, '../../', relativePath)
 }
 
+// ==================== 统一图标资源入口 ====================
+// 全局图标统一入口：所有图标（窗口/托盘/任务栏）均从 assets/icon 读取同一套液态玻璃风格素材
+// 开发环境：从项目根/assets/icon 读取
+// 打包环境：extraResources 将 assets/icon 复制到 resources/icon，从该路径读取
+
+/** 获取统一图标资源路径（开发/打包环境自适应） */
+function getIconPath(name: string): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, 'icon', name)
+  }
+  return join(__dirname, '../../', 'assets', 'icon', name)
+}
+
+/** 窗口图标：256px（适配高 DPI 任务栏） */
+function getWindowIcon(): string {
+  return getIconPath('icon-256.png')
+}
+
+/** 托盘图标：32px（Windows 任务栏托盘标准尺寸） */
+function getTrayIcon(): string {
+  return getIconPath('icon-32.png')
+}
+
 // ==================== 日志系统 ====================
 
 interface LogEntry {
@@ -1292,6 +1315,161 @@ ipcMain.handle('history:clear', async () => {
   return { success: true }
 })
 
+// ==================== IPC: 最近入库 ====================
+
+interface RecentlyAddedItem {
+  itemId: string
+  name: string
+  type: 'Movie' | 'Series' | 'Episode'
+  productionYear?: number
+  imageTag?: string
+  seriesName?: string
+  seriesId?: string
+  seasonId?: string
+  indexNumber?: number
+  parentIndexNumber?: number
+  addedAt: number
+  serverId?: string
+}
+
+interface RecentlyAddedConfig {
+  enabled: boolean
+  displayCount: number
+  scrollSpeed: number
+  scrollPosition: number
+}
+
+const RECENTLY_ADDED_KEY = 'recentlyAdded'
+const RECENTLY_ADDED_CONFIG_KEY = 'recentlyAddedConfig'
+const MAX_RECENTLY_ADDED = 200
+
+function loadRecentlyAdded(): RecentlyAddedItem[] {
+  try {
+    const raw = configData[RECENTLY_ADDED_KEY]
+    if (Array.isArray(raw)) return raw as RecentlyAddedItem[]
+  } catch { /* ignore */ }
+  return []
+}
+
+function saveRecentlyAdded(items: RecentlyAddedItem[]): void {
+  configData[RECENTLY_ADDED_KEY] = items
+  saveConfigFile()
+}
+
+function loadRecentlyAddedConfig(): RecentlyAddedConfig {
+  try {
+    const raw = configData[RECENTLY_ADDED_CONFIG_KEY]
+    if (raw && typeof raw === 'object') {
+      return {
+        enabled: (raw as any).enabled !== false,
+        displayCount: (raw as any).displayCount || 12,
+        scrollSpeed: (raw as any).scrollSpeed || 1,
+        scrollPosition: (raw as any).scrollPosition || 0
+      }
+    }
+  } catch { /* ignore */ }
+  return {
+    enabled: true,
+    displayCount: 12,
+    scrollSpeed: 1,
+    scrollPosition: 0
+  }
+}
+
+function saveRecentlyAddedConfig(config: RecentlyAddedConfig): void {
+  configData[RECENTLY_ADDED_CONFIG_KEY] = config
+  saveConfigFile()
+}
+
+ipcMain.handle('recentlyAdded:list', async (_event, limit?: number) => {
+  try {
+    let items = loadRecentlyAdded()
+    items = items.sort((a, b) => b.addedAt - a.addedAt)
+    if (limit && limit > 0) {
+      items = items.slice(0, limit)
+    }
+    return { success: true, data: items }
+  } catch (err) {
+    console.error('recentlyAdded:list failed:', err)
+    return { success: false, error: String(err) }
+  }
+})
+
+ipcMain.handle('recentlyAdded:add', async (_event, item: RecentlyAddedItem) => {
+  try {
+    const items = loadRecentlyAdded()
+    const idx = items.findIndex((i) => i.itemId === item.itemId)
+    const entry: RecentlyAddedItem = { ...item, addedAt: item.addedAt || Date.now() }
+    if (idx >= 0) {
+      items.splice(idx, 1)
+    }
+    items.unshift(entry)
+    if (items.length > MAX_RECENTLY_ADDED) {
+      items.length = MAX_RECENTLY_ADDED
+    }
+    saveRecentlyAdded(items)
+    return { success: true }
+  } catch (err) {
+    console.error('recentlyAdded:add failed:', err)
+    return { success: false, error: String(err) }
+  }
+})
+
+ipcMain.handle('recentlyAdded:addBatch', async (_event, newItems: RecentlyAddedItem[]) => {
+  try {
+    const items = loadRecentlyAdded()
+    const now = Date.now()
+    for (const item of newItems) {
+      const idx = items.findIndex((i) => i.itemId === item.itemId)
+      const entry: RecentlyAddedItem = { ...item, addedAt: item.addedAt || now }
+      if (idx >= 0) {
+        items.splice(idx, 1)
+      }
+      items.unshift(entry)
+    }
+    if (items.length > MAX_RECENTLY_ADDED) {
+      items.length = MAX_RECENTLY_ADDED
+    }
+    saveRecentlyAdded(items)
+    return { success: true }
+  } catch (err) {
+    console.error('recentlyAdded:addBatch failed:', err)
+    return { success: false, error: String(err) }
+  }
+})
+
+ipcMain.handle('recentlyAdded:clear', async () => {
+  try {
+    saveRecentlyAdded([])
+    return { success: true }
+  } catch (err) {
+    console.error('recentlyAdded:clear failed:', err)
+    return { success: false, error: String(err) }
+  }
+})
+
+ipcMain.handle('recentlyAdded:getConfig', async () => {
+  try {
+    const config = loadRecentlyAddedConfig()
+    return { success: true, data: config }
+  } catch (err) {
+    console.error('recentlyAdded:getConfig failed:', err)
+    return { success: false, error: String(err) }
+  }
+})
+
+ipcMain.handle('recentlyAdded:saveConfig', async (_event, partialConfig: Partial<RecentlyAddedConfig>) => {
+  try {
+    const current = loadRecentlyAddedConfig()
+    const updated = { ...current, ...partialConfig }
+    saveRecentlyAddedConfig(updated)
+    return { success: true }
+  } catch (err) {
+    console.error('recentlyAdded:saveConfig failed:', err)
+    return { success: false, error: String(err) }
+  }
+})
+
 // ==================== IPC: 文件 ====================
 
 const VIDEO_EXTENSIONS = new Set([
@@ -2420,7 +2598,7 @@ function createWindow(): void {
     height: 800,
     minWidth: 900,
     minHeight: 600,
-    icon: getResourcePath('build/icon.png'),
+    icon: getWindowIcon(),  // 统一图标入口：窗口图标读取 assets/icon/icon-256.png
     show: false,
     transparent: true,
     frame: false,
@@ -2463,11 +2641,13 @@ function createWindow(): void {
 }
 
 function createTray(): void {
-  const iconPath = getResourcePath('build/icon-32.png')
+  // 统一图标入口：托盘图标读取 assets/icon/icon-32.png
+  const iconPath = getTrayIcon()
   let icon = nativeImage.createFromPath(iconPath)
   if (icon.isEmpty()) {
-    // fallback to 256px and resize
-    icon = nativeImage.createFromPath(getResourcePath('build/icon.png'))
+    // 回退：从 256px 母版缩放到 32px
+    console.warn('[tray] 32px 图标缺失，从 256px 母版缩放')
+    icon = nativeImage.createFromPath(getIconPath('icon-256.png'))
     icon = icon.resize({ width: 32, height: 32 })
   }
   tray = new Tray(icon)

@@ -124,6 +124,16 @@ const api: Api = {
     test: (url: string, token: string) => ipcRenderer.invoke('server:test', url, token)
   },
 
+  // 最近入库
+  recentlyAdded: {
+    list: (limit?: number) => ipcRenderer.invoke('recentlyAdded:list', limit),
+    add: (item: import('../shared/preload-types').RecentlyAddedItem) => ipcRenderer.invoke('recentlyAdded:add', item),
+    addBatch: (items: import('../shared/preload-types').RecentlyAddedItem[]) => ipcRenderer.invoke('recentlyAdded:addBatch', items),
+    clear: () => ipcRenderer.invoke('recentlyAdded:clear'),
+    getConfig: () => ipcRenderer.invoke('recentlyAdded:getConfig'),
+    saveConfig: (config: Partial<import('../shared/preload-types').RecentlyAddedConfig>) => ipcRenderer.invoke('recentlyAdded:saveConfig', config)
+  },
+
   // 配置存储
   store: {
     get: (key: string) => ipcRenderer.invoke('store:get', key),

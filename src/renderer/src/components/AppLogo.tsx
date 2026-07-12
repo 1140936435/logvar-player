@@ -1,33 +1,26 @@
 import type { ReactElement } from 'react'
 import { motion } from 'framer-motion'
+// 统一图标资源入口：前端 logo 读取 assets/icon/icon-256.png
+// 开发环境通过 Vite 的 public 目录或 import 解析，打包后从 resources/icon 读取
+import iconUrl from '../../../../assets/icon/icon-256.png'
 
 // 修复点 1.18: JSX.Element 来自 @types/react，jsx runtime 模式下文件里依然要显式 import 对应类型。
 // 用 ReactElement 是 React 官方推荐的 JSX.Element 替代品。
 function AppLogo(): ReactElement {
   return (
     <div className="flex items-center gap-2 select-none">
-      {/* 玻璃质感播放按钮 */}
-      <motion.div
-        className="relative w-7 h-7 rounded-lg flex items-center justify-center"
+      {/* 统一液态玻璃风格图标 - 与窗口/任务栏/托盘/安装包同源 */}
+      <motion.img
+        src={iconUrl}
+        alt="mplay"
+        className="w-7 h-7 rounded-lg"
         whileHover={{ scale: 1.05 }}
         whileTap={{ scale: 0.95 }}
+        draggable={false}
         style={{
-          background: 'linear-gradient(135deg, rgba(0,122,255,0.85) 0%, rgba(90,180,255,0.70) 40%, rgba(100,200,255,0.55) 100%)',
-          boxShadow: '0 2px 10px rgba(0,122,255,0.28), 0 0 1px rgba(255,255,255,0.25), inset 0 1px 0 rgba(255,255,255,0.30), inset 0 -1px 3px rgba(0,0,0,0.08)',
-          border: '0.5px solid rgba(255,255,255,0.22)',
+          boxShadow: '0 2px 10px rgba(0,122,255,0.28), 0 0 1px rgba(255,255,255,0.25)',
         }}
-      >
-        {/* 高光反射 */}
-        <div
-          className="absolute inset-0 rounded-lg overflow-hidden pointer-events-none"
-          style={{
-            background: 'linear-gradient(180deg, rgba(255,255,255,0.20) 0%, transparent 50%, rgba(0,0,0,0.04) 100%)',
-          }}
-        />
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="white" className="ml-0.5 drop-shadow-[0_1px_1px_rgba(0,0,0,0.15)] relative z-10">
-          <polygon points="6,3 20,12 6,21" />
-        </svg>
-      </motion.div>
+      />
 
       {/* 文字 */}
       <span

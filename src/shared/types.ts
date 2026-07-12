@@ -157,6 +157,30 @@ export interface MpvState {
   filename: string
 }
 
+// ===== 最近入库 类型 =====
+
+export interface RecentlyAddedItem {
+  itemId: string
+  name: string
+  type: 'Movie' | 'Series' | 'Episode'
+  productionYear?: number
+  imageTag?: string
+  seriesName?: string
+  seriesId?: string
+  seasonId?: string
+  indexNumber?: number
+  parentIndexNumber?: number
+  addedAt: number
+  serverId?: string
+}
+
+export interface RecentlyAddedConfig {
+  enabled: boolean
+  displayCount: number
+  scrollSpeed: number
+  scrollPosition: number
+}
+
 // ===== 配置 类型 =====
 
 export interface AppConfig {

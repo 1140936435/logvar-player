@@ -1,5 +1,5 @@
 // Preload API 类型定义
-import type { DanmakuComment, DanmakuConfig, DanmakuMatchResult, DanmakuSearchResponse, JellyfinItem, JellyfinLibrary, LocalDanmakuCache, MpvTrack, MpvState, PlayerState } from './types'
+import type { DanmakuComment, DanmakuConfig, DanmakuMatchResult, DanmakuSearchResponse, JellyfinItem, JellyfinLibrary, LocalDanmakuCache, MpvTrack, MpvState, PlayerState, RecentlyAddedItem, RecentlyAddedConfig } from './types'
 
 // ===== 通用响应类型 =====
 export interface ApiResponse<T = unknown> {
@@ -122,6 +122,19 @@ export interface ScanFolderResponse {
   data?: {
     files: string[]
   }
+  error?: string
+}
+
+// ===== 最近入库相关类型 =====
+export interface RecentlyAddedListResponse {
+  success: boolean
+  data?: RecentlyAddedItem[]
+  error?: string
+}
+
+export interface RecentlyAddedConfigResponse {
+  success: boolean
+  data?: RecentlyAddedConfig
   error?: string
 }
 
@@ -273,6 +286,15 @@ export interface Api {
     remove: (id: string) => Promise<ApiResponse<void>>
     switch: (id: string) => Promise<ApiResponse<void>>
     test: (url: string, token: string) => Promise<ApiResponse<void>>
+  }
+
+  recentlyAdded: {
+    list: (limit?: number) => Promise<RecentlyAddedListResponse>
+    add: (item: RecentlyAddedItem) => Promise<ApiResponse<void>>
+    addBatch: (items: RecentlyAddedItem[]) => Promise<ApiResponse<void>>
+    clear: () => Promise<ApiResponse<void>>
+    getConfig: () => Promise<RecentlyAddedConfigResponse>
+    saveConfig: (config: Partial<RecentlyAddedConfig>) => Promise<ApiResponse<void>>
   }
 
   douban: DoubanApi

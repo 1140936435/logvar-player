@@ -5,6 +5,12 @@
 
 import type { Api } from '../../shared/preload-types'
 
+// 统一图标资源入口：声明 PNG 模块类型，允许前端 import iconUrl from '...png'
+declare module '*.png' {
+  const src: string
+  export default src
+}
+
 // 修复点 1.20: ImportMeta 必须放在 declare global 里才能作为全局类型生效
 // 否则每个模块各自的 ImportMeta 独立声明，main.tsx 的 import.meta.env 依旧爆红
 declare global {

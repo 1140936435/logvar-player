@@ -638,6 +638,15 @@ input[type="range"]::-webkit-slider-thumb:active {
   background: rgba(255, 255, 255, 0.20);
 }
 
+/* 隐藏滚动条但保留滚动功能 */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
 /* =====================================================
    响应式网格
    ===================================================== */

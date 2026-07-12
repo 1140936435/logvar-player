@@ -1,4 +1,4 @@
-﻿import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { useRef, useState, useEffect, useCallback, useMemo, memo, type ReactElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -7,6 +7,15 @@ import {
 } from 'lucide-react'
 import { cachedFetch, clearCache } from '../utils/apiCache'
 import { formatTimeAgo } from '../utils/time'
+import { RecentlyAddedRow } from '../components/RecentlyAddedRow'
+import {
+  getRecentlyAdded,
+  getRecentlyAddedConfig,
+  saveRecentlyAddedConfig,
+  detectAndRecordNewMedia,
+  clearRecentlyAddedCache
+} from '../utils/recentlyAdded'
+import type { RecentlyAddedItem } from '../../../shared/types'
 
 /* ==================== 类型 ==================== */
 
@@ -242,6 +251,13 @@ function Home(): ReactElement {
   const [historyItems, setHistoryItems] = useState<PlayHistoryItem[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
 
+  // 最近入库
+  const [recentlyAddedItems, setRecentlyAddedItems] = useState<RecentlyAddedItem[]>([])
+  const [recentlyAddedEnabled, setRecentlyAddedEnabled] = useState(true)
+  const [recentlyAddedLoading, setRecentlyAddedLoading] = useState(false)
+  const [recentlyAddedScrollPos, setRecentlyAddedScrollPos] = useState(0)
+  const [recentlyAddedScrollSpeed, setRecentlyAddedScrollSpeed] = useState(1)
+
   const [drillStack, setDrillStack] = useState<DrillLevel[]>([])
   const [drillLoading, setDrillLoading] = useState(false)
 
@@ -384,11 +400,24 @@ function Home(): ReactElement {
 
       const hasItems = Object.values(itemsMap).some((items) => items.length > 0)
       setPageState(hasItems ? 'ready' : 'empty')
+
+      // 检测新增媒体并记录入库
+      if (hasItems) {
+        try {
+          const allItems: MediaItem[] = []
+          Object.values(itemsMap).forEach((items) => {
+            allItems.push(...items)
+          })
+          await detectAndRecordNewMedia(allItems, activeServerId || undefined)
+        } catch (detectErr) {
+          console.error('[Home] 检测新增媒体失败:', detectErr)
+        }
+      }
     } catch (err) {
       setPageState('error')
       setErrorMsg(err instanceof Error ? err.message : '发生未知错误')
     }
-  }, [])
+  }, [activeServerId])
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true)
@@ -399,6 +428,58 @@ function Home(): ReactElement {
       }
     } catch { /* ignore */ }
     setHistoryLoading(false)
+  }, [])
+
+  // 加载最近入库数据和配置
+  const loadRecentlyAdded = useCallback(async (): Promise<void> => {
+    setRecentlyAddedLoading(true)
+    try {
+      // 先加载配置
+      const config = await getRecentlyAddedConfig(true)
+      setRecentlyAddedEnabled(config.enabled)
+      setRecentlyAddedScrollSpeed(config.scrollSpeed)
+      setRecentlyAddedScrollPos(config.scrollPosition)
+
+      if (config.enabled) {
+        const items = await getRecentlyAdded(config.displayCount, true)
+        setRecentlyAddedItems(items)
+      }
+    } catch (err) {
+      console.error('[Home] 加载最近入库失败:', err)
+    }
+    setRecentlyAddedLoading(false)
+  }, [])
+
+  // 处理最近入库项点击 - 直接播放
+  const handleRecentlyAddedClick = useCallback((item: RecentlyAddedItem): void => {
+    const base = connectedServer || 'http://localhost:8096'
+    const displayName = item.type === 'Series'
+      ? item.name
+      : item.seriesName
+        ? `${item.seriesName} - ${item.name}`
+        : item.name
+
+    const seriesName = item.seriesName || ''
+    const seriesId = item.seriesId || ''
+    const seasonId = item.seasonId || ''
+
+    if (item.type === 'Series') {
+      // 剧集跳转到详情页
+      navigate(`/detail/${item.itemId}`)
+    } else {
+      // 电影直接播放
+      navigate(`/player?itemId=${encodeURIComponent(item.itemId)}&name=${encodeURIComponent(displayName)}&base=${encodeURIComponent(base)}&seriesName=${encodeURIComponent(seriesName)}&seriesId=${encodeURIComponent(seriesId)}&seasonId=${encodeURIComponent(seasonId)}`)
+    }
+  }, [connectedServer, navigate])
+
+  // 保存滚动位置
+  const handleScrollPositionChange = useCallback((position: number): void => {
+    setRecentlyAddedScrollPos(position)
+    // 防抖保存
+    const timer = window.setTimeout(() => {
+      saveRecentlyAddedConfig({ scrollPosition: position }).catch(() => {})
+    }, 500)
+    return () => window.clearTimeout(timer)
   }, [])
 
   const loadMoreLoadingRef = useRef<Record<string, boolean>>({})
@@ -457,13 +538,15 @@ function Home(): ReactElement {
       if (result.success) {
         // 切换服务器时清除缓存，确保获取最新数据
         clearCache('jellyfin.')
+        clearRecentlyAddedCache()
         await loadServers()
         await loadMediaData()
         await loadHistory()
+        await loadRecentlyAdded()
       }
     } catch { /* ignore */ }
     setSwitchingServer(false)
-  }, [loadServers, loadMediaData, loadHistory])
+  }, [loadServers, loadMediaData, loadHistory, loadRecentlyAdded])
 
   useEffect(() => {
     loadServers()
@@ -472,7 +555,8 @@ function Home(): ReactElement {
   useEffect(() => {
     loadMediaData()
     loadHistory()
-  }, [loadMediaData, loadHistory])
+    loadRecentlyAdded()
+  }, [loadMediaData, loadHistory, loadRecentlyAdded])
 
   const handleDrillDown = async (item: MediaItem): Promise<void> => {
     setDrillLoading(true)
@@ -835,7 +919,7 @@ function Home(): ReactElement {
           )}
         </AnimatePresence>
 
-        {/* 顶栏：搜索 + 服务器切换 */}
+        {/* 顶栏：搜索 + 打开文件/文件夹 + 服务器切换 */}
         <div className="mb-10">
           <div className="flex items-center gap-3">
             <div className="relative flex-1">
@@ -864,6 +948,47 @@ function Home(): ReactElement {
                 {searchLoading ? <Loader2 size={14} className="animate-spin" /> : '搜索'}
               </motion.button>
             </div>
+          </div>
+
+          {/* 打开文件 / 打开文件夹 */}
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <motion.button
+              onClick={async () => {
+                const result = await window.api.file.openFile()
+                if (result.success && result.data) {
+                  const data = result.data as { filePath: string }
+                  const fname = data.filePath.split(/[/\\]/).pop() || '本地视频'
+                  navigate(`/player?file=${encodeURIComponent(data.filePath)}&name=${encodeURIComponent(fname)}`)
+                }
+              }}
+              className="ios-btn ios-btn-secondary !h-10 !px-3 flex items-center gap-2"
+              whileTap={{ scale: 0.96 }}
+              title="打开本地视频文件"
+            >
+              <Video size={15} />
+              <span className="text-[13px] hidden sm:inline">打开文件</span>
+            </motion.button>
+            <motion.button
+              onClick={async () => {
+                const result = await window.api.file.openFolder()
+                if (result.success && result.data) {
+                  const data = result.data as { files: string[]; folderPath: string }
+                  if (data.files.length === 0) {
+                    alert('文件夹中未找到视频文件')
+                  } else {
+                    const firstPath = data.files[0]
+                    const fname = firstPath.split(/[/\\]/).pop() || '本地视频'
+                    navigate(`/player?file=${encodeURIComponent(firstPath)}&name=${encodeURIComponent(fname)}`)
+                  }
+                }
+              }}
+              className="ios-btn ios-btn-secondary !h-10 !px-3 flex items-center gap-2"
+              whileTap={{ scale: 0.96 }}
+              title="打开视频文件夹"
+            >
+              <FolderOpen size={15} />
+              <span className="text-[13px] hidden sm:inline">打开文件夹</span>
+            </motion.button>
           </div>
 
           {/* 服务器切换器 */}
@@ -1060,48 +1185,7 @@ function Home(): ReactElement {
           </section>
         )}
 
-        {/* 快捷操作 */}
-        {!isSearching && !activeLibrary && drillStack.length === 0 && (
-          <div className="flex gap-3 mb-12">
-            <motion.button
-              onClick={async () => {
-                const result = await window.api.file.openFile()
-                if (result.success && result.data) {
-                  const data = result.data as { filePath: string }
-                  const fname = data.filePath.split(/[/\\]/).pop() || '本地视频'
-                  navigate(`/player?file=${encodeURIComponent(data.filePath)}&name=${encodeURIComponent(fname)}`)
-                }
-              }}
-              className="ios-btn ios-btn-primary"
-              whileTap={{ scale: 0.96 }}
-            >
-              <Video size={16} />
-              打开文件
-            </motion.button>
-            <motion.button
-              onClick={async () => {
-                const result = await window.api.file.openFolder()
-                if (result.success && result.data) {
-                  const data = result.data as { files: string[]; folderPath: string }
-                  if (data.files.length === 0) {
-                    alert('文件夹中未找到视频文件')
-                  } else {
-                    const firstPath = data.files[0]
-                    const fname = firstPath.split(/[/\\]/).pop() || '本地视频'
-                    navigate(`/player?file=${encodeURIComponent(firstPath)}&name=${encodeURIComponent(fname)}`)
-                  }
-                }
-              }}
-              className="ios-btn ios-btn-secondary"
-              whileTap={{ scale: 0.96 }}
-            >
-              <FolderOpen size={16} />
-              打开文件夹
-            </motion.button>
-          </div>
-        )}
-
-        {/* 播放历史 */}
+        {/* 播放历史 - 最近播放 */}
         {!isSearching && !activeLibrary && drillStack.length === 0 && (pageState === 'ready' || pageState === 'empty') && (
           <section className="mb-12">
             <div className="flex items-center justify-between mb-4">
@@ -1135,6 +1219,27 @@ function Home(): ReactElement {
               </div>
             )}
           </section>
+        )}
+
+        {/* 最近入库 */}
+        {!isSearching && !activeLibrary && drillStack.length === 0 && recentlyAddedEnabled && recentlyAddedItems.length > 0 && (
+          recentlyAddedLoading ? (
+            <div className="flex items-center justify-center py-12 mb-12">
+              <Loader2 size={18} className="text-[var(--accent)] animate-spin" />
+              <span className="text-[13px] text-[var(--text-tertiary)] ml-3">加载中...</span>
+            </div>
+          ) : (
+            <RecentlyAddedRow
+              items={recentlyAddedItems}
+              onItemClick={handleRecentlyAddedClick}
+              baseUrl={connectedServer || 'http://localhost:8096'}
+              token={jellyfinToken}
+              scrollSpeed={recentlyAddedScrollSpeed}
+              savedScrollPosition={recentlyAddedScrollPos}
+              onScrollPositionChange={handleScrollPositionChange}
+              doubanPosters={doubanPosters}
+            />
+          )
         )}
 
         {/* Drill-down 加载中 */}

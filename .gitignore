@@ -56,6 +56,14 @@ logvar-player/
 # 临时构建目录
 dist2/
 dist3/
+dist4/
+dist5/
+
+# 临时脚本和残留文件
+fix_player_lines.ps1
+refactor_main.ps1
+sedC0epuu
+sedwYHSqm
 
 # Python 脚本
 *.py

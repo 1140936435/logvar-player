@@ -9,7 +9,7 @@ import {
   Database, Plug, WifiOff, Save, Loader2, CheckCircle,
   MessageCircleMore, Radar, MonitorPlay, Info,
   ChevronDown, Key, Link as LinkIcon, CirclePlus, Trash2, Settings as SettingsIcon,
-  CircleDot
+  CircleDot, Sparkles
 } from 'lucide-react'
 
 /* ==================== 类型 ==================== */
@@ -159,6 +159,12 @@ function Settings(): ReactElement {
   const [hdrToneMapping, setHdrToneMapping] = useState(false)
   const [playerSaveMsg, setPlayerSaveMsg] = useState('')
 
+  // 最近入库
+  const [recentlyAddedEnabled, setRecentlyAddedEnabled] = useState(true)
+  const [recentlyAddedCount, setRecentlyAddedCount] = useState(12)
+  const [recentlyAddedSpeed, setRecentlyAddedSpeed] = useState(1)
+  const [recentlyAddedSaveMsg, setRecentlyAddedSaveMsg] = useState('')
+
   const loadServers = useCallback(async (): Promise<void> => {
     try {
       const listResult = await window.api.server.list()
@@ -279,6 +285,15 @@ function Settings(): ReactElement {
         if (typeof data.hdrToneMapping === 'boolean') setHdrToneMapping(data.hdrToneMapping)
       }
     }).catch(() => {})
+
+    // 加载最近入库配置
+    window.api.recentlyAdded.getConfig().then((result) => {
+      if (result.success && result.data) {
+        setRecentlyAddedEnabled(result.data.enabled)
+        setRecentlyAddedCount(result.data.displayCount)
+        setRecentlyAddedSpeed(result.data.scrollSpeed)
+      }
+    }).catch(() => {})
   }, [])
 
   const handleDanmakuTest = async (): Promise<void> => {
@@ -323,6 +338,19 @@ function Settings(): ReactElement {
       setTimeout(() => setPlayerSaveMsg(''), 2000)
     } catch { /* ignore */ }
   }, [hardwareDecode, hdrToneMapping])
+
+  // 保存最近入库配置
+  const saveRecentlyAddedSettings = useCallback(async (updates: {
+    enabled?: boolean
+    displayCount?: number
+    scrollSpeed?: number
+  }): Promise<void> => {
+    try {
+      await window.api.recentlyAdded.saveConfig(updates)
+      setRecentlyAddedSaveMsg('已保存')
+      setTimeout(() => setRecentlyAddedSaveMsg(''), 2000)
+    } catch { /* ignore */ }
+  }, [])
 
   const activeServer = useMemo(() => servers.find(s => s.id === activeServerId), [servers, activeServerId])
 
@@ -656,6 +684,99 @@ function Settings(): ReactElement {
                   </div>
                 )}
               </div>
+            </GlassCard>
+
+            {/* ---- 最近入库设置 ---- */}
+            <GlassCard title="最近入库" icon={Sparkles}>
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-[15px] font-medium text-[var(--text-primary)]">启用最近入库栏</div>
+                  <div className="text-[12px] text-[var(--text-tertiary)] mt-0.5 leading-relaxed">在首页顶部展示最近添加到媒体库的影片</div>
+                </div>
+                <button
+                  onClick={() => {
+                    const next = !recentlyAddedEnabled
+                    setRecentlyAddedEnabled(next)
+                    saveRecentlyAddedSettings({ enabled: next })
+                  }}
+                  className={`ios-toggle ${recentlyAddedEnabled ? 'active' : ''}`}
+                  aria-label="切换最近入库栏"
+                />
+              </div>
+
+              <div className="h-px bg-[var(--separator)]" />
+
+              {/* 展示数量 */}
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-[15px] font-medium text-[var(--text-primary)]">展示数量</div>
+                  <div className="text-[13px] text-[var(--accent)] font-medium">{recentlyAddedCount} 部</div>
+                </div>
+                <div className="flex gap-2">
+                  {[6, 12, 18, 24].map((count) => (
+                    <button
+                      key={count}
+                      onClick={() => {
+                        setRecentlyAddedCount(count)
+                        saveRecentlyAddedSettings({ displayCount: count })
+                      }}
+                      className={`flex-1 py-2 rounded-[var(--radius-md)] text-[13px] font-medium transition-all ${
+                        recentlyAddedCount === count
+                          ? 'bg-[var(--accent)] text-white shadow-[0_2px_8px_rgba(0,122,255,0.3)]'
+                          : 'bg-[var(--bg-grouped)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+                      }`}
+                    >
+                      {count}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="h-px bg-[var(--separator)]" />
+
+              {/* 滚动速度 */}
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-[15px] font-medium text-[var(--text-primary)]">滚动速度</div>
+                  <div className="text-[13px] text-[var(--accent)] font-medium">
+                    {recentlyAddedSpeed === 0.5 ? '慢' : recentlyAddedSpeed === 1 ? '正常' : recentlyAddedSpeed === 1.5 ? '快' : '很快'}
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  {[
+                    { value: 0.5, label: '慢' },
+                    { value: 1, label: '正常' },
+                    { value: 1.5, label: '快' },
+                    { value: 2, label: '很快' }
+                  ].map(({ value, label }) => (
+                    <button
+                      key={value}
+                      onClick={() => {
+                        setRecentlyAddedSpeed(value)
+                        saveRecentlyAddedSettings({ scrollSpeed: value })
+                      }}
+                      className={`flex-1 py-2 rounded-[var(--radius-md)] text-[13px] font-medium transition-all ${
+                        recentlyAddedSpeed === value
+                          ? 'bg-[var(--accent)] text-white shadow-[0_2px_8px_rgba(0,122,255,0.3)]'
+                          : 'bg-[var(--bg-grouped)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* 保存提示 */}
+              {recentlyAddedSaveMsg && (
+                <motion.div
+                  className="flex items-center gap-2 text-[13px] text-[var(--success)]"
+                  initial={{ opacity: 0, x: -4 }}
+                  animate={{ opacity: 1, x: 0 }}
+                >
+                  <CheckCircle size={14} strokeWidth={1.5} /> {recentlyAddedSaveMsg}
+                </motion.div>
+              )}
             </GlassCard>
 
             {/* ---- 播放器设置 ---- */}
