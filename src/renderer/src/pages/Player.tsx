@@ -1,9 +1,14 @@
-import { useRef, useState, useEffect, useCallback } from 'react'
-import type { DanmakuComment, DanmakuSearchResult, DanmakuSearchResponse, JellyfinItem } from '../../shared/types'
+import { useRef, useState, useEffect, useCallback, type ReactElement } from 'react'
+// 修复点 1.15: pages 目录下深一层，从 ../../ → ../../../shared/types
+import type { DanmakuComment, DanmakuSearchResult, DanmakuSearchResponse, JellyfinItem } from '../../../shared/types'
 import { useSearchParams, useNavigate, Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Volume2, VolumeX, Volume1, Gauge, List, X, ChevronLeft, ChevronRight, TvMinimalPlay, ArrowLeft } from 'lucide-react'
+import { Volume2, VolumeX, Volume1, Gauge, List, X, ChevronLeft, ChevronRight, ArrowLeft } from 'lucide-react'
 import { cachedFetch } from '../utils/apiCache'
+import { MediaTimeBus, createMediaTimeBus } from '../utils/mediaTimeBus'
+import { usePlayerStore } from '../utils/playerStore'
+import { DanmakuEngine } from '../utils/danmakuEngine'
+import { danmakuRequestManager } from '../utils/danmakuRequestManager'
 
 // ==================== 字幕类型 ====================
 
@@ -50,337 +55,7 @@ function parseVTT(vtt: string): SubtitleCue[] {
   return cues
 }
 
-// ==================== 弹幕类型 ====================
 
-interface ActiveComment {
-  text: string
-  x: number
-  y: number
-  color: string
-  speed: number
-  width: number
-  mode: number
-  bornAt: number
-  duration: number
-}
-
-// ==================== 弹幕引擎 ====================
-
-const DANMAKU_TRACK_COUNT = 12
-const DANMAKU_FIXED_DURATION = 4
-
-// 弹幕颜色缓存（避免重复转换）
-const colorCache = new Map<number, string>()
-function decToRgb(dec: number): string {
-  let cached = colorCache.get(dec)
-  if (cached) return cached
-  const r = (dec >> 16) & 0xff
-  const g = (dec >> 8) & 0xff
-  const b = dec & 0xff
-  cached = `rgb(${r},${g},${b})`
-  if (colorCache.size > 256) colorCache.clear()
-  colorCache.set(dec, cached)
-  return cached
-}
-
-class DanmakuEngine {
-  private canvas: HTMLCanvasElement
-  private ctx: CanvasRenderingContext2D
-  private allComments: DanmakuComment[] = []  // 保存所有原始弹幕
-  private displayedIndex = 0  // 记录已经处理到哪一条弹幕（不删除）
-  private active: ActiveComment[] = []
-  private trackOccupied: number[] = new Array(DANMAKU_TRACK_COUNT).fill(0)
-  private trackHeight = 36
-  private lastTime = 0
-  private enabled = true
-  private opacity = 1.0
-  private fontSize = 24
-  private speed = 120
-  private maxCount = 300 // 密度 50-500，控制活跃轨道数
-  private timeDensity = 20 // 每秒最多显示条数
-  private lastAddTime = 0
-  private addedThisSecond = 0
-  private lastVideoTime = 0 // 用于检测跳播
-  private timeOffset = 0 // 弹幕时间偏移（秒），正数=延后，负数=提前
-
-  // 密度值 → 活跃轨道数（线性映射 50→3, 500→12）
-  private activeTrackCount(): number {
-    return Math.round(3 + (this.maxCount - 50) / 450 * 9)
-  }
-
-  private fontString = ''
-  private trackTemp = new Array(DANMAKU_TRACK_COUNT)
-
-  constructor(canvas: HTMLCanvasElement) {
-    this.canvas = canvas
-    this.ctx = canvas.getContext('2d')!
-    this.buildFont()
-  }
-
-  private buildFont(): void {
-    this.fontString = `bold ${this.fontSize}px "Microsoft YaHei", sans-serif`
-  }
-
-  resize(): void {
-    const parent = this.canvas.parentElement
-    if (!parent) return
-    this.canvas.width = parent.clientWidth
-    this.canvas.height = parent.clientHeight
-  }
-
-  loadComments(comments: DanmakuComment[]): void {
-    // 不突变传入的数组，复制后排序
-    const sorted = [...comments].sort((a, b) => a.time - b.time)
-    // 保存所有原始弹幕
-    this.allComments = sorted
-    // 重置播放状态，确保新弹幕从头开始显示
-    this.displayedIndex = 0
-    this.lastAddTime = 0
-    this.addedThisSecond = 0
-    this.lastVideoTime = 0
-  }
-
-  getCommentCount(): number {
-    return this.allComments.length  // 返回总弹幕数，不是当前显示数
-  }
-
-  clear(): void {
-    this.allComments = []
-    this.active = []
-    this.trackOccupied = new Array(DANMAKU_TRACK_COUNT).fill(0)
-    this.displayedIndex = 0
-    this.lastAddTime = 0
-    this.addedThisSecond = 0
-    this.lastVideoTime = 0
-    this.timeOffset = 0
-  }
-
-  setOpacity(opacity: number): void {
-    this.opacity = Math.max(0, Math.min(1, opacity))
-  }
-
-  setFontSize(size: number): void {
-    this.fontSize = Math.max(12, Math.min(48, size))
-    this.trackHeight = Math.round(this.fontSize * 1.5)
-    this.buildFont()
-    // 重算所有活跃弹幕的 Y 坐标，避免字号变大后重叠
-    for (const a of this.active) {
-      const track = Math.round(a.y / (this.trackHeight / 1.5)) // 用旧比例反推轨道号
-      a.y = track * this.trackHeight + this.trackHeight * 0.8
-    }
-  }
-
-  setSpeed(speed: number): void {
-    this.speed = Math.max(60, Math.min(300, speed))
-  }
-
-  setMaxCount(count: number): void {
-    const oldTracks = this.activeTrackCount()
-    this.maxCount = Math.max(50, Math.min(500, count))
-    const newTracks = this.activeTrackCount()
-    // 降低密度：移除超出新轨道范围的弹幕，即时视觉反馈
-    if (newTracks < oldTracks) {
-      this.active = this.active.filter(a => {
-        const track = Math.floor(a.y / this.trackHeight)
-        return track < newTracks
-      })
-    }
-  }
-
-  setTimeDensity(density: number): void {
-    this.timeDensity = Math.max(5, Math.min(50, density))
-  }
-
-  setTimeOffset(offset: number): void {
-    this.timeOffset = Math.max(-30, Math.min(30, offset))
-  }
-
-  getTimeOffset(): number {
-    return this.timeOffset
-  }
-
-  private getTrackForScroll(): number {
-    const numTracks = this.activeTrackCount()
-    // 优先选空轨道
-    for (let i = 0; i < numTracks; i++) {
-      if (this.trackOccupied[i] <= 0) return i
-    }
-    // 选现有弹幕已过半屏的轨道（最多同时 2 条同轨，不重叠）
-    for (let i = 0; i < numTracks; i++) {
-      if (this.trackOccupied[i] <= this.canvas.width * 0.5) return i
-    }
-    // 全忙，选最空闲的
-    let best = 0
-    let bestRight = Infinity
-    for (let i = 0; i < numTracks; i++) {
-      if (this.trackOccupied[i] < bestRight) {
-        bestRight = this.trackOccupied[i]
-        best = i
-      }
-    }
-    return best
-  }
-
-  private addComment(c: DanmakuComment, now: number): boolean {
-    // 时间密度控制 - 限制每秒显示的弹幕数
-    const elapsed = now - this.lastAddTime
-    if (elapsed >= 1) {
-      this.addedThisSecond = 0
-      this.lastAddTime = now
-    }
-    if (this.addedThisSecond >= this.timeDensity) {
-      return false
-    }
-    this.addedThisSecond++
-
-    const colorStr = decToRgb(c.color)
-    this.ctx.font = this.fontString
-    const metrics = this.ctx.measureText(c.text)
-    const textWidth = metrics.width
-
-    if (c.mode === 1) {
-      const track = this.getTrackForScroll()
-      const y = track * this.trackHeight + this.trackHeight * 0.8
-      // 在前一条弹幕后紧跟，间距 = 字号，绝不重叠
-      const startX = Math.max(this.canvas.width + 10, this.trackOccupied[track] + this.fontSize)
-      this.trackOccupied[track] = startX + textWidth
-      this.active.push({
-        text: c.text, x: startX, y,
-        color: colorStr, speed: this.speed, width: textWidth,
-        mode: 1, bornAt: now, duration: 0
-      })
-    } else {
-      // 固定弹幕：在活跃轨道范围内找最空的轨道
-      const numTracks = this.activeTrackCount()
-      const isTop = c.mode === 5
-      const half = Math.floor(numTracks / 2)
-      const tStart = isTop ? 0 : half
-      const tEnd = isTop ? half : numTracks
-      let bestTrack = tStart
-      let bestRight = Infinity
-      for (let i = tStart; i < tEnd; i++) {
-        if (this.trackOccupied[i] < bestRight) {
-          bestRight = this.trackOccupied[i]
-          bestTrack = i
-        }
-      }
-      const y = bestTrack * this.trackHeight + this.trackHeight * 0.8
-      this.trackOccupied[bestTrack] = textWidth
-      this.active.push({
-        text: c.text, x: (this.canvas.width - textWidth) / 2, y,
-        color: colorStr, speed: 0, width: textWidth,
-        mode: c.mode, bornAt: now, duration: DANMAKU_FIXED_DURATION
-      })
-    }
-    return true
-  }
-
-  update(videoTime: number): void {
-    if (this.allComments.length === 0 || !this.enabled) return
-
-    const effectiveTime = videoTime - this.timeOffset
-    const delta = videoTime - this.lastVideoTime
-
-    // 检测跳播（时间跳跃超过 1 秒视为 seek 操作）
-    if (Math.abs(delta) > 1) {
-      this.active = []
-      // 复用已有数组，避免频繁 GC
-      for (let i = 0; i < this.trackOccupied.length; i++) this.trackOccupied[i] = 0
-      this.lastAddTime = videoTime
-      this.addedThisSecond = 0
-
-      if (delta > 0) {
-        // 前进跳播：快速跳过已错过的弹幕（预留 2 秒缓冲，显示即将出现的弹幕）
-        while (this.displayedIndex < this.allComments.length &&
-               this.allComments[this.displayedIndex].time < effectiveTime - 2) {
-          this.displayedIndex++
-        }
-      } else {
-        // 后退跳播：从头定位到当前时间附近的弹幕
-        this.displayedIndex = 0
-        while (this.displayedIndex < this.allComments.length &&
-               this.allComments[this.displayedIndex].time < effectiveTime - 2) {
-          this.displayedIndex++
-        }
-      }
-    }
-
-    this.lastVideoTime = videoTime
-
-    // 从 allComments 中取出应该显示的弹幕（连续流动，不丢弃被阻塞的弹幕）
-    let addedThisFrame = 0
-    while (this.displayedIndex < this.allComments.length &&
-           this.allComments[this.displayedIndex].time <= effectiveTime &&
-           addedThisFrame < 3) {
-      const c = this.allComments[this.displayedIndex]
-      if (this.addComment(c, videoTime)) {
-        this.displayedIndex++
-        addedThisFrame++
-      } else {
-        // 时间密度超限，跳过本条，下帧继续下一条
-        this.displayedIndex++
-        break
-      }
-    }
-
-    const now = performance.now()
-    const dt = this.lastTime ? (now - this.lastTime) / 1000 : 0.016
-    this.lastTime = now
-
-    // 单次遍历：更新位置 + 过滤 + 重建轨道占用
-    let wi = 0
-    const arr = this.active
-    const ln = arr.length
-    const occ = this.trackTemp
-    for (let i = 0; i < DANMAKU_TRACK_COUNT; i++) occ[i] = 0
-
-    for (let i = 0; i < ln; i++) {
-      const a = arr[i]
-      if (a.mode === 1) {
-        a.x -= a.speed * dt
-        if (a.x <= -a.width - 20) continue
-        const tk = Math.floor(a.y / this.trackHeight)
-        if (tk >= 0 && tk < DANMAKU_TRACK_COUNT) {
-          const r = a.x + a.width
-          if (r > occ[tk]) occ[tk] = r
-        }
-      } else if (videoTime - a.bornAt >= a.duration) {
-        continue
-      }
-      arr[wi++] = a
-    }
-    arr.length = wi
-    this.trackOccupied = occ
-  }
-
-  draw(): void {
-    if (!this.enabled) {
-      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
-      return
-    }
-    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
-    this.ctx.font = this.fontString
-    this.ctx.textBaseline = 'middle'
-    
-    // 透明度为 1 时跳过 globalAlpha 设置，减少 Canvas 状态变更
-    if (this.opacity < 1) this.ctx.globalAlpha = this.opacity
-    
-    for (const a of this.active) {
-      this.ctx.strokeStyle = 'rgba(0,0,0,0.6)'
-      this.ctx.lineWidth = 3
-      this.ctx.strokeText(a.text, a.x, a.y)
-      this.ctx.fillStyle = a.color
-      this.ctx.fillText(a.text, a.x, a.y)
-    }
-    if (this.opacity < 1) this.ctx.globalAlpha = 1.0
-  }
-
-  enable(): void { this.enabled = true; this.lastTime = 0 }
-  disable(): void { this.enabled = false; this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height) }
-  isEnabled(): boolean { return this.enabled }
-  start(): void { this.lastTime = 0 }
-  stop(): void { this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height) }
-}
 
 // ==================== 工具 ====================
 
@@ -413,7 +88,7 @@ function extractSeriesNameFromFilename(filename: string): string {
 
 // ==================== Player ====================
 
-function Player(): JSX.Element {
+function Player(): ReactElement {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const itemId = searchParams.get('itemId') || ''
@@ -425,7 +100,11 @@ function Player(): JSX.Element {
   const seasonId = searchParams.get('seasonId') || ''
 
   const [jellyfinToken, setJellyfinToken] = useState('')
-  
+
+  // 修复点 1.13: videoLoadKey 必须在引用它的"视频 src useEffect"（约 L586）之前声明，
+  // 避免 const 声明的 TDZ（Temporal Dead Zone）导致 "Block-scoped variable used before its declaration"
+  const [videoLoadKey, setVideoLoadKey] = useState(0)
+
   // 剧集列表状态
   const [episodeList, setEpisodeList] = useState<JellyfinItem[]>([])
   const [currentEpisodeIndex, setCurrentEpisodeIndex] = useState(-1)
@@ -530,18 +209,13 @@ function Player(): JSX.Element {
   const engineRef = useRef<DanmakuEngine | null>(null)
   const resumePosRef = useRef(parseFloat(searchParams.get('position') || '0'))
   const hasResumedRef = useRef(false)
+  const timeBusRef = useRef<MediaTimeBus | null>(null)
 
-  const [playing, setPlaying] = useState(false)
-  const [volume, setVolume] = useState(100)
-  const [currentTime, setCurrentTime] = useState(0)
-  const currentTimeRef = useRef(0) // 性能优化：ref 避免逐帧 setState
-  const [duration, setDuration] = useState(0)
-  const [buffered, setBuffered] = useState(0)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  const [playerState, playerActions] = usePlayerStore()
+  const { currentTime, duration, playbackRate, isPlaying, volume, buffered, error, loading } = playerState
+
   const [danmakuEnabled, setDanmakuEnabled] = useState(true)
   const [danmakuLoading, setDanmakuLoading] = useState(false)
-  // const [danmakuCount, setDanmakuCount] = useState(0) // deprecated, use currentDanmakuCount instead
   const [currentDanmakuCount, setCurrentDanmakuCount] = useState(0)
   const [danmakuCountVisible, setDanmakuCountVisible] = useState(false)
   const [danmakuError, setDanmakuError] = useState('')
@@ -556,12 +230,12 @@ function Player(): JSX.Element {
   const [danmakuFontSize, setDanmakuFontSize] = useState(24)
   const [danmakuSpeed, setDanmakuSpeed] = useState(120)
   const [danmakuMaxCount, setDanmakuMaxCount] = useState(300)
-  const [danmakuOffset, setDanmakuOffset] = useState(0) // 弹幕时间偏移（秒），正数=延后，负数=提前
+  const [danmakuOffset, setDanmakuOffset] = useState(0)
   const danmakuOffsetRef = useRef(0)
-  // const [danmakuSmartMode, setDanmakuSmartMode] = useState(false) // removed
-  // const [danmakuTimeDensity, setDanmakuTimeDensity] = useState(20) // removed // 每秒最多显示条数
 
-  const [playbackRate, setPlaybackRate] = useState(1)
+  // 弹幕显示区域边界（百分比，0-100）
+  const [danmakuTopBoundary, setDanmakuTopBoundary] = useState(0)
+  const [danmakuBottomBoundary, setDanmakuBottomBoundary] = useState(100)
 
   const [speedToast, setSpeedToast] = useState('')
   const [volumePopup, setVolumePopup] = useState(false)
@@ -673,9 +347,19 @@ function Player(): JSX.Element {
         }
         if (speed !== null) { setDanmakuSpeed(Number(speed)); engineRef.current?.setSpeed(Number(speed)) }
         const maxCount = await window.api.store.get('danmakuMaxCount')
-        if (maxCount !== null) { setDanmakuMaxCount(Number(maxCount)); engineRef.current?.setMaxCount(Number(maxCount)) }
+        if (maxCount !== null) { setDanmakuMaxCount(Number(maxCount)); engineRef.current?.setMaxActiveComments(Number(maxCount)) }
         const offset = await window.api.store.get('danmakuOffset')
         if (offset !== null) { const v = Number(offset); setDanmakuOffset(v); danmakuOffsetRef.current = v; engineRef.current?.setTimeOffset(v) }
+        // 修复 TS-4: 闭包 bug - 使用局部变量暂存加载的边界值，避免引用过期的 React state
+        // 修复前：setBoundary(v, danmakuBottomBoundary) 中 danmakuBottomBoundary 是闭包中的过期值（默认100）
+        let loadedTop = danmakuTopBoundary
+        let loadedBottom = danmakuBottomBoundary
+        const savedTopBoundary = await window.api.store.get('danmakuTopBoundary')
+        if (savedTopBoundary !== null) { loadedTop = Number(savedTopBoundary); setDanmakuTopBoundary(loadedTop) }
+        const savedBottomBoundary = await window.api.store.get('danmakuBottomBoundary')
+        if (savedBottomBoundary !== null) { loadedBottom = Number(savedBottomBoundary); setDanmakuBottomBoundary(loadedBottom) }
+        // 两个值都加载完成后统一调用一次 setBoundary，确保参数正确
+        engineRef.current?.setBoundary(loadedTop, loadedBottom)
         // 字幕设置持久化
         const savedSubBottom = await window.api.store.get('subtitleBottom')
         if (savedSubBottom !== null) setSubtitleBottom(Number(savedSubBottom))
@@ -683,58 +367,105 @@ function Player(): JSX.Element {
         if (savedSubFontSize !== null) setSubtitleFontSize(Number(savedSubFontSize))
         const savedSubLetterSpacing = await window.api.store.get('subtitleLetterSpacing')
         if (savedSubLetterSpacing !== null) setSubtitleLetterSpacing(Number(savedSubLetterSpacing))
-      } catch (err) { /* ignore */ }
+      } catch (err) {
+        // 修复 ARCH-2: 补全错误日志，避免吞掉配置加载失败问题
+        console.error('[Player:loadSettings] 配置加载失败:', err instanceof Error ? err.message : String(err))
+      }
     }
     loadSettings()
 
     const handleResize = (): void => engineRef.current?.resize()
     window.addEventListener('resize', handleResize)
-    return () => { window.removeEventListener('resize', handleResize); engineRef.current?.stop() }
-  }, [canvasRef.current])
+    return () => { window.removeEventListener('resize', handleResize); engineRef.current?.destroy() }
+  // 修复点 1.4: 禁止把 useRef.current 放进 useEffect 依赖数组（mutable，不会触发重渲染，只会造成每次渲染都重新初始化）
+  }, [])
 
   useEffect(() => {
-    // 只要有 localFile 或 seriesName 就尝试加载弹幕，itemName 可以是未知视频
-    if (!localFile && !seriesName && (!itemName || itemName === '未知视频')) return
+    console.log(`[Player:danmakuEffect] ==================== 弹幕加载Effect触发 ====================`)
+    console.log(`[Player:danmakuEffect] 依赖值: itemId="${itemId}", itemName="${itemName}", localFile="${localFile || 'none'}", seriesName="${seriesName || 'none'}"`)
+
+    if (!localFile && !seriesName && (!itemName || itemName === '未知视频')) {
+      console.log(`[Player:danmakuEffect] ⚠️ 跳过: 无有效匹配参数`)
+      return
+    }
+
+    danmakuRequestManager.cancel()
+
     engineRef.current?.clear()
     setCurrentDanmakuCount(0)
     setDanmakuLoading(true)
     setDanmakuError('')
 
-    if (localFile) {
-      window.api.danmaku.findLocalXml(localFile).then((xmlResult) => {
-        if (xmlResult.success && xmlResult.data) {
-          const data = xmlResult.data as { count: number; comments: DanmakuComment[]; source?: string }
-          engineRef.current?.loadComments(data.comments)
-          setCurrentDanmakuCount(data.count)
-          setDanmakuCountVisible(true)
-          setTimeout(() => setDanmakuCountVisible(false), 3000)
-          setDanmakuLoading(false)
-          return
-        }
-        tryDanmakuApiMatch()
-      }).catch(() => tryDanmakuApiMatch())
+    const matchTitle = (() => {
+      const base = seriesName || (itemName && itemName !== '未知视频' ? itemName : '')
+      const hint = itemName && itemName !== '未知视频' ? itemName : ''
+      if (base && hint && !hint.includes(base)) {
+        return base + ' ' + hint
+      }
+      return base || (localFile ? extractSeriesNameFromFilename(localFile.split(/[/\\]/).pop() || itemName) || itemName : itemName)
+    })()
+
+    console.log(`[Player:danmakuEffect] 构建匹配标题: "${matchTitle}"`)
+
+    // 修复 BUG-2: 调用 cleanTitleForMatch 清洗匹配标题，去除分辨率/编码等干扰信息
+    const cleanedTitle = cleanTitleForMatch(matchTitle)
+    console.log(`[Player:danmakuEffect] 清洗后匹配标题: "${cleanedTitle}"`)
+
+    const isValidTitle = cleanedTitle && cleanedTitle !== '未知视频' && cleanedTitle.trim().length > 0
+    if (!isValidTitle) {
+      console.log(`[Player:danmakuEffect] ⚠️ 跳过: 清洗后匹配标题无效`)
+      setDanmakuLoading(false)  // 修复 BUG-1: 确保 loading 状态重置
       return
     }
-    tryDanmakuApiMatch()
 
-    function tryDanmakuApiMatch(): void {
-      const matchTitle = seriesName || (localFile ? extractSeriesNameFromFilename(localFile.split(/[/\\]/).pop() || itemName) || itemName : itemName)
-      const title = cleanTitleForMatch(matchTitle)
-      if (!title) { setDanmakuLoading(false); return }
-      window.api.danmaku.match(matchTitle).then((result) => {
-        if (!result.success || !result.data) { setDanmakuError(result.error || '自动匹配失败'); setDanmakuLoading(false); return }
-        const match = result.data as { episodeId: number; animeTitle?: string; animeId?: number; source?: string }
-        if (match.animeId) { window.api.danmaku.prefetchSeries(match.animeId).catch(() => {}) }
-        window.api.danmaku.getComments(String(match.episodeId), match.source).then((commentResult) => {
-          if (commentResult.success && commentResult.data) {
-            const data = commentResult.data as { count: number; comments: DanmakuComment[] }
-            engineRef.current?.loadComments(data.comments)
-            setCurrentDanmakuCount(data.count)
+    const loadDanmaku = async (): Promise<void> => {
+      const log = (msg: string) => {
+        console.log(`[Player:danmakuEffect] ${msg}`)
+        window.api.log?.send?.('info', 'renderer', `[Player:danmakuEffect] ${msg}`)
+      }
+      log(`开始执行loadDanmaku`)
+      try {
+        log(`调用danmakuRequestManager.loadDanmaku("${cleanedTitle}", "${localFile || 'none'}")`)
+        const result = await danmakuRequestManager.loadDanmaku(cleanedTitle, localFile)
+        log(`loadDanmaku返回: ${result ? `成功，数量=${result.count}` : 'null'}`)
+        if (result) {
+          log(`✅ 弹幕加载成功，数量: ${result.count}, 来源: ${result.source || '未知'}`)
+          log(`调用engineRef.current?.loadComments(${result.count}条弹幕)`)
+          engineRef.current?.loadComments(result.comments)
+          setCurrentDanmakuCount(result.count)
+          if (result.count > 0) {
             setDanmakuCountVisible(true)
             setTimeout(() => setDanmakuCountVisible(false), 3000)
-          } else { setDanmakuError(commentResult.error || '获取弹幕失败') }
-        }).catch(() => setDanmakuError('获取弹幕失败')).finally(() => setDanmakuLoading(false))
-      }).catch(() => { setDanmakuError('自动匹配失败'); setDanmakuLoading(false) })
+          } else {
+            // 修复点 3.3: 成功但 0 条弹幕也要明确提示用户，不要静默“显示成功但一条都没有”
+            setDanmakuError('该集暂无弹幕，可尝试手动搜索')
+          }
+        } else {
+          log(`⚠️ 弹幕加载返回null (未找到匹配)`)
+          setDanmakuError('未找到匹配弹幕')
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        log(`❌ 弹幕加载异常: ${errMsg}`)
+        console.error(`[Player:danmakuEffect] ❌ 弹幕加载异常:`, err)
+        setDanmakuError('弹幕加载失败，请手动搜索')
+      } finally {
+        log(`设置danmakuLoading=false`)
+        setDanmakuLoading(false)
+      }
+    }
+
+    const delayMs = localFile ? 100 : 500
+    console.log(`[Player:danmakuEffect] 延迟 ${delayMs}ms 后触发加载`)
+
+    const timer = setTimeout(() => {
+      loadDanmaku()
+    }, delayMs)
+
+    return () => {
+      console.log(`[Player:danmakuEffect] 清理: 取消定时器和请求`)
+      clearTimeout(timer)
+      danmakuRequestManager.cancel()
     }
   }, [itemId, itemName, localFile, seriesName])
 
@@ -742,20 +473,16 @@ function Player(): JSX.Element {
     const next = !danmakuEnabled; setDanmakuEnabled(next)
     window.api.store.set('danmakuEnabled', next)
     next ? engineRef.current?.enable() : engineRef.current?.disable()
-    if (next) engineRef.current?.start()
   }
 
   const handleOpacityChange = (value: number): void => { setDanmakuOpacity(value); engineRef.current?.setOpacity(value); window.api.store.set('danmakuOpacity', value) }
   const handleFontSizeChange = (value: number): void => { setDanmakuFontSize(value); engineRef.current?.setFontSize(value); window.api.store.set('danmakuFontSize', value) }
   const handleSpeedChange = (value: number): void => { setDanmakuSpeed(value); engineRef.current?.setSpeed(value); window.api.store.set('danmakuSpeed', value) }
 
-  // 弹幕密度控制 - 简单滑块
   const handleDensityChange = (value: number): void => {
     setDanmakuMaxCount(value)
+    engineRef.current?.setMaxActiveComments(value)
     window.api.store.set('danmakuMaxCount', value)
-    if (engineRef.current) {
-      engineRef.current.setMaxCount(value)
-    }
   }
 
   // 弹幕时间偏移控制
@@ -764,6 +491,19 @@ function Player(): JSX.Element {
     danmakuOffsetRef.current = value
     engineRef.current?.setTimeOffset(value)
     window.api.store.set('danmakuOffset', value)
+  }
+
+  // 弹幕显示区域边界控制
+  const handleTopBoundaryChange = (value: number): void => {
+    setDanmakuTopBoundary(value)
+    engineRef.current?.setBoundary(value, danmakuBottomBoundary)
+    window.api.store.set('danmakuTopBoundary', value)
+  }
+
+  const handleBottomBoundaryChange = (value: number): void => {
+    setDanmakuBottomBoundary(value)
+    engineRef.current?.setBoundary(danmakuTopBoundary, value)
+    window.api.store.set('danmakuBottomBoundary', value)
   }
 
   const handleDanmakuSearch = async (keyword?: string): Promise<void> => {
@@ -795,11 +535,10 @@ function Player(): JSX.Element {
   const handleDanmakuSelect = async (ep: DanmakuSearchResult): Promise<void> => {
     closeAllPopups(); setSearchResults([]); setDanmakuLoading(true); setDanmakuError('')
     try {
-      const result = await window.api.danmaku.getComments(String(ep.episodeId))
-      if (result.success && result.data) {
-        const data = result.data as { count: number; comments: DanmakuComment[] }
-        engineRef.current?.loadComments(data.comments); setCurrentDanmakuCount(data.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000)
-      } else { setDanmakuError(result.error || '获取弹幕失败') }
+      const result = await danmakuRequestManager.getComments(String(ep.episodeId), ep.source)
+      if (result) {
+        engineRef.current?.loadComments(result.comments); setCurrentDanmakuCount(result.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000)
+      } else { setDanmakuError('获取弹幕失败') }
     } catch { setDanmakuError('获取弹幕失败') }
     setDanmakuLoading(false)
   }
@@ -808,19 +547,27 @@ function Player(): JSX.Element {
     if (!localFile) { showStatus('仅本地文件支持加载 XML 弹幕'); return }
     closeAllPopups(); setDanmakuLoading(true); setDanmakuError('')
     try {
-      const result = await window.api.danmaku.findLocalXml(localFile)
-      if (result.success && result.data) {
-        const data = result.data as { count: number; comments: DanmakuComment[]; source?: string }
+      console.log(`[Player:handleLoadLocalXml] 开始加载本地弹幕，文件: "${localFile}"`)
+      const xmlResult = await window.api.danmaku.findLocalXml(localFile)
+      if (xmlResult.success && xmlResult.data) {
+        const data = xmlResult.data as { count: number; comments: DanmakuComment[]; source?: string }
+        console.log(`[Player:handleLoadLocalXml] 本地弹幕加载成功，数量: ${data.count}，来源: ${data.source || '未知'}`)
         engineRef.current?.loadComments(data.comments); setCurrentDanmakuCount(data.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000); showStatus(`已加载本地弹幕: ${data.source || ''}`)
-      } else { setDanmakuError(result.error || '未找到本地弹幕 XML') }
-    } catch (err) { setDanmakuError(`本地 XML 加载失败: ${String(err)}`) }
+      } else {
+        console.log(`[Player:handleLoadLocalXml] 本地弹幕加载失败，错误: ${xmlResult.error || '未知'}`)
+        setDanmakuError(xmlResult.error || '未找到本地弹幕 XML')
+      }
+    } catch (err) {
+      console.error(`[Player:handleLoadLocalXml] 本地 XML 加载异常:`, err)
+      setDanmakuError(`本地 XML 加载失败: ${String(err)}`)
+    }
     setDanmakuLoading(false)
   }
 
   // ==================== 视频源 & 事件 ====================
 
   useEffect(() => {
-    setLoading(true); setError('')
+    playerActions.setLoading(true); playerActions.setError('')
     if (localFile) {
       window.api.file.getLocalFileUrl(localFile).then((result) => {
         if (result.success && result.data) {
@@ -832,33 +579,29 @@ function Player(): JSX.Element {
             return
           }
         }
-        setError('无法读取本地文件'); setLoading(false)
-      }).catch(() => { setError('无法读取本地文件'); setLoading(false) })
+        playerActions.setError('无法读取本地文件'); playerActions.setLoading(false)
+      }).catch(() => { playerActions.setError('无法读取本地文件'); playerActions.setLoading(false) })
       return
     }
-    if (!itemId) { setLoading(false); return }
+    if (!itemId) { playerActions.setLoading(false); return }
     window.api.jellyfin.getPlaybackUrl(itemId).then((result) => {
       if (result.success) {
         const data = result.data as { url?: string; subtitles?: { index: number; label: string; language: string; codec: string; url: string }[] }
         if (data?.url && videoRef.current) {
           const video = videoRef.current
-          // 清除旧字幕轨道（不再使用 track 元素，改用自定义渲染）
           const oldTracks = video.querySelectorAll('track')
           oldTracks.forEach(t => t.remove())
           const subs = data.subtitles || []
           setSubtitleTracks(subs)
-          // 确定默认字幕
           let defaultIdx = -1
           for (let i = 0; i < subs.length; i++) {
             const sub = subs[i]
             const isDefault = subs.length === 1 || sub.language === 'chi' || sub.language === 'zho' || sub.language === 'chs' || sub.language === 'cht'
             if (isDefault && defaultIdx === -1) defaultIdx = i
           }
-          // 加载视频（不等待字幕）
           video.src = data.url
           video.load()
           setSrcReady(true)
-          // 后台异步获取字幕内容，解析 VTT 存入 state
           if (subs.length > 0) {
             subs.forEach((sub, i) => {
               window.api.jellyfin.fetchSubtitle(sub.url).then((result) => {
@@ -869,7 +612,6 @@ function Player(): JSX.Element {
                     setActiveSubtitleIndex(i)
                     activeSubIdxRef.current = i
                   }
-                  // 存储 cues 到 ref 以便切换时使用
                   subtitleCuesRef.current[i] = cues
                 } else {
                   console.warn(`字幕加载失败: ${sub.label}`, result.error)
@@ -882,36 +624,43 @@ function Player(): JSX.Element {
           return
         }
       }
-      setError('获取播放地址失败'); setLoading(false)
-    }).catch((err) => { setError(`获取播放地址失败: ${String(err)}`); setLoading(false) })
-  }, [itemId, localFile])
+      playerActions.setError('获取播放地址失败'); playerActions.setLoading(false)
+    }).catch((err) => { playerActions.setError(`获取播放地址失败: ${String(err)}`); playerActions.setLoading(false) })
+  // 修复点 2.6: videoLoadKey 作为依赖，handleSwitchEpisode 递增后会重新触发此 Effect 重新加载 src
+  }, [itemId, localFile, videoLoadKey])
 
   useEffect(() => {
     const video = videoRef.current; if (!video) return
 
-    const onLoadedMetadata = (): void => {
-      setDuration(video.duration || 0); setLoading(false)
-      if (!hasResumedRef.current && resumePosRef.current > 0) { hasResumedRef.current = true; video.currentTime = resumePosRef.current }
-      video.play().then(() => setPlaying(true)).catch(() => {})
+    if (timeBusRef.current) {
+      timeBusRef.current.destroy()
     }
-    const onPlay = (): void => setPlaying(true)
-    const onPause = (): void => setPlaying(false)
-    const onEnded = (): void => setPlaying(false)
-    const onTimeUpdate = (): void => {
-      const ct = video.currentTime
-      // 使用 ref 而非 state 做比较，避免闭包陈旧
-      if (Math.abs(ct - currentTimeRef.current) > 0.5) setCurrentTime(ct)
-      currentTimeRef.current = ct
-      if (video.buffered.length > 0) setBuffered(video.buffered.end(video.buffered.length - 1))
-      // 自定义字幕：查找当前时间对应的 cue
+
+    timeBusRef.current = createMediaTimeBus()
+    timeBusRef.current.attachVideo(video)
+
+    // 性能优化：弹幕引擎使用 RAF 订阅，每帧更新不经过 React state，避免 60fps 重渲染
+    const unsubRAF = timeBusRef.current.subscribeRAF((time, playbackRate) => {
+      if (danmakuEnabled && engineRef.current) {
+        engineRef.current.update(time, playbackRate)
+      }
+    })
+
+    // UI 状态更新使用常规订阅（store 层已做节流，约 200ms 通知一次）
+    const unsubscribe = timeBusRef.current.subscribe((time, state) => {
+      playerActions.setCurrentTime(time)
+      playerActions.setDuration(state.duration)
+      playerActions.setPlaybackRate(state.playbackRate)
+      playerActions.setIsPlaying(state.isPlaying)
+      playerActions.setBuffered(state.buffered)
+
       const cues = subtitleCuesRef.current[activeSubIdxRef.current]
       if (cues && cues.length > 0) {
-        // 二分查找当前字幕
         let lo = 0, hi = cues.length - 1, found = -1
         while (lo <= hi) {
           const mid = (lo + hi) >>> 1
-          if (ct >= cues[mid].start && ct < cues[mid].end) { found = mid; break }
-          if (ct < cues[mid].start) hi = mid - 1
+          if (time >= cues[mid].start && time < cues[mid].end) { found = mid; break }
+          if (time < cues[mid].start) hi = mid - 1
           else lo = mid + 1
         }
         const newText = found >= 0 ? cues[found].text : ''
@@ -920,52 +669,55 @@ function Player(): JSX.Element {
           setCurrentSubtitleText(newText)
         }
       }
+    })
+
+    const onLoadedMetadata = (): void => {
+      const duration = video.duration || 0
+      playerActions.setDuration(duration)
+      timeBusRef.current?.updateDuration(duration)
+      playerActions.setLoading(false)
+      if (!hasResumedRef.current && resumePosRef.current > 0) {
+        hasResumedRef.current = true
+        video.currentTime = resumePosRef.current
+      }
+      video.play().then(() => {
+        playerActions.setIsPlaying(true)
+      }).catch(() => {})
     }
-    const onWaiting = (): void => setLoading(true)
-    const onCanPlay = (): void => setLoading(false)
+
+    const onWaiting = (): void => playerActions.setLoading(true)
+    const onCanPlay = (): void => playerActions.setLoading(false)
     const onError = (): void => {
       const errMsg = (() => {
         switch (video.error?.code) {
           case 1: return '视频加载中止'; case 2: return '网络错误'; case 3: return '视频解码失败'; case 4: return '视频源不可用'; default: return '视频加载失败'
         }
-      })(); setError(errMsg); setLoading(false)
+      })()
+      playerActions.setError(errMsg)
+      playerActions.setLoading(false)
     }
-    const onVolumeChange = (): void => { setVolume(Math.round(video.volume * 100)) }
+    const onVolumeChange = (): void => playerActions.setVolume(Math.round(video.volume * 100))
 
     video.addEventListener('loadedmetadata', onLoadedMetadata)
-    video.addEventListener('play', onPlay)
-    video.addEventListener('pause', onPause)
-    video.addEventListener('ended', onEnded)
-    video.addEventListener('timeupdate', onTimeUpdate)
     video.addEventListener('waiting', onWaiting)
     video.addEventListener('canplay', onCanPlay)
     video.addEventListener('error', onError)
     video.addEventListener('volumechange', onVolumeChange)
 
     return () => {
+      unsubscribe()
+      unsubRAF()
+      timeBusRef.current?.destroy()
+      timeBusRef.current = null
       video.removeEventListener('loadedmetadata', onLoadedMetadata)
-      video.removeEventListener('play', onPlay)
-      video.removeEventListener('pause', onPause)
-      video.removeEventListener('ended', onEnded)
-      video.removeEventListener('timeupdate', onTimeUpdate)
       video.removeEventListener('waiting', onWaiting)
       video.removeEventListener('canplay', onCanPlay)
       video.removeEventListener('error', onError)
       video.removeEventListener('volumechange', onVolumeChange)
     }
-  }, [srcReady, danmakuEnabled])
+  }, [srcReady])
 
-  useEffect(() => {
-    if (!danmakuEnabled || !engineRef.current) return
-    let animId = 0
-    const loop = (): void => {
-      const video = videoRef.current
-      if (video && !video.paused && engineRef.current) engineRef.current.update(video.currentTime)
-      engineRef.current?.draw(); animId = requestAnimationFrame(loop)
-    }
-    animId = requestAnimationFrame(loop)
-    return () => cancelAnimationFrame(animId)
-  }, [danmakuEnabled, srcReady])
+  
 
   // ==================== 控制 ====================
 
@@ -979,6 +731,8 @@ function Player(): JSX.Element {
     const rect = e.currentTarget.getBoundingClientRect()
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
     video.currentTime = ratio * duration
+    // 性能优化：seek 后强制立即通知 UI，确保进度条即时响应
+    playerActions.forceNotifyCurrentTime()
   }
 
   // 字幕轨道选择（自定义渲染，不使用 textTracks）
@@ -1006,7 +760,8 @@ function Player(): JSX.Element {
 
   const handlePlaybackRateChange = (rate: number): void => {
     const video = videoRef.current; if (!video) return
-    video.playbackRate = rate; setPlaybackRate(rate)
+    video.playbackRate = rate
+    playerActions.setPlaybackRate(rate)
     setContextMenu({ x: 0, y: 0, visible: false })
     setSpeedToast(`${rate}x`); setTimeout(() => setSpeedToast(''), 2000)
   }
@@ -1037,54 +792,94 @@ function Player(): JSX.Element {
   const handleShowInfo = async (): Promise<void> => {
     setContextMenu({ x: 0, y: 0, visible: false })
     if (!itemId) return; setItemInfoLoading(true); setInfoOverlay(true)
-    try { const result = await window.api.jellyfin.getItemDetails(itemId); if (result.success) setItemInfo(result.data as Record<string, unknown>) } catch { /* ignore */ }
+    try {
+      const result = await window.api.jellyfin.getItemDetails(itemId)
+      // 修复点 1.16: JellyfinItem 是 interface（无索引签名），不能直接 as Record<string,unknown>，要先 as unknown 中转
+      if (result.success) setItemInfo(result.data as unknown as Record<string, unknown>)
+    } catch { /* ignore */ }
     setItemInfoLoading(false)
   }
   const handleCloseInfo = (): void => { setInfoOverlay(false); setItemInfo(null) }
 
-  const fd = (s) => { const h=Math.floor(s/3600);const m=Math.floor((s%3600)/60);const sec=Math.floor(s%60);return h>0?h+":"+String(m).padStart(2,"0")+":"+String(sec).padStart(2,"0"):m+":"+String(sec).padStart(2,"0") }
-  const fb = (b) => b>=1e9?(b/1e9).toFixed(1)+" GB":b>=1e6?(b/1e6).toFixed(1)+" MB":b>=1e3?(b/1e3).toFixed(1)+" KB":b+" B"
+  // 修复点 1.5: 补齐 fd / fb 的参数类型与返回值类型，消除严格模式下 implicit any
+  const fd = (s: number): string => {
+    const safe = isFinite(s) ? Math.max(0, s) : 0
+    const h = Math.floor(safe / 3600)
+    const m = Math.floor((safe % 3600) / 60)
+    const sec = Math.floor(safe % 60)
+    return h > 0
+      ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+      : `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+  }
+  const fb = (b: number): string => {
+    const safe = isFinite(b) ? Math.max(0, b) : 0
+    return safe >= 1e9 ? `${(safe / 1e9).toFixed(1)} GB`
+      : safe >= 1e6 ? `${(safe / 1e6).toFixed(1)} MB`
+      : safe >= 1e3 ? `${(safe / 1e3).toFixed(1)} KB`
+      : `${safe} B`
+  }
 
-  const handleVideoSourceInfo = async () => {
+  const handleVideoSourceInfo = async (): Promise<void> => {
     setContextMenu({ x: 0, y: 0, visible: false })
-    const info = {}
+    const info: Record<string, string> = {}
     const v = videoRef.current
     if (v) {
-      info["视频分辨率"] = (v.videoWidth || "--") + " × " + (v.videoHeight || "--")
+      info["视频分辨率"] = `${v.videoWidth || '--'} × ${v.videoHeight || '--'}`
       info["时长"] = fd(v.duration || 0)
       const q = v.getVideoPlaybackQuality?.()
       if (q) {
-        info["总帧数"] = String(q.totalVideoFrames || "--")
-        info["丢帧"] = String(q.droppedVideoFrames || "--")
+        info["总帧数"] = String(q.totalVideoFrames || '--')
+        info["丢帧"] = String(q.droppedVideoFrames || '--')
       }
     }
     if (itemId) {
       try {
         const r = await window.api.jellyfin.getItemDetails(itemId)
         if (r.success) {
-          const d = r.data; const ms = d.MediaSources?.[0]
+          // 修复点 1.16: JellyfinItem → Record 需要先转 unknown
+          const d = r.data as unknown as Record<string, unknown>
+          type MediaStream = {
+            Type?: string
+            DisplayTitle?: string
+            Codec?: string
+            RealFrameRate?: number
+            BitRate?: number
+            BitDepth?: number
+            PixelFormat?: string
+            VideoRange?: string
+            HDRType?: string
+            Channels?: number
+            SampleRate?: number
+            Language?: string
+          }
+          const ms = (d.MediaSources as MediaStream[] | undefined)?.[0]
           if (ms) {
-            if (ms.Container) info["封装格式"] = ms.Container
-            if (ms.Bitrate) info["码率"] = (ms.Bitrate/1e6).toFixed(1) + " Mbps"
-            if (ms.Size) info["文件大小"] = fb(ms.Size)
-            const vs = ms.MediaStreams?.find(s => s.Type==="Video")
+            const anyMs = ms as Record<string, unknown>
+            if (anyMs.Container) info["封装格式"] = String(anyMs.Container)
+            if (anyMs.Bitrate) info["码率"] = `${(Number(anyMs.Bitrate) / 1e6).toFixed(1)} Mbps`
+            if (anyMs.Size) info["文件大小"] = fb(Number(anyMs.Size))
+            const streams = (anyMs.MediaStreams as MediaStream[] | undefined) || []
+            const vs = streams.find(s => s.Type === "Video")
             if (vs) {
               info["视频编码"] = vs.DisplayTitle || vs.Codec || "--"
-              if (vs.RealFrameRate) info["帧率"] = vs.RealFrameRate.toFixed(2) + " fps"
-              if (vs.BitRate) info["视频码率"] = (vs.BitRate/1e6).toFixed(1) + " Mbps"
-              if (vs.BitDepth) info["色深"] = vs.BitDepth + " bit"
+              if (vs.RealFrameRate) info["帧率"] = `${vs.RealFrameRate.toFixed(2)} fps`
+              if (vs.BitRate) info["视频码率"] = `${(vs.BitRate / 1e6).toFixed(1)} Mbps`
+              if (vs.BitDepth) info["色深"] = `${vs.BitDepth} bit`
               if (vs.PixelFormat) info["像素格式"] = vs.PixelFormat
-              if (vs.VideoRange==="HDR"||vs.HDRType) info["HDR"] = vs.HDRType||"HDR"
+              if (vs.VideoRange === "HDR" || vs.HDRType) info["HDR"] = vs.HDRType || "HDR"
             }
-            const ast = ms.MediaStreams?.filter(s => s.Type==="Audio")||[]
-            ast.forEach((a,i) => {
-              const p = ast.length>1?"音蹨"+(i+1):"音频"
-              info[p+"编码"] = a.DisplayTitle || a.Codec || "--"
-              if (a.Channels) info[p+"声道"] = a.Channels + "ch"
-              if (a.SampleRate) info[p+"采样率"] = (a.SampleRate/1000).toFixed(1) + " kHz"
+            const ast = streams.filter(s => s.Type === "Audio") || []
+            ast.forEach((a, i) => {
+              // 修复点 1.7: 错别字 "音蹨" → "音频"
+              const p = ast.length > 1 ? `音频${i + 1}` : "音频"
+              info[`${p}编码`] = a.DisplayTitle || a.Codec || "--"
+              if (a.Channels) info[`${p}声道`] = `${a.Channels}ch`
+              if (a.SampleRate) info[`${p}采样率`] = `${(a.SampleRate / 1000).toFixed(1)} kHz`
             })
-            const subs = ms.MediaStreams?.filter(s => s.Type==="Subtitle")||[]
-            if (subs.length) info["字幕"] = subs.map(s => s.DisplayTitle||s.Language||s.Codec).join(", ")
+            const subs = streams.filter(s => s.Type === "Subtitle") || []
+            if (subs.length) {
+              info["字幕"] = subs.map(s => s.DisplayTitle || s.Language || s.Codec || "--").join(", ")
+            }
           }
         }
       } catch { /* ignore */ }
@@ -1096,8 +891,6 @@ function Player(): JSX.Element {
   // ==================== 键盘 ====================
 
   // 切换剧集
-  const [videoLoadKey, setVideoLoadKey] = useState(0)
-  
   const handleSwitchEpisode = (newIndex: number): void => {
     console.log('[EpisodeSwitch] handleSwitchEpisode called with newIndex=%d, episodeList.length=%d, currentEpisodeIndex=%d', newIndex, episodeList.length, currentEpisodeIndex)
     
@@ -1131,10 +924,10 @@ function Player(): JSX.Element {
     
     // 重置状态
     setCurrentEpisodeIndex(newIndex)
-    setCurrentTime(0)
-    setPlaying(false)
-    setError('')
-    setLoading(true)
+    playerActions.setCurrentTime(0)
+    playerActions.setIsPlaying(false)
+    playerActions.setError('')
+    playerActions.setLoading(true)
   }
 
   // P2: 截图
@@ -1215,8 +1008,8 @@ function Player(): JSX.Element {
       case 'ArrowLeft': e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - (e.ctrlKey ? 30 : 5)); showStatus(e.ctrlKey ? '后退 30s' : '后退 5s'); break
       case 'ArrowRight': e.preventDefault(); video.currentTime = Math.min(video.duration, video.currentTime + (e.ctrlKey ? 30 : 5)); showStatus(e.ctrlKey ? '前进 30s' : '前进 5s'); break
       case ' ': e.preventDefault(); handlePlayPause(); break
-      case 'ArrowUp': e.preventDefault(); video.volume = Math.min(1, video.volume + 0.1); setVolume(Math.round(video.volume * 100)); break
-      case 'ArrowDown': e.preventDefault(); video.volume = Math.max(0, video.volume - 0.1); setVolume(Math.round(video.volume * 100)); break
+      case 'ArrowUp': e.preventDefault(); video.volume = Math.min(1, video.volume + 0.1); playerActions.setVolume(Math.round(video.volume * 100)); break
+      case 'ArrowDown': e.preventDefault(); video.volume = Math.max(0, video.volume - 0.1); playerActions.setVolume(Math.round(video.volume * 100)); break
       case 'f': case 'F': e.preventDefault(); handleFullscreen(); break
       case 's': case 'S': e.preventDefault(); handleScreenshot(); break
       case 'p': case 'P': e.preventDefault(); window.api.window.alwaysOnTop().then(result => { if (result.success) { setAlwaysOnTop(!!result.data); showStatus(result.data ? '窗口置顶' : '取消置顶') } }).catch(() => {}); break
@@ -1247,10 +1040,11 @@ function Player(): JSX.Element {
   const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0
 
   return (
-    <div ref={containerRef} className="h-full flex flex-col bg-black relative outline-none" onKeyDown={handleKeyDown} tabIndex={0}>
+    // 修复全屏黑条: 容器改为纯 relative，子元素均 absolute 定位，控件悬浮覆盖视频
+    <div ref={containerRef} className="h-full relative bg-black outline-none" onKeyDown={handleKeyDown} tabIndex={0}>
 
-      {/* 视频区域 */}
-      <div className="flex-1 relative bg-black overflow-hidden" onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
+      {/* 视频区域 — 全屏铺满容器 */}
+      <div className="absolute inset-0 bg-black overflow-hidden" onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
         {/* 顶部信息栏 */}
         <div className={`absolute top-0 left-0 right-0 z-30 transition-opacity duration-300 ease-in-out ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
           <div className="player-glass-bar bg-gradient-to-b from-black/60 to-black/30 px-4 py-3 flex items-center gap-3 border-none">
@@ -1333,7 +1127,7 @@ function Player(): JSX.Element {
 
       {/* 弹幕搜索面板 */}
       {searchOpen && (
-        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="danmaku-search-popup w-72 player-glass-panel z-50 p-4">
+        <div style={{ position: 'fixed', bottom: '72px', right: '20px' }} className="danmaku-search-popup w-72 player-glass-panel z-50 p-4">
           <div className="flex gap-2 mb-3">
             <input type="text" value={searchKeyword} onChange={(e) => setSearchKeyword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleDanmakuSearch() }} placeholder="搜索弹幕" className="flex-1 bg-white/5 border border-white/5 rounded-md px-3 py-2 text-xs text-white/90 placeholder-white/25 focus:outline-none focus:border-[#8b82f6]/40 focus:bg-white/8" autoFocus />
             <button onClick={() => handleDanmakuSearch()} disabled={searchLoading} className="px-3 py-2 bg-[#8b82f6] hover:bg-[#7a72e5] rounded-md text-xs font-medium text-white disabled:opacity-40 transition-colors">{searchLoading ? '...' : '搜索'}</button>
@@ -1369,7 +1163,7 @@ function Player(): JSX.Element {
 
       {/* 弹幕设置面板 */}
       {settingsOpen && (
-        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="danmaku-settings-popup w-60 player-glass-panel z-50 p-5">
+        <div style={{ position: 'fixed', bottom: '72px', right: '20px' }} className="danmaku-settings-popup w-60 player-glass-panel z-50 p-5">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-xs font-medium">弹幕设置</h3>
             <button onClick={closeAllPopups} className="text-white/30 hover:text-white/80 transition-colors text-sm">&times;</button>
@@ -1433,13 +1227,73 @@ function Player(): JSX.Element {
                 </button>
               )}
             </div>
+            {/* 弹幕显示区域边界 */}
+            <div>
+              <div className="flex justify-between text-[10px] text-white/35 mb-1.5">
+                <span>上边界</span>
+                <span>{danmakuTopBoundary}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={danmakuTopBoundary}
+                onChange={(e) => handleTopBoundaryChange(Math.min(parseInt(e.target.value), danmakuBottomBoundary - 1))}
+                className="w-full"
+              />
+              <div className="flex justify-between text-[9px] text-white/25 mt-1">
+                <span>顶部</span>
+                <span>向下</span>
+              </div>
+            </div>
+            <div>
+              <div className="flex justify-between text-[10px] text-white/35 mb-1.5">
+                <span>下边界</span>
+                <span>{danmakuBottomBoundary}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={danmakuBottomBoundary}
+                onChange={(e) => handleBottomBoundaryChange(Math.max(parseInt(e.target.value), danmakuTopBoundary + 1))}
+                className="w-full"
+              />
+              <div className="flex justify-between text-[9px] text-white/25 mt-1">
+                <span>向上</span>
+                <span>底部</span>
+              </div>
+            </div>
+            {/* 快捷预设按钮 */}
+            <div className="flex gap-1.5 mt-1">
+              <button
+                onClick={() => { handleTopBoundaryChange(0); handleBottomBoundaryChange(100) }}
+                className="flex-1 text-[9px] py-1.5 rounded bg-white/5 hover:bg-white/10 text-white/60 hover:text-white/80 transition-colors"
+              >
+                全屏
+              </button>
+              <button
+                onClick={() => { handleTopBoundaryChange(0); handleBottomBoundaryChange(50) }}
+                className="flex-1 text-[9px] py-1.5 rounded bg-white/5 hover:bg-white/10 text-white/60 hover:text-white/80 transition-colors"
+              >
+                上半屏
+              </button>
+              <button
+                onClick={() => { handleTopBoundaryChange(50); handleBottomBoundaryChange(100) }}
+                className="flex-1 text-[9px] py-1.5 rounded bg-white/5 hover:bg-white/10 text-white/60 hover:text-white/80 transition-colors"
+              >
+                下半屏
+              </button>
+            </div>
           </div>
         </div>
       )}
 
       {/* 字幕设置面板 */}
       {subtitleSettingsOpen && (
-        <div style={{ position: 'fixed', bottom: '80px', right: '20px' }} className="subtitle-settings-popup w-60 player-glass-panel z-50 p-5">
+        <div style={{ position: 'fixed', bottom: '72px', right: '20px' }} className="subtitle-settings-popup w-60 player-glass-panel z-50 p-5">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-xs font-medium">字幕设置</h3>
             <button onClick={closeAllPopups} className="text-white/30 hover:text-white/80 transition-colors text-sm">&times;</button>
@@ -1503,14 +1357,18 @@ function Player(): JSX.Element {
                 <div className="w-5 h-5 border border-[#8b82f6] border-t-transparent rounded-full animate-spin" />
               </div>
             ) : itemInfo ? (
+              // 修复点 1.14: Record<string,unknown> 里的所有属性都是 unknown，渲染前必须显式 String() 化，
+              // 消除 Type 'unknown' is not assignable to type 'ReactNode'
               <div className="space-y-4 text-xs">
-                <div className="flex justify-between"><span className="text-white/35">片名</span><span className="text-white/80">{String(itemInfo.Name || '-')}</span></div>
-                {itemInfo.OriginalTitle && <div className="flex justify-between"><span className="text-white/35">原名</span><span className="text-white/50">{String(itemInfo.OriginalTitle)}</span></div>}
-                <div className="flex justify-between"><span className="text-white/35">年份</span><span className="text-white/50">{itemInfo.ProductionYear || '-'}</span></div>
-                {itemInfo.Genres && (itemInfo.Genres as string[]).length > 0 && <div className="flex justify-between"><span className="text-white/35">类型</span><span className="text-white/50">{(itemInfo.Genres as string[]).join(' / ')}</span></div>}
+                <div className="flex justify-between"><span className="text-white/35">片名</span><span className="text-white/80">{String(itemInfo.Name ?? '-')}</span></div>
+                {/* 修复点 1.17: strict 模式下 unknown 不能作为条件表达式，否则整个 && 表达式类型=unknown 无法作为 ReactNode。
+                    先显式转为 boolean（!!）或做 nullish 比较。 */}
+                {!!itemInfo.OriginalTitle && <div className="flex justify-between"><span className="text-white/35">原名</span><span className="text-white/50">{String(itemInfo.OriginalTitle)}</span></div>}
+                <div className="flex justify-between"><span className="text-white/35">年份</span><span className="text-white/50">{String(itemInfo.ProductionYear ?? '-')}</span></div>
+                {Array.isArray(itemInfo.Genres) && (itemInfo.Genres as unknown[]).length > 0 && <div className="flex justify-between"><span className="text-white/35">类型</span><span className="text-white/50">{(itemInfo.Genres as unknown[]).map((g) => String(g)).join(' / ')}</span></div>}
                 <div className="flex justify-between"><span className="text-white/35">时长</span><span className="text-white/50">{itemInfo.RunTimeTicks ? formatTime((Number(itemInfo.RunTimeTicks) / 10000000)) : '-'}</span></div>
-                {itemInfo.CommunityRating && <div className="flex justify-between"><span className="text-white/35">评分</span><span className="text-[#8b82f6] font-medium">{String(itemInfo.CommunityRating)}</span></div>}
-                {itemInfo.Overview && <div><div className="text-white/35 mb-2">简介</div><p className="text-white/50 leading-relaxed">{String(itemInfo.Overview)}</p></div>}
+                {itemInfo.CommunityRating != null && <div className="flex justify-between"><span className="text-white/35">评分</span><span className="text-[#8b82f6] font-medium">{String(itemInfo.CommunityRating)}</span></div>}
+                {itemInfo.Overview != null && <div><div className="text-white/35 mb-2">简介</div><p className="text-white/50 leading-relaxed">{String(itemInfo.Overview)}</p></div>}
               </div>
             ) : <p className="text-xs text-white/25 text-center py-10">无法获取影片信息</p>}
           </div>
@@ -1537,11 +1395,11 @@ function Player(): JSX.Element {
           </div>
         </div>
       )}
-      {/* 控制栏 — 固定高度，用 opacity + pointer-events 隐藏，避免 flex 布局抖动 */}
-      <div className={`player-glass-bar h-16 flex items-center px-5 gap-6 shrink-0 relative z-20 transition-opacity duration-300 ease-in-out ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onMouseMove={handleMouseMove}>
+      {/* 控制栏 — 悬浮在视频底部，不占据固定高度，修复全屏黑条 */}
+      <div className={`absolute bottom-0 left-0 right-0 player-glass-bar h-16 flex items-center px-5 gap-6 z-20 transition-opacity duration-300 ease-in-out ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onMouseMove={handleMouseMove}>
         {/* 播放/暂停 */}
-        <button onClick={handlePlayPause} className="glass-btn-sm text-white/80 hover:text-white" title={playing ? '暂停' : '播放'}>
-          {playing ? (
+        <button onClick={handlePlayPause} className="glass-btn-sm text-white/80 hover:text-white" title={isPlaying ? '暂停' : '播放'}>
+          {isPlaying ? (
             <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
           ) : (
             <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg>
@@ -1771,7 +1629,7 @@ function Player(): JSX.Element {
                 value={volume}
                 onChange={(e) => {
                   const v = Number(e.target.value)
-                  setVolume(v)
+                  playerActions.setVolume(v)
                   const video = videoRef.current
                   if (video) { video.volume = v / 100; video.muted = v === 0 }
                 }}
@@ -1782,7 +1640,7 @@ function Player(): JSX.Element {
               <button
                 onClick={() => {
                   const video = videoRef.current; if (!video) return
-                  const muted = !video.muted; video.muted = muted; setVolume(muted ? 0 : Math.round(video.volume * 100))
+                  const muted = !video.muted; video.muted = muted; playerActions.setVolume(muted ? 0 : Math.round(video.volume * 100))
                 }}
                 className="text-[10px] text-white/40 hover:text-white/80 transition-colors"
               >

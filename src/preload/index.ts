@@ -28,9 +28,9 @@ const api: Api = {
     isAvailable: () => ipcRenderer.invoke('mpv:is-available'),
     embed: (x: number, y: number, width: number, height: number) => ipcRenderer.invoke('mpv:embed', x, y, width, height),
     updateEmbed: (x: number, y: number, width: number, height: number) => ipcRenderer.invoke('mpv:update-embed', x, y, width, height),
-    onEvent: (callback: (event: string, data: unknown) => void) => {
+    onEvent: ((callback: (event: string, data: unknown) => void) => {
       ipcRenderer.on('mpv:event', (_event, msg) => callback(msg.event, msg.data))
-    },
+    }) as Api['mpv']['onEvent'],
     offEvent: (): void => {
       ipcRenderer.removeAllListeners('mpv:event')
     }
@@ -38,7 +38,7 @@ const api: Api = {
 
   // 播放历史
   history: {
-    save: (item: Record<string, unknown>) => ipcRenderer.invoke('history:save', item),
+    save: (item: unknown) => ipcRenderer.invoke('history:save', item as import('../shared/preload-types').PlayHistoryItem),
     list: () => ipcRenderer.invoke('history:list'),
     delete: (itemId: string) => ipcRenderer.invoke('history:delete', itemId),
     clear: () => ipcRenderer.invoke('history:clear')
@@ -84,14 +84,20 @@ const api: Api = {
     search: (keyword: string) => ipcRenderer.invoke('danmaku:search', keyword),
     getComments: (commentId: string, source?: string) =>
       ipcRenderer.invoke('danmaku:get-comments', commentId, source),
-    getSegmentComments: (params: Record<string, unknown>) => ipcRenderer.invoke('danmaku:get-segment-comments', params),
+    getSegmentComments: (params: unknown) => ipcRenderer.invoke('danmaku:get-segment-comments', params),
     prefetchSeries: (animeId: number) => ipcRenderer.invoke('danmaku:prefetch-series', animeId),
     getConfig: () => ipcRenderer.invoke('danmaku:get-config'),
     setConfig: (config: { primary?: string; mirrors?: string[]; appId?: string; appSecret?: string }) =>
       ipcRenderer.invoke('danmaku:set-config', config),
     testApi: (url: string) => ipcRenderer.invoke('danmaku:test-api', url),
     parseLocalXml: (xmlPath: string) => ipcRenderer.invoke('danmaku:parse-local-xml', xmlPath),
-    findLocalXml: (videoPath: string) => ipcRenderer.invoke('danmaku:find-local-xml', videoPath)
+    findLocalXml: (videoPath: string) => ipcRenderer.invoke('danmaku:find-local-xml', videoPath),
+    // 预下载弹幕到本地缓存
+    downloadDanmaku: (title: string) => ipcRenderer.invoke('danmaku:download', title),
+    // 获取已缓存的本地弹幕列表
+    getLocalDanmakuList: () => ipcRenderer.invoke('danmaku:local-list'),
+    // 删除本地弹幕缓存
+    deleteLocalDanmaku: (episodeId: number) => ipcRenderer.invoke('danmaku:local-delete', episodeId)
   },
 
   // 本地文件
@@ -121,7 +127,7 @@ const api: Api = {
   // 配置存储
   store: {
     get: (key: string) => ipcRenderer.invoke('store:get', key),
-    set: (key: string, value: StoreValue) => ipcRenderer.invoke('store:set', key, value),
+    set: (key: string, value: unknown) => ipcRenderer.invoke('store:set', key, value),
     delete: (key: string) => ipcRenderer.invoke('store:delete', key)
   },
 

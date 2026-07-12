@@ -28,9 +28,9 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('[ErrorBoundary] Caught render error:', error, info.componentStack)
-    // 可选：上报到日志系统
+    // 修复点 1.9: 调用实际存在的 log.send(level, source, ...args) 接口
     try {
-      window.api?.log?.error?.('renderer', `ErrorBoundary: ${error.message}\n${info.componentStack}`)
+      void window.api?.log?.send?.('error', 'renderer', `ErrorBoundary: ${error.message}\n${info.componentStack ?? ''}`)
     } catch { /* 日志不可用时静默 */ }
   }
 

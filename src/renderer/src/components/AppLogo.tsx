@@ -1,6 +1,9 @@
+import type { ReactElement } from 'react'
 import { motion } from 'framer-motion'
 
-function AppLogo(): JSX.Element {
+// 修复点 1.18: JSX.Element 来自 @types/react，jsx runtime 模式下文件里依然要显式 import 对应类型。
+// 用 ReactElement 是 React 官方推荐的 JSX.Element 替代品。
+function AppLogo(): ReactElement {
   return (
     <div className="flex items-center gap-2 select-none">
       {/* 玻璃质感播放按钮 */}

@@ -1,11 +1,18 @@
 {
   "compilerOptions": {
     "composite": true,
+    // 修复点 1.12: 升级 target/lib 到 ES2020，解决：
+    //   - main.tsx 里的 if (isProd) { function forwardLog(...){...} } 块级函数声明需 ES6+
+    //   - apiCache 里的 for-of Map key 迭代
+    //   - 现代 JS 特性无需降级
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
+    "downlevelIteration": true,
     "outDir": "./out",
     "declaration": true,
     "strict": true,
@@ -13,8 +20,7 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/renderer/src/*"]
-    },
-    "types": ["electron-vite/renderer"]
+    }
   },
-  "include": ["src/renderer/src/**/*"]
+  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/shared/**/*.ts"]
 }

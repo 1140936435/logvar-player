@@ -1,147 +1,25 @@
-/// <reference types="electron-vite/renderer" />
+/// <reference types="react" />
 
-// Store value types
-type StoreValue = string | number | boolean | Record<string, unknown> | unknown[] | null
+// 修复点 1.8: 消除 WindowApi vs Api 双份声明冲突，以 shared/preload-types.ts 里的 Api 为唯一真源
+// 修复点 1.1: 移除不存在的 electron-vite/renderer 三斜线引用
 
-interface JellyfinConnectResult {
-  success: boolean
-  data?: unknown
-  error?: string
-}
+import type { Api } from '../../shared/preload-types'
 
-interface ApiResponse {
-  success: boolean
-  data?: unknown
-  error?: string
-}
-
-interface DanmakuConfig {
-  primary: string
-  mirrors: string[]
-}
-
-interface DanmakuTestResult {
-  success: boolean
-  error?: string
-  detail?: string
-  elapsed: number
-  animeCount?: number
-  epCount?: number
-}
-
-interface VideoInfoResponse {
-  success: boolean
-  data?: {
-    format: string
-    duration: number
-    size: number
-    bitRate: number
-    video: {
-      codec: string
-      width: number
-      height: number
-      frameRate: string
-      bitRate: number
-      profile: string
-      level: string
-    }
-    audio: {
-      codec: string
-      sampleRate: number
-      channels: number
-      channelLayout: string
-      bitRate: number
-    }
-  }
-  error?: string
-}
-
-interface PlayHistoryItem {
-  itemId: string
-  name: string
-  duration: number
-  position: number
-  posterUrl: string
-  watchedAt: number
-  localFile?: string
-  baseUrl?: string
-  seriesName?: string
-}
-
-interface WindowApi {
-  mpv: {
-    play: (filePath: string) => Promise<ApiResponse>
-    stop: () => Promise<ApiResponse>
-    pause: () => Promise<ApiResponse>
-    resume: () => Promise<ApiResponse>
-    seek: (position: number) => Promise<ApiResponse>
-    setVolume: (volume: number) => Promise<ApiResponse>
-    setSpeed: (speed: number) => Promise<ApiResponse>
-    toggleFullscreen: () => Promise<ApiResponse>
-    onEvent: (callback: (event: string, data: unknown) => void) => void
-  }
-  history: {
-    save: (item: PlayHistoryItem) => Promise<ApiResponse>
-    list: () => Promise<ApiResponse>
-    delete: (itemId: string) => Promise<ApiResponse>
-    clear: () => Promise<ApiResponse>
-  }
-  jellyfin: {
-    connect: (url: string, token: string) => Promise<JellyfinConnectResult>
-    getLibraries: () => Promise<ApiResponse>
-    getItems: (parentId: string, startIndex?: number, limit?: number) => Promise<ApiResponse>
-    getChildren: (parentId: string) => Promise<ApiResponse>
-    search: (query: string) => Promise<ApiResponse>
-    getItemDetails: (itemId: string) => Promise<ApiResponse>
-    getPlaybackUrl: (itemId: string) => Promise<ApiResponse>
-    reportProgress: (itemId: string, position: number, isPaused: boolean) => Promise<ApiResponse>
-    toggleFavorite: (itemId: string) => Promise<ApiResponse>
-    getEpisodes: (seriesId: string, seasonId?: string) => Promise<ApiResponse>
-  }
-  douban: {
-    getRating: (title: string) => Promise<{ success: boolean; data?: { rating: number; count: number } | null; error?: string }>
-    getRatingsBatch: (titles: string[]) => Promise<{ success: boolean; data?: Record<string, { rating: number; count: number } | null>; error?: string }>
-  }
-  danmaku: {
-    match: (title: string) => Promise<ApiResponse>
-    search: (keyword: string) => Promise<ApiResponse>
-    getComments: (commentId: string, source?: string) => Promise<ApiResponse>
-    getSegmentComments: (params: Record<string, unknown>) => Promise<ApiResponse>
-    getConfig: () => Promise<DanmakuConfig>
-    setConfig: (config: { primary?: string; mirrors?: string[] }) => Promise<boolean>
-    testApi: (url: string) => Promise<DanmakuTestResult>
-    parseLocalXml: (xmlPath: string) => Promise<ApiResponse>
-    findLocalXml: (videoPath: string) => Promise<ApiResponse>
-    prefetchSeries: (animeId: number) => Promise<ApiResponse>
-    getCachedComments: (episodeId: string) => Promise<ApiResponse>
-  }
-  file: {
-    openFile: () => Promise<ApiResponse>
-    openFolder: () => Promise<ApiResponse>
-    scanFolder: (folderPath: string) => Promise<ApiResponse>
-  }
-  video: {
-    getInfo: (filePath: string) => Promise<VideoInfoResponse>
-  }
-  store: {
-    get: (key: string) => Promise<StoreValue>
-    set: (key: string, value: StoreValue) => Promise<boolean>
-    delete: (key: string) => Promise<boolean>
-  }
-  window: {
-    minimize: () => Promise<void>
-    maximize: () => Promise<void>
-    close: () => Promise<void>
-  }
-  log: {
-    send: (level: string, source: string, ...args: unknown[]) => Promise<void>
-    toggleWindow: () => Promise<void>
-  }
-}
-
+// 修复点 1.20: ImportMeta 必须放在 declare global 里才能作为全局类型生效
+// 否则每个模块各自的 ImportMeta 独立声明，main.tsx 的 import.meta.env 依旧爆红
 declare global {
+  interface ImportMeta {
+    readonly env: ImportMetaEnv
+  }
+
+  interface ImportMetaEnv {
+    readonly PROD: boolean
+    readonly DEV: boolean
+    readonly MODE: string
+  }
+
   interface Window {
-    api: WindowApi
+    api: Api
     electron: typeof import('@electron-toolkit/preload').electronAPI
   }
 }

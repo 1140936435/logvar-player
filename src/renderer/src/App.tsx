@@ -1,9 +1,10 @@
 import { HashRouter, Routes, Route, Link, useLocation } from 'react-router-dom'
-import { Settings, Play, Home as HomeIcon, History as HistoryIcon, Minus, X as XIcon, Copy, Sun, Moon } from 'lucide-react'
+import { Settings, Home as HomeIcon, History as HistoryIcon, Minus, X as XIcon, Copy, Sun, Moon } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useState, useEffect, lazy, Suspense, type ReactElement } from 'react'
 import AppLogo from './components/AppLogo'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { PlayerStoreProvider } from './utils/playerStore'
 
 /* 路由懒加载 — Player 最重，按需加载 */
 const Home = lazy(() => import('./pages/Home'))
@@ -174,7 +175,9 @@ function applyGlassStyles() {
     } else if (el.classList.contains('glass-card') || el.classList.contains('media-card')) {
       html.style.backdropFilter = isDark ? 'blur(24px) saturate(160%)' : 'blur(20px) saturate(150%)'
     }
-    html.style.webkitBackdropFilter = html.style.backdropFilter
+    if ('webkitBackdropFilter' in html.style) {
+      ;(html.style as any).webkitBackdropFilter = html.style.backdropFilter
+    }
   })
 }
 
@@ -220,7 +223,9 @@ function AppLayout(): ReactElement {
 function App(): ReactElement {
   return (
     <HashRouter>
-      <AppLayout />
+      <PlayerStoreProvider>
+        <AppLayout />
+      </PlayerStoreProvider>
     </HashRouter>
   )
 }

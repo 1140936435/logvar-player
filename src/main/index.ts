@@ -13,11 +13,11 @@ import {
   safeStorage
 } from 'electron'
 import * as crypto from 'crypto'
-import { join, extname, dirname, resolve, relative, isAbsolute, basename } from 'path'
+import { join, dirname, basename } from 'path'
 import { pathToFileURL } from 'url'
-import { platform } from 'os'
-import { readdirSync, createReadStream, readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'fs'
-import type { DanmakuComment, DanmakuCommentRaw, DanmakuCommentsResponse, DanmakuMatchResult, DanmakuSearchResponse, JellyfinServerInfo } from '../shared/types'
+
+import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'fs'
+import type { DanmakuComment, DanmakuCommentRaw, DanmakuCommentsResponse, DanmakuSearchResponse, JellyfinServerInfo } from '../shared/types'
 import * as http from 'http'
 import * as https from 'https'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -204,7 +204,7 @@ function normalizeUrl(url: string): string {
 }
 
 function isUnresolvedEncrypted(val: string): boolean {
-  return typeof val === 'string' && val.startsWith('enc:')
+  return typeof val === 'string' && isEncrypted(val)
 }
 
 async function jellyfinRequest<T>(
@@ -936,7 +936,44 @@ try {
   }
 } catch { safeStorageWorking = false }
 if (!safeStorageWorking) {
-  console.warn('[Config] safeStorage encryption unavailable or broken across sessions — storing sensitive values in plaintext')
+  console.warn('[Config] safeStorage encryption unavailable or broken across sessions — using XOR obfuscation as fallback')
+}
+
+/** 机器相关的 XOR 混淆密钥（基于机器名+用户名+固定盐） */
+function xorKey(): Buffer {
+  const seed = `${process.env.COMPUTERNAME ?? 'unknown'}|${process.env.USERNAME ?? 'unknown'}|mplay-v1`
+  return crypto.createHash('sha256').update(seed).digest()
+}
+
+/** XOR 字符串混淆 */
+function xorObfuscate(plain: string): string {
+  const key = xorKey()
+  const buf = Buffer.from(plain, 'utf-8')
+  for (let i = 0; i < buf.length; i++) buf[i] ^= key[i % key.length]
+  return 'xor:' + buf.toString('base64')
+}
+
+/** XOR 字符串反混淆 */
+function xorDeobfuscate(encoded: string): string {
+  const key = xorKey()
+  const buf = Buffer.from(encoded.slice(4), 'base64')
+  for (let i = 0; i < buf.length; i++) buf[i] ^= key[i % key.length]
+  return buf.toString('utf-8')
+}
+
+/** 值是否需要加密（既非 enc: 也非 xor: 前缀） */
+function needsEncryption(val: string): boolean {
+  return !!val && !val.startsWith('enc:') && !val.startsWith('xor:')
+}
+
+/** 值是否需要解密（enc: 或 xor: 前缀） */
+function needsDecryption(val: string): boolean {
+  return val.startsWith('enc:') || val.startsWith('xor:')
+}
+
+/** 值是否携带加密前缀 */
+function isEncrypted(val: string): boolean {
+  return val.startsWith('enc:') || val.startsWith('xor:')
 }
 
 /** 日志脱敏：移除可能的 token/密钥 */
@@ -947,23 +984,42 @@ function sanitizeLog(msg: string): string {
 }
 
 function encryptValue(plain: string): string {
-  if (!plain || plain.startsWith('enc:')) return plain
-  if (!safeStorageWorking) return plain
-  try {
-    const buf = safeStorage.encryptString(plain)
-    return 'enc:' + buf.toString('base64')
-  } catch { /* fallthrough */ }
-  return plain
+  if (!needsEncryption(plain)) return plain
+  if (safeStorageWorking) {
+    try {
+      const buf = safeStorage.encryptString(plain)
+      return 'enc:' + buf.toString('base64')
+    } catch { /* fallthrough to XOR */ }
+  }
+  return xorObfuscate(plain)
 }
 
 function decryptValue(stored: string): string {
-  if (!stored.startsWith('enc:')) return stored
+  if (!needsDecryption(stored)) return stored
+  if (stored.startsWith('enc:')) {
+    if (safeStorageWorking) {
+      try {
+        const buf = Buffer.from(stored.slice(4), 'base64')
+        return safeStorage.decryptString(buf)
+      } catch {
+        console.warn('[Config] Failed to decrypt enc: value (safeStorage version mismatch?). Keeping encrypted blob.')
+        return stored
+      }
+    }
+    // safeStorage not working — enc: blob is orphaned, clear it
+    return ''
+  }
+  // xor: prefix
   try {
-    const buf = Buffer.from(stored.slice(4), 'base64')
-    return safeStorage.decryptString(buf)
+    const result = xorDeobfuscate(stored)
+    // 校验解密结果：URL 应以 http 开头，token 应为可打印 ASCII
+    if (result && /^[\x20-\x7E]+$/.test(result)) {
+      return result
+    }
+    console.warn('[Config] xor: value decoded to garbage — likely from corrupted or old-format data. Clearing.')
+    return ''
   } catch {
-    console.warn('[Config] Failed to decrypt value (safeStorage version mismatch?). Keeping encrypted blob — please re-enter credentials.')
-    // 保留 enc: 原文，防止下次 save 时被空值覆盖导致数据丢失
+    console.warn('[Config] Failed to deobfuscate xor: value. Keeping blob.')
     return stored
   }
 }
@@ -973,17 +1029,17 @@ function encryptConfig(data: Record<string, unknown>): Record<string, unknown> {
   const out = { ...data }
   for (const key of ENCRYPTED_KEYS) {
     const val = out[key]
-    if (typeof val === 'string' && val && !val.startsWith('enc:')) {
+    if (typeof val === 'string' && needsEncryption(val)) {
       out[key] = encryptValue(val)
     } else if (Array.isArray(val)) {
-      out[key] = val.map(v => typeof v === 'string' && v && !v.startsWith('enc:') ? encryptValue(v) : v)
+      out[key] = val.map(v => typeof v === 'string' && needsEncryption(v) ? encryptValue(v) : v)
     }
   }
   // 对象形式（如 jellyfin: { url, token }）
   if (out.jellyfin && typeof out.jellyfin === 'object') {
     const jf = { ...(out.jellyfin as Record<string, unknown>) }
     for (const k of ['token', 'url']) {
-      if (typeof jf[k] === 'string' && jf[k] && !(jf[k] as string).startsWith('enc:')) {
+      if (typeof jf[k] === 'string' && needsEncryption(jf[k] as string)) {
         jf[k] = encryptValue(jf[k] as string)
       }
     }
@@ -993,8 +1049,8 @@ function encryptConfig(data: Record<string, unknown>): Record<string, unknown> {
   if (Array.isArray(out['jellyfin:servers'])) {
     out['jellyfin:servers'] = (out['jellyfin:servers'] as Record<string, unknown>[]).map(s => {
       const sv = { ...s }
-      if (typeof sv.url === 'string' && sv.url && !sv.url.startsWith('enc:')) sv.url = encryptValue(sv.url)
-      if (typeof sv.token === 'string' && sv.token && !sv.token.startsWith('enc:')) sv.token = encryptValue(sv.token)
+      if (typeof sv.url === 'string' && needsEncryption(sv.url)) sv.url = encryptValue(sv.url)
+      if (typeof sv.token === 'string' && needsEncryption(sv.token)) sv.token = encryptValue(sv.token)
       return sv
     })
   }
@@ -1006,16 +1062,16 @@ function decryptConfig(data: Record<string, unknown>): Record<string, unknown> {
   const out = { ...data }
   for (const key of ENCRYPTED_KEYS) {
     const val = out[key]
-    if (typeof val === 'string' && val.startsWith('enc:')) {
+    if (typeof val === 'string' && needsDecryption(val)) {
       out[key] = decryptValue(val)
     } else if (Array.isArray(val)) {
-      out[key] = val.map(v => typeof v === 'string' && v.startsWith('enc:') ? decryptValue(v) : v)
+      out[key] = val.map(v => typeof v === 'string' && needsDecryption(v) ? decryptValue(v) : v)
     }
   }
   if (out.jellyfin && typeof out.jellyfin === 'object') {
     const jf = { ...(out.jellyfin as Record<string, unknown>) }
     for (const k of ['token', 'url']) {
-      if (typeof jf[k] === 'string' && (jf[k] as string).startsWith('enc:')) {
+      if (typeof jf[k] === 'string' && needsDecryption(jf[k] as string)) {
         jf[k] = decryptValue(jf[k] as string)
       }
     }
@@ -1025,8 +1081,8 @@ function decryptConfig(data: Record<string, unknown>): Record<string, unknown> {
   if (Array.isArray(out['jellyfin:servers'])) {
     out['jellyfin:servers'] = (out['jellyfin:servers'] as Record<string, unknown>[]).map(s => {
       const sv = { ...s }
-      if (typeof sv.url === 'string' && sv.url.startsWith('enc:')) sv.url = decryptValue(sv.url)
-      if (typeof sv.token === 'string' && sv.token.startsWith('enc:')) sv.token = decryptValue(sv.token)
+      if (typeof sv.url === 'string' && needsDecryption(sv.url)) sv.url = decryptValue(sv.url)
+      if (typeof sv.token === 'string' && needsDecryption(sv.token)) sv.token = decryptValue(sv.token)
       return sv
     })
   }
@@ -1043,13 +1099,21 @@ function loadConfigFile(): void {
       const raw = readFileSync(configPath, 'utf-8')
       configData = decryptConfig(JSON.parse(raw))
       console.log('[Config] Loaded successfully, keys:', Object.keys(configData))
-      console.log('[Config] jellyfin:servers exists?', 'jellyfin:servers' in configData)
-      if (configData['jellyfin:servers']) {
-        console.log('[Config] jellyfin:servers:', configData['jellyfin:servers'])
-      }
-      // 检查旧格式
-      if (configData['jellyfin.url'] && !configData['jellyfin:servers']) {
-        console.log('[Config] Found legacy format, will migrate')
+      // 清理因解密失败变成空字符串的 server 条目
+      if (Array.isArray(configData['jellyfin:servers'])) {
+        const servers = configData['jellyfin:servers'] as Record<string, unknown>[]
+        const validServers = servers.filter(s => {
+          const url = typeof s.url === 'string' ? s.url : ''
+          if (!url || !/^https?:\/\//.test(url)) {
+            console.warn('[Config] Removing server with invalid/missing url:', s.name, url && '(corrupted)')
+            return false
+          }
+          return true
+        })
+        if (validServers.length !== servers.length) {
+          configData['jellyfin:servers'] = validServers
+          console.log('[Config] Cleaned jellyfin:servers, remaining:', validServers.length)
+        }
       }
     } else {
       console.log('[Config] Config file does not exist')
@@ -1075,10 +1139,12 @@ function saveConfigFile(): void {
 // 初始化：加载已有配置
 loadConfigFile()
 migrateLegacyConfig()
+// 保存清洗后的配置（移除因解密失败而损坏的 server 条目）
+saveConfigFile()
 
-/** 递归清理值中的 enc: 前缀密文，防止解密失败时泄露加密 blob */
+/** 递归清理值中的 enc:/xor: 前缀密文，防止解密失败时泄露加密 blob */
 function sanitizeEncryptedBlobs(value: unknown): unknown {
-  if (typeof value === 'string' && value.startsWith('enc:')) {
+  if (typeof value === 'string' && isEncrypted(value)) {
     return ''
   }
   if (Array.isArray(value)) {
@@ -1424,7 +1490,7 @@ function getDanmakuApiConfig(): { primary: string; mirrors: string[]; appId: str
 
   return {
     primary: storePrimary || 'https://api.dandanplay.net',
-    mirrors: storeMirrors || ['https://danmu.smilion.cn'],
+    mirrors: (storeMirrors && storeMirrors.length > 0) ? storeMirrors : [],
     appId,
     appSecret
   }
@@ -1623,7 +1689,7 @@ async function dandanRequest<T>(path: string, retries = 2): Promise<T> {
             'User-Agent': 'mplay/1.0 (Electron)',
             ...authHeaders
           },
-          timeoutMs: 15000
+          timeoutMs: 10000
         })
 
         console.log(`[danmaku] ${baseUrl} → HTTP ${response.status}, content-type=${response.headers.get('content-type')}`)
@@ -1859,169 +1925,131 @@ ipcMain.handle('danmaku:search', async (_event, keyword: string) => {
   }
 })
 
+function extractEpisodeInfo(title: string): { animeKeyword: string; epNum: string } {
+  const clean = title
+    .replace(/\.[^.]+$/, '')
+    .replace(/\[.*?\]/g, '')
+    .replace(/【.*?】/g, '')
+    .replace(/\(.*?\)/g, '')
+    .replace(/\d{4}[./-]\d{2}[./-]\d{2}/g, '')
+    .replace(/1080[Pp]|720[Pp]|4K|BD|HD|WEB|DL/gi, '')
+    .replace(/x264|x265|H264|HEVC|AVC|AAC|FLAC|AUTO/gi, '')
+    .trim()
+
+  let epNum = ''
+  const epMatch = clean.match(/E(?:P(?:isode)?)?\s*(\d{1,3})/i)
+    || clean.match(/第\s*(\d{1,3})\s*[话集]/)
+    || clean.match(/S\d+E(\d{1,3})/i)
+    || clean.match(/\s(\d{1,3})\s*[话集]?$/)
+    || clean.match(/^(.+?)(\d{1,3})$/);
+  if (epMatch) {
+    epNum = epMatch[epMatch.length === 3 ? 2 : 1].padStart(2, '0')
+  }
+
+  let animeKeyword = clean
+    .replace(/E(?:P(?:isode)?)?\s*\d{1,3}/gi, '')
+    .replace(/第\s*\d{1,3}\s*[话集]/g, '')
+    .replace(/S\d+E\d{1,3}/gi, '')
+    .replace(/\s(\d{1,3})\s*[话集]?$/, '')
+    .replace(/^(.+?)(\d{1,3})$/, '$1')
+    .trim()
+
+  if (!animeKeyword) {
+    animeKeyword = title
+      .replace(/\.[^.]+$/, '')
+      .replace(/\[.*?\]/g, '')
+      .trim()
+  }
+
+  return { animeKeyword, epNum }
+}
+
 ipcMain.handle('danmaku:match', async (_event, title: string) => {
   console.log(`[danmaku:match] 原始标题: "${title}"`)
 
   try {
-    // 策略 0: 先尝试直接使用原始标题搜索（与手动搜索相同）
-    try {
-      const result = await dandanRequest<DanmakuSearchResponse>(
-        `/api/v2/search/episodes?anime=${encodeURIComponent(title)}`
-      )
-      const animeCount = result.animes?.length || 0
-      const firstAnime = result.animes?.[0]
-      const firstEp = firstAnime?.episodes?.[0]
-      console.log(`[danmaku:match] 策略0(原始标题) 返回: ${animeCount} 部动漫, firstEp=${firstEp?.episodeTitle || 'null'}`)
-
-      if (firstEp) {
-        return {
-          success: true,
-          data: {
-            episodeId: firstEp.episodeId,
-            animeTitle: firstEp.animeTitle,
-            episodeTitle: firstEp.episodeTitle,
-            animeId: firstEp.animeId,
-            source: 'dandanplay'
-          }
-        }
-      }
-    } catch (err0) {
-      console.log('[danmaku:match] 策略0失败:', err0)
-    }
-
-    // 清理标题：去掉文件扩展名、分辨率标签、压制组等
-    const clean = title
-      .replace(/\.[^.]+$/, '')                 // 去扩展名
-      .replace(/\[.*?\]/g, '')                  // 去方括号标签
-      .replace(/【.*?】/g, '')                  // 去中文方括号
-      .replace(/\(.*?\)/g, '')                  // 去圆括号
-      .replace(/\d{4}[./-]\d{2}[./-]\d{2}/g, '') // 去日期
-      .replace(/1080[Pp]|720[Pp]|4K|BD|HD|WEB|DL/gi, '')
-      .replace(/x264|x265|H264|HEVC|AVC|AAC|FLAC/gi, '')
-      .trim()
-
-    console.log(`[danmaku:match] 清洗后标题: "${clean}"`)
-
-    // 尝试提取集数关键词：EP01, 第01话, S01E01, 第1集
-    let epNum = ''
-    const epMatch = clean.match(/EP?\s*(\d{1,3})/i)
-      || clean.match(/第\s*(\d{1,3})\s*[话集]/)
-      || clean.match(/S\d+E(\d{1,3})/i)
-    if (epMatch) {
-      epNum = epMatch[1].padStart(2, '0')
-      console.log(`[danmaku:match] 提取集数: "${epNum}"`)
-    } else {
-      console.log(`[danmaku:match] 未提取到集数`)
-    }
-
-    // 构建搜索关键词：剧名 + 集数
-    let searchKey = clean.replace(/E?P?\s*\d{1,3}/i, '').trim()
-    if (!searchKey) searchKey = title
-    if (epNum) searchKey = `${searchKey} 第${epNum}话`
-    console.log(`[danmaku:match] 搜索关键词: "${searchKey}"`)
-
-    // ===== 策略 A: 直接搜索剧集 =====
-    try {
-      const result = await dandanRequest<DanmakuSearchResponse>(
-        `/api/v2/search/episodes?anime=${encodeURIComponent(searchKey)}`
-      )
-
-      const animeCount = result.animes?.length || 0
-      const firstAnime = result.animes?.[0]
-      const firstEp = firstAnime?.episodes?.[0]
-      console.log(`[danmaku:match] search/episodes 返回: ${animeCount} 部动漫, firstEp=${firstEp?.episodeTitle || 'null'}`)
-
-      if (firstEp) {
-        return {
-          success: true,
-          data: {
-            episodeId: firstEp.episodeId,
-            animeTitle: firstEp.animeTitle,
-            episodeTitle: firstEp.episodeTitle,
-            animeId: firstEp.animeId,
-            source: 'dandanplay'
-          }
-        }
-      }
-
-      // DandanPlay 返回空结果
-      console.log('[danmaku:match] search/episodes 返回空，尝试 search/anime')
-    } catch (ddErr) {
-      console.log('[danmaku:match] search/episodes 失败，尝试 search/anime:', ddErr)
-    }
-
-    // ===== 策略 B: 先通过 search/anime 找动漫，再查剧集 =====
-    try {
-      const animeKeyword = clean.replace(/E?P?\s*\d{1,3}/i, '').replace(/第\s*\d{1,3}\s*[话集]/, '').trim()
-      console.log(`[danmaku:match] search/anime 关键词: "${animeKeyword}"`)
-
-      interface AnimeSearchResult {
-        animes?: Array<{ animeId: number; animeTitle: string; episodeCount?: number }>
-      }
-
-      const animeResult = await dandanRequest<AnimeSearchResult>(
-        `/api/v2/search/anime?keyword=${encodeURIComponent(animeKeyword)}`
-      )
-
-      const animes = animeResult.animes || []
-      console.log(`[danmaku:match] search/anime 返回: ${animes.length} 部动漫`)
-
-      if (animes.length > 0) {
-        const animeId = animes[0].animeId
-        const animeTitle = animes[0].animeTitle
-        console.log(`[danmaku:match] 选中动漫: ${animeTitle} (id=${animeId})`)
-
-        // 用 animeId 搜索剧集
-        const epResult = await dandanRequest<DanmakuSearchResponse>(
-          `/api/v2/search/episodes?anime=${encodeURIComponent(animeTitle)}`
-        )
-
-        const epAnime = epResult.animes?.[0]
-        const episodes = epAnime?.episodes || []
-        console.log(`[danmaku:match] search/episodes(按动漫) 返回: ${episodes.length} 集`)
-
-        // 按集数匹配
-        let matchedEp = episodes[0]
-        if (epNum && episodes.length > 0) {
-          const epIndex = parseInt(epNum) - 1
-          if (epIndex >= 0 && epIndex < episodes.length) {
-            matchedEp = episodes[epIndex]
-            console.log(`[danmaku:match] 按集数匹配: #${epNum} → ${matchedEp.episodeTitle}`)
-          } else {
-            console.log(`[danmaku:match] 集数 #${epNum} 超出范围(1-${episodes.length}), 使用第1集`)
-          }
-        }
-
-        if (matchedEp) {
-          return {
-            success: true,
-            data: {
-              episodeId: matchedEp.episodeId,
-              animeTitle: matchedEp.animeTitle,
-              episodeTitle: matchedEp.episodeTitle,
-              animeId: matchedEp.animeId,
-              source: 'dandanplay'
-            }
-          }
-        }
-      }
-
-      console.log('[danmaku:match] search/anime 也未找到，回退 B站')
-    } catch (animeErr) {
-      console.log('[danmaku:match] search/anime 失败，回退 B站:', animeErr)
-    }
-
-    // B站回退
-    const blResult = await bilibiliAutoMatch(title)
-    if (blResult) {
+    const cached = getCachedMatch(title)
+    if (cached) {
+      console.log(`[danmaku:match] 命中缓存 episodeId=${cached.episodeId}`)
       return {
         success: true,
         data: {
+          episodeId: cached.episodeId,
+          animeTitle: cached.animeTitle,
+          episodeTitle: cached.episodeTitle,
+          animeId: cached.animeId,
+          seasonId: cached.seasonId,
+          source: cached.source
+        }
+      }
+    }
+
+    const { animeKeyword, epNum } = extractEpisodeInfo(title)
+    console.log(`[danmaku:match] 关键词: "${animeKeyword}", 集号: "${epNum || '无'}"`)
+
+    const searchResult = await dandanRequest<DanmakuSearchResponse>(
+      `/api/v2/search/episodes?anime=${encodeURIComponent(animeKeyword)}`
+    )
+
+    const animes = searchResult.animes || []
+    if (animes.length === 0) {
+      console.log('[danmaku:match] 未找到动漫，回退 B站')
+      const blResult = await bilibiliAutoMatch(title)
+      if (blResult) {
+        writeCachedMatch(title, {
           episodeId: blResult.cid,
           animeTitle: blResult.animeTitle,
           episodeTitle: blResult.episodeTitle,
           seasonId: blResult.seasonId,
-          source: 'bilibili'
+          source: 'bilibili',
+          cachedAt: Date.now()
+        })
+        return {
+          success: true,
+          data: {
+            episodeId: blResult.cid,
+            animeTitle: blResult.animeTitle,
+            episodeTitle: blResult.episodeTitle,
+            seasonId: blResult.seasonId,
+            source: 'bilibili'
+          }
+        }
+      }
+      return { success: false, error: '未找到匹配弹幕' }
+    }
+
+    const firstAnime = animes[0]
+    const episodes = firstAnime.episodes || []
+    console.log(`[danmaku:match] 匹配动漫: ${firstAnime.animeTitle} (${episodes.length} 集)`)
+
+    let matchedEp = episodes[0]
+    if (epNum && episodes.length > 0) {
+      const epIndex = parseInt(epNum) - 1
+      if (epIndex >= 0 && epIndex < episodes.length) {
+        matchedEp = episodes[epIndex]
+        console.log(`[danmaku:match] 集号匹配: #${epNum} → ${matchedEp.episodeTitle}`)
+      } else {
+        console.log(`[danmaku:match] 集号 #${epNum} 超出范围 (1-${episodes.length})，使用第1集`)
+      }
+    }
+
+    if (matchedEp) {
+      writeCachedMatch(title, {
+        episodeId: matchedEp.episodeId,
+        animeTitle: matchedEp.animeTitle,
+        episodeTitle: matchedEp.episodeTitle,
+        animeId: matchedEp.animeId,
+        source: 'dandanplay',
+        cachedAt: Date.now()
+      })
+      return {
+        success: true,
+        data: {
+          episodeId: matchedEp.episodeId,
+          animeTitle: matchedEp.animeTitle,
+          episodeTitle: matchedEp.episodeTitle,
+          animeId: matchedEp.animeId,
+          source: 'dandanplay'
         }
       }
     }
@@ -2039,6 +2067,49 @@ function getDanmakuCacheDir(): string {
   const dir = join(app.getPath('userData'), 'danmaku_cache')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   return dir
+}
+
+function getMatchCacheDir(): string {
+  const dir = join(app.getPath('userData'), 'danmaku_match_cache')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+interface MatchCacheEntry {
+  episodeId: number
+  animeTitle?: string
+  animeId?: number
+  source?: string
+  episodeTitle?: string
+  seasonId?: number
+  cachedAt: number
+}
+
+function getCachedMatch(title: string): MatchCacheEntry | null {
+  try {
+    const cacheDir = getMatchCacheDir()
+    const cacheKey = title.toLowerCase().trim().replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')
+    const cacheFile = join(cacheDir, `${cacheKey}.json`)
+    if (!existsSync(cacheFile)) return null
+    const data = JSON.parse(readFileSync(cacheFile, 'utf-8')) as MatchCacheEntry
+    if (!data || !data.episodeId) return null
+    const age = Date.now() - data.cachedAt
+    if (age > 7 * 24 * 60 * 60 * 1000) return null
+    return data
+  } catch {
+    return null
+  }
+}
+
+function writeCachedMatch(title: string, data: MatchCacheEntry): void {
+  try {
+    const cacheDir = getMatchCacheDir()
+    const cacheKey = title.toLowerCase().trim().replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')
+    const cacheFile = join(cacheDir, `${cacheKey}.json`)
+    writeFileSync(cacheFile, JSON.stringify({ ...data, cachedAt: Date.now() }), 'utf-8')
+  } catch (err) {
+    console.warn(`[danmaku:match-cache] 写入缓存失败 title="${title}":`, err)
+  }
 }
 
 function getCachedComments(episodeId: number): DanmakuCommentsResponse | null {
@@ -2105,7 +2176,7 @@ ipcMain.handle('danmaku:get-comments', async (_event, episodeId: string, source?
       console.log(`[danmaku:cache] 命中缓存 episodeId=${eid}`)
       return { success: true, data: cached }
     }
-    const result = await dandanRequest<DanmakuCommentsResponse>(
+    const result = await dandanRequest<{ count: number; comments: DanmakuCommentRaw[] }>(
       `/api/v2/comment/${episodeId}?withRelated=true`
     )
     // 解析 p 字段为结构化数据
@@ -2136,7 +2207,7 @@ ipcMain.handle('danmaku:get-segment-comments', async (_event, params: { episodeI
     return { success: true, data: cached }
   }
   try {
-    const result = await dandanRequest<DanmakuCommentsResponse>(
+    const result = await dandanRequest<{ count: number; comments: DanmakuCommentRaw[] }>(
       `/api/v2/comment/${episodeId}?withRelated=true`
     )
     const parsed = (result.comments || []).map((c: DanmakuCommentRaw) => {
@@ -2184,10 +2255,10 @@ ipcMain.handle('danmaku:prefetch-series', async (_event, animeId: number) => {
         continue
       }
       try {
-        const result = await dandanRequest<DanmakuCommentsResponse>(
+        const result = await dandanRequest<{ count: number; comments: DanmakuCommentRaw[] }>(
           `/api/v2/comment/${ep.episodeId}?withRelated=true`
         )
-        const parsed = (result.comments || []).map((c: DanmakuComment) => {
+        const parsed = (result.comments || []).map((c: DanmakuCommentRaw) => {
           const parts = c.p.split(',')
           return {
             time: parseFloat(parts[0]) || 0,
@@ -2264,6 +2335,21 @@ function registerDoubanImageProtocol(): void {
 }
 
 
+// ==================== 自定义协议: jellyfin-image ====================
+
+
+function registerJellyfinImageProtocol(): void {
+  protocol.handle('jellyfin-image', (request) => {
+    // 将 jellyfin-image://host:port/path 转换为 http://host:port/path
+    const realUrl = request.url.replace('jellyfin-image://', 'http://')
+    return net.fetch(realUrl, {
+      signal: AbortSignal.timeout(15000),
+      bypassCustomProtocolHandlers: true
+    })
+  })
+}
+
+
 // ==================== 自定义协议: local-file ====================
 
 
@@ -2302,9 +2388,9 @@ function registerLocalFileProtocol(): void {
         const stream = createReadStream(filePath)
         const responseStream = new ReadableStream({
           start(controller) {
-            stream.on('data', (chunk) => controller.enqueue(chunk))
+            stream.on('data', (chunk: unknown) => controller.enqueue(chunk))
             stream.on('end', () => controller.close())
-            stream.on('error', (err) => controller.error(err))
+            stream.on('error', (err: unknown) => controller.error(err))
           },
           cancel() {
             stream.destroy()
@@ -2344,10 +2430,6 @@ function createWindow(): void {
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
-      // webSecurity 必须为 false：渲染进程通过 <img> 标签直接加载 Jellyfin 服务器的海报图片，
-      // 这些是用户配置的内网服务器，跨域请求会被 CORS 阻止。
-      // 所有 API 调用已通过 IPC 走主进程，不依赖渲染进程 fetch。
-      webSecurity: false
     }
   })
 
@@ -2426,10 +2508,16 @@ function createTray(): void {
 
 // ==================== 应用生命周期 ====================
 
+// 注册自定义协议为 privileged，使渲染进程的 <img> 标签可以加载
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'jellyfin-image', privileges: { bypassCSP: true, supportFetchAPI: true, corsEnabled: true, stream: true } }
+])
+
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.mplay.player')
 
   // 注册自定义协议
+  registerJellyfinImageProtocol()
   registerLocalFileProtocol()
   registerDoubanImageProtocol()
 

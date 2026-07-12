@@ -102,7 +102,7 @@
     <div class="empty-state">等待日志输出...</div>
   </div>
   <script>
-    const { ipcRenderer } = require('electron');
+    // 通过 preload 暴露的 logApi 安全访问 IPC，不再使用 require('electron')
     const logContainer = document.getElementById('logContainer');
     const emptyState = logContainer.querySelector('.empty-state');
     let autoScroll = true;
@@ -165,9 +165,8 @@
       }
     }
 
-    ipcRenderer.on('log:entry', (_event, entry) => {
+    window.logApi.onLogEntry((entry) => {
       logEntries.push(entry);
-      // 最多保留 5000 条
       if (logEntries.length > 5000) logEntries.shift();
       if (filters[entry.level]) {
         logContainer.appendChild(createLogEntry(entry));
@@ -178,8 +177,7 @@
       if (emptyState) emptyState.remove();
     });
 
-    // 加载已有日志
-    ipcRenderer.on('log:history', (_event, entries) => {
+    window.logApi.onLogHistory((entries) => {
       logEntries = entries;
       renderLogs();
     });

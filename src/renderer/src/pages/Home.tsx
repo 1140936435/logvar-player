@@ -612,7 +612,10 @@ function Home(): ReactElement {
         type: item.Type === 'Movie' ? 'movie' : 'tv'
       })
       if (r.success && r.data) {
-        setScrapeResults(r.data)
+        setScrapeResults(r.data.map((item: { id: string; title: string; year: string; poster: string; overview: string }) => ({
+          ...item,
+          id: Number(item.id)
+        })))
       } else {
         setScrapeError(r.error || '豆瓣搜索失败')
       }
@@ -628,11 +631,16 @@ function Home(): ReactElement {
     setScrapeLoading(true)
     try {
       const r = await window.api.jellyfin.scrape.fetch({ doubanId, posterUrl })
-      if (r.success && r.data?.localPath) {
+      if (!r || !r.success || !r.data) {
+        setScrapeError(r?.error || '下载封面失败')
+        setScrapeLoading(false)
+        return
+      }
+      if (r.data.localPath) {
         setDoubanPosters(prev => {
-          const next = { ...prev, [scrapeItem.Id]: r.data.localPath }
+          const next = { ...prev, [scrapeItem.Id]: r.data!.localPath }
           window.api.store.get('poster-map').then((map: any) => {
-            window.api.store.set('poster-map', { ...(map || {}), [scrapeItem.Id]: r.data.localPath })
+            window.api.store.set('poster-map', { ...(map || {}), [scrapeItem.Id]: r.data!.localPath })
           })
           return next
         })
@@ -659,7 +667,9 @@ function Home(): ReactElement {
     if (!item.ImageTags?.Primary) return null
     const base = connectedServer || 'http://localhost:8096'
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
-    return `${base}/Items/${item.Id}/Images/Primary?maxHeight=400&tag=${item.ImageTags.Primary}&quality=90${authParam}`
+    // 使用 jellyfin-image:// 协议安全加载跨域图片（替代 webSecurity: false）
+    const imgBase = base.replace(/^https?:\/\//, 'jellyfin-image://')
+    return `${imgBase}/Items/${item.Id}/Images/Primary?maxHeight=400&tag=${item.ImageTags.Primary}&quality=90${authParam}`
   }, [connectedServer, jellyfinToken, doubanPosters])
 
   const breadcrumb = drillStack.map((d) => d.parentName)

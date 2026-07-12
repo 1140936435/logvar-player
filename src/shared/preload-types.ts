@@ -1,5 +1,5 @@
 // Preload API 类型定义
-import type { DanmakuComment, DanmakuConfig, DanmakuMatchResult, DanmakuSearchResponse, JellyfinItem, JellyfinLibrary, MpvTrack, MpvState, PlayerState } from './types'
+import type { DanmakuComment, DanmakuConfig, DanmakuMatchResult, DanmakuSearchResponse, JellyfinItem, JellyfinLibrary, LocalDanmakuCache, MpvTrack, MpvState, PlayerState } from './types'
 
 // ===== 通用响应类型 =====
 export interface ApiResponse<T = unknown> {
@@ -66,6 +66,18 @@ export interface DanmakuConfigResponse {
   mirrors: string[]
   appId?: string
   appSecretHint?: string
+}
+
+export interface LocalDanmakuCacheResponse {
+  success: boolean
+  data?: LocalDanmakuCache
+  error?: string
+}
+
+export interface LocalDanmakuListResponse {
+  success: boolean
+  data?: LocalDanmakuCache[]
+  error?: string
 }
 
 // ===== 播放历史相关类型 =====
@@ -238,6 +250,12 @@ export interface Api {
     testApi: (url: string) => Promise<ApiResponse<{ success: boolean; elapsed: number; animeCount?: number; epCount?: number; detail?: string }>>
     parseLocalXml: (xmlPath: string) => Promise<DanmakuCommentsResponse>
     findLocalXml: (videoPath: string) => Promise<ApiResponse<{ count: number; comments: DanmakuComment[]; source: string }>>
+    // 预下载弹幕到本地缓存
+    downloadDanmaku: (title: string) => Promise<LocalDanmakuCacheResponse>
+    // 获取已缓存的本地弹幕列表
+    getLocalDanmakuList: () => Promise<LocalDanmakuListResponse>
+    // 删除本地弹幕缓存
+    deleteLocalDanmaku: (episodeId: number) => Promise<ApiResponse<void>>
   }
 
   file: {

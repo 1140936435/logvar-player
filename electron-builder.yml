@@ -17,8 +17,7 @@ files:
   - "!resources/**"
   - "!logvar-player/**"
   - "!.qoder/**"
-  - "!dist/**"
-  - "!dist2/**"
+  - "!dist*/**"
 asarUnpack:
   - out/tools/**
 extraResources:

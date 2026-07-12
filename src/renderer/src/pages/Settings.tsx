@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, type ReactElement } from 'react'
 import { useNavigate } from 'react-router-dom'
-import type { ServerConfig as ApiServerConfig, ServerInfo, ServerTestResult as ApiServerTestResult } from '../../shared/preload-types'
-import type { JellyfinServerInfo } from '../../shared/types'
+// 修复点 1.21: preload-types 实际上没有导出 ServerInfo/ServerTestResult，只有 ServerConfig。
+// ServerInfo / ServerTestResult 是 Settings 里内聚的本地类型，自行定义。
+import type { ServerConfig as ApiServerConfig } from '../../../shared/preload-types'
+import type { JellyfinServerInfo } from '../../../shared/types'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Database, Plug, WifiOff, Save, Loader2, CheckCircle,
@@ -22,7 +24,15 @@ interface DanmakuTestResult {
 }
 
 type ServerConfig = ApiServerConfig
-type ServerTestResult = ApiServerTestResult
+// 修复点 1.21: server.getActive() 返回的 data = { id: string; server: ApiServerConfig|null }
+type ServerInfo = { id: string; server: ApiServerConfig | null }
+// 修复点 1.21: server.test() 返回 ApiResponse<void>（无业务信息），Settings UI 扩展为带 elapsed 及可选 ServerName/Version 的结构
+type ServerTestResult = {
+  success: boolean
+  error?: string
+  elapsed?: number
+  data?: { ServerName?: string; Version?: string }
+}
 
 /* ==================== 毛玻璃亚克力卡片 ==================== */
 
@@ -214,7 +224,9 @@ function Settings(): ReactElement {
     try {
       const result = await window.api.server.switch(id)
       if (result.success) {
-        const info = result.data as JellyfinServerInfo
+        // 修复点 1.22: server.switch() 的 data 是 void/undefined，不能直接转 JellyfinServerInfo
+        // 要先转 unknown 中转。这里 info 实际没依赖 data 内容，只有 fallback server.name 所以没问题。
+        const info = (result.data as unknown as JellyfinServerInfo) ?? ({} as JellyfinServerInfo)
         setActiveServerId(id)
         const server = servers.find(s => s.id === id)
         setServerStatus({ type: 'success', message: `已连接 - ${info.ServerName || server?.name || 'Jellyfin'}` })
@@ -260,7 +272,8 @@ function Settings(): ReactElement {
     }).catch(() => {})
 
     // 加载播放器设置
-    window.api.store.get('player').then((data: { hardwareDecode?: boolean; hdrToneMapping?: boolean } | null) => {
+    window.api.store.get('player').then((saved: unknown) => {
+      const data = saved as { hardwareDecode?: boolean; hdrToneMapping?: boolean } | null
       if (data) {
         if (typeof data.hardwareDecode === 'boolean') setHardwareDecode(data.hardwareDecode)
         if (typeof data.hdrToneMapping === 'boolean') setHdrToneMapping(data.hdrToneMapping)
@@ -276,11 +289,13 @@ function Settings(): ReactElement {
     setDanmakuInfo('')
     try {
       const result = await window.api.danmaku.testApi(url)
-      setDanmakuTestResult(result)
-      if (result.success) {
-        setDanmakuInfo(`主 API 可用 - ${result.elapsed}ms - 测试关键词返回 ${result.animeCount ?? 0} 部 ${result.epCount ?? 0} 集`)
-      } else {
-        setDanmakuInfo('主 API 不可用，将自动尝试备用地址')
+      if (result.data) {
+        setDanmakuTestResult(result.data)
+        if (result.data.success) {
+          setDanmakuInfo(`主 API 可用 - ${result.data.elapsed}ms - 测试关键词返回 ${result.data.animeCount ?? 0} 部 ${result.data.epCount ?? 0} 集`)
+        } else {
+          setDanmakuInfo('主 API 不可用，将自动尝试备用地址')
+        }
       }
     } catch (err) { setDanmakuTestResult({ success: false, error: String(err), elapsed: 0 }) }
     setDanmakuTesting(false)

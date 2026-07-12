@@ -1,15 +1,21 @@
 {
   "compilerOptions": {
     "composite": true,
+    // 修复点 1.11: 升级 target，解决 for-of Set / RegExp "s" flag (dotAll) / for of Map 等语法在严格模式下需 ES2018+ 的问题
+    "target": "ES2020",
+    "lib": ["ES2020"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
+    "downlevelIteration": true,
     "outDir": "./out",
     "declaration": true,
     "strict": true,
     "skipLibCheck": true,
+    "baseUrl": ".",
     "types": ["electron-vite/node"]
   },
-  "include": ["src/main/**/*", "src/preload/**/*", "electron.vite.config.ts"]
+  // 修复点 1.11: 把 shared 目录加进 include，main/preload 才能正确看到 types.ts/preload-types.ts/typed-values.ts
+  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*", "electron.vite.config.ts"]
 }

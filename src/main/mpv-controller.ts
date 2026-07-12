@@ -197,6 +197,7 @@ export class MpvController extends EventEmitter {
   private timePollTimer: ReturnType<typeof setInterval> | null = null
   private mpvBinaryPath: string = ''
   private isRunning: boolean = false
+  private loadedFilePath: string = ''
 
   constructor(options: MpvControllerOptions) {
     super()
@@ -821,7 +822,17 @@ export class MpvController extends EventEmitter {
     if (this.mpvProcess) {
       const proc = this.mpvProcess
       const exitPromise = new Promise<void>((resolve) => {
-        const timeout = setTimeout(() => { proc.kill('SIGKILL'); resolve() }, 2000)
+        const timeout = setTimeout(() => {
+          if (process.platform === 'win32') {
+            // Windows 不支持 SIGKILL，需要用 taskkill
+            try {
+              require('child_process').execSync(`taskkill /pid ${proc.pid} /f /t`, { timeout: 3000 })
+            } catch { /* taskkill 可能因进程已退出而报错 */ }
+          } else {
+            proc.kill('SIGKILL')
+          }
+          resolve()
+        }, 2000)
         proc.once('exit', () => { clearTimeout(timeout); resolve() })
       })
       try {

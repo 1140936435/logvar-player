@@ -49,6 +49,26 @@ if (isProd) {
   console.debug = (...args: unknown[]) => forwardLog('debug', args)
 }
 
+// 修复点 3.4: 全局未捕获 Promise 异常 & 未捕获同步异常兜底，避免 Electron 窗口莫名崩溃/白屏
+window.addEventListener?.('error', (ev): void => {
+  const errMsg = (ev.error instanceof Error)
+    ? `${ev.error.message}\n${ev.error.stack || ''}`
+    : `${ev.message} (${ev.filename}:${ev.lineno}:${ev.colno})`
+  console.error('[GlobalError] Uncaught exception:', errMsg)
+  try { void window.api?.log?.send?.('error', 'renderer', `[GlobalError] ${errMsg}`) } catch { /* ignore */ }
+})
+
+window.addEventListener?.('unhandledrejection', (ev): void => {
+  let reason = ''
+  try {
+    if (ev.reason instanceof Error) reason = `${ev.reason.message}\n${ev.reason.stack || ''}`
+    else if (ev.reason) reason = typeof ev.reason === 'object' ? JSON.stringify(ev.reason) : String(ev.reason)
+    else reason = 'empty Promise rejection (no reason)'
+  } catch { reason = 'error serializing rejection' }
+  console.error('[GlobalError] Unhandled Promise rejection:', reason)
+  try { void window.api?.log?.send?.('error', 'renderer', `[GlobalUnhandledRejection] ${reason}`) } catch { /* ignore */ }
+})
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
