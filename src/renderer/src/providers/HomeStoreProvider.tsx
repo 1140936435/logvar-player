@@ -1,9 +1,11 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode } from 'react';
+import type { RecentlyAddedItem } from '../../../shared/types';
 
 interface MediaLibrary {
   Id: string;
   Name: string;
-  Type: string;
+  Type?: string;
+  CollectionType?: string;
 }
 
 interface MediaItem {
@@ -16,30 +18,33 @@ interface MediaItem {
   ProductionYear?: number;
   Overview?: string;
   RunTimeTicks?: number;
+  SeriesName?: string;
+  SeriesId?: string;
+  SeasonId?: string;
+  IndexNumber?: number;
+  ParentIndexNumber?: number;
+  IsFolder?: boolean;
+  ChildCount?: number;
 }
 
 interface DrillLevel {
-  libraryId: string;
-  libraryName: string;
-  itemType?: string;
-  parentId?: string;
-}
-
-interface RecentlyAddedItem {
-  itemId: string;
-  name: string;
-  imageTag: string;
-  type: string;
-  date: string;
+  parentName: string;
+  parentId: string;
+  items: MediaItem[];
 }
 
 interface PlaybackHistoryItem {
   itemId: string;
   name: string;
-  imageTag: string;
-  type: string;
-  progress: number;
-  date: string;
+  duration: number;
+  position: number;
+  posterUrl: string;
+  watchedAt: number;
+  localFile?: string;
+  baseUrl?: string;
+  seriesName?: string;
+  seriesId?: string;
+  seasonId?: string;
 }
 
 export interface HomeStoreState {

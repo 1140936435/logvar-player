@@ -7,13 +7,11 @@ import {
 } from 'lucide-react'
 import { cachedFetch, clearCache } from '../utils/apiCache'
 import { formatTimeAgo } from '../utils/time'
+import { useHomeStore } from '../providers/HomeStoreProvider'
 import { RecentlyAddedRow } from '../components/RecentlyAddedRow'
 import {
-  getRecentlyAdded,
   getRecentlyAddedConfig,
-  saveRecentlyAddedConfig,
-  detectAndRecordNewMedia,
-  clearRecentlyAddedCache
+  saveRecentlyAddedConfig
 } from '../utils/recentlyAdded'
 import type { RecentlyAddedItem } from '../../../shared/types'
 
@@ -86,6 +84,27 @@ const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, commun
   onClick: () => void
   onScrape?: () => void
 }): ReactElement {
+  const imgRef = useRef<HTMLImageElement>(null)
+  const [isVisible, setIsVisible] = useState(false)
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setIsVisible(true)
+          observer.disconnect()
+        }
+      },
+      { threshold: 0.1, rootMargin: '100px' }
+    )
+
+    if (imgRef.current) {
+      observer.observe(imgRef.current)
+    }
+
+    return () => observer.disconnect()
+  }, [])
+
   const isFolder = item.IsFolder || (!!item.ChildCount && item.ChildCount > 0)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyItem = item as any
@@ -109,13 +128,15 @@ const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, commun
       <div className="media-card-poster w-full h-full">
         {posterUrl ? (
           <img
-            src={posterUrl}
+            ref={imgRef}
+            src={isVisible ? posterUrl : undefined}
             alt={item.Name}
             loading="lazy"
             decoding="async"
             className="w-full h-full object-cover"
             onError={(e) => {
               const target = e.target as HTMLImageElement
+              console.error(`[Poster Error] 图片加载失败: ${item.Name}, src=${target.src}`)
               target.style.display = 'none'
               const parent = target.parentElement
               if (parent && !parent.querySelector('.fallback-icon')) {
@@ -231,6 +252,7 @@ const HistoryCard = memo(function HistoryCard({ item, onClick, onDelete }: {
 
 function Home(): ReactElement {
   const navigate = useNavigate()
+  const homeStore = useHomeStore()
   const [pageState, setPageState] = useState<PageState>('loading')
   const [errorMsg, setErrorMsg] = useState('')
   const [libraries, setLibraries] = useState<Library[]>([])
@@ -241,6 +263,8 @@ function Home(): ReactElement {
   const LIBRARY_PAGE_SIZE = 50
   const [connectedServer, setConnectedServer] = useState('')
   const [jellyfinToken, setJellyfinToken] = useState('')
+  // 当前连接的服务器类型：'jellyfin' | 'emby'
+  const [serverType, setServerType] = useState<'jellyfin' | 'emby'>('jellyfin')
 
   // 多服务器
   const [servers, setServers] = useState<ServerConfig[]>([])
@@ -295,6 +319,30 @@ function Home(): ReactElement {
   }
 
   const loadMediaData = useCallback(async () => {
+    if (homeStore.isFresh()) {
+      console.log('[Home] 使用缓存数据，跳过 API 请求')
+      const { state } = homeStore
+      if (state.libraries.length > 0) {
+        setLibraries(state.libraries as Library[])
+        setLibraryItems(state.libraryItems as Record<string, MediaItem[]>)
+        setLibraryTotalCounts(state.libraryTotalCounts)
+        const loadCountMap: Record<string, number> = {}
+        Object.entries(state.libraryItems).forEach(([id, items]) => {
+          loadCountMap[id] = items.length
+        })
+        setLibraryLoadCounts(loadCountMap)
+        if (state.recentlyAdded.length > 0) {
+          setRecentlyAddedItems(state.recentlyAdded as RecentlyAddedItem[])
+        }
+        const hasItems = Object.values(state.libraryItems).some((items) => items.length > 0)
+        setPageState(hasItems ? 'ready' : 'empty')
+      } else {
+        setPageState('empty')
+        setLibraries([])
+      }
+      return
+    }
+
     setPageState('loading')
     setErrorMsg('')
     setDrillStack([])
@@ -349,10 +397,12 @@ function Home(): ReactElement {
       if (libs.length === 0) {
         setPageState('empty')
         setLibraries([])
+        homeStore.setLibraries([])
         return
       }
 
       setLibraries(libs)
+      homeStore.setLibraries(libs)
 
       const itemsMap: Record<string, MediaItem[]> = {}
       const totalMap: Record<string, number> = {}
@@ -370,11 +420,15 @@ function Home(): ReactElement {
             itemsMap[lib.Id] = itemData.Items || []
             totalMap[lib.Id] = itemData.TotalRecordCount ?? 0
             loadCountMap[lib.Id] = (itemData.Items || []).length
+            homeStore.setLibraryItems(lib.Id, itemData.Items || [])
+            homeStore.setLibraryTotalCount(lib.Id, itemData.TotalRecordCount ?? 0)
           }
         } catch {
           itemsMap[lib.Id] = []
           totalMap[lib.Id] = 0
           loadCountMap[lib.Id] = 0
+          homeStore.setLibraryItems(lib.Id, [])
+          homeStore.setLibraryTotalCount(lib.Id, 0)
         }
       }))
       setLibraryItems(itemsMap)
@@ -382,42 +436,66 @@ function Home(): ReactElement {
       setLibraryLoadCounts(loadCountMap)
 
       try {
-        const saved = await window.api.store.get('jellyfin') as { url?: string; token?: string } | null
-        if (saved?.url) {
-          setConnectedServer(saved.url.replace(/\/+$/, ''))
+        // 优先使用 server.getActive() 获取当前活跃服务器（包含正确的 type 字段）
+        const activeResult = await window.api.server.getActive()
+        if (activeResult.success && activeResult.data?.server) {
+          const srv = activeResult.data.server
+          if (srv.url) setConnectedServer(srv.url.replace(/\/+$/, ''))
+          if (srv.token) setJellyfinToken(srv.token)
+          const detectedType = (srv as any).type === 'emby' ? 'emby' : 'jellyfin'
+          setServerType(detectedType)
+          console.log(`[Home] 从 server.getActive 检测到服务器类型: ${detectedType}`)
         } else {
-          // 从多服务器列表获取
-          const servers = await window.api.store.get('jellyfin:servers') as Array<{ id?: string; url: string; token: string }> | null
-          const activeId = await window.api.store.get('jellyfin:activeServerId') as string | null
-          if (servers && servers.length > 0) {
-            const active = activeId ? servers.find(s => s.id === activeId) : servers[0]
-            if (active?.url) setConnectedServer(active.url.replace(/\/+$/, ''))
-            if (active?.token) setJellyfinToken(active.token)
+          // 降级：从旧配置读取
+          const saved = await window.api.store.get('jellyfin') as { url?: string; token?: string } | null
+          if (saved?.url) {
+            setConnectedServer(saved.url.replace(/\/+$/, ''))
+            setServerType('jellyfin')
           }
+          if (saved?.token) setJellyfinToken(saved.token)
         }
-        if (saved?.token) setJellyfinToken(saved.token)
       } catch { /* ignore */ }
 
       const hasItems = Object.values(itemsMap).some((items) => items.length > 0)
       setPageState(hasItems ? 'ready' : 'empty')
 
-      // 检测新增媒体并记录入库
-      if (hasItems) {
+      // 媒体库数据加载完成后刷新最近入库列表（调用 Jellyfin 官方 getLatestMedia 接口）
+      if (hasItems && recentlyAddedEnabled) {
         try {
-          const allItems: MediaItem[] = []
-          Object.values(itemsMap).forEach((items) => {
-            allItems.push(...items)
-          })
-          await detectAndRecordNewMedia(allItems, activeServerId || undefined)
-        } catch (detectErr) {
-          console.error('[Home] 检测新增媒体失败:', detectErr)
+          const config = await getRecentlyAddedConfig(true)
+          const result = await window.api.jellyfin.getLatestMedia(config.displayCount)
+          if (result.success && result.data && Array.isArray(result.data)) {
+            const items: RecentlyAddedItem[] = (result.data as any[]).map((item: any) => ({
+              itemId: item.Id,
+              name: item.Name,
+              type: (item.Type === 'Movie' ? 'Movie' : 'Series') as 'Movie' | 'Series',
+              productionYear: item.ProductionYear,
+              imageTag: item.ImageTags?.Primary,
+              seriesName: item.SeriesName,
+              seriesId: item.SeriesId,
+              seasonId: item.SeasonId,
+              indexNumber: item.IndexNumber,
+              parentIndexNumber: item.ParentIndexNumber,
+              addedAt: item.DateCreated ? new Date(item.DateCreated).getTime() : Date.now(),
+              serverId: activeServerId || undefined
+            }))
+            setRecentlyAddedItems(items)
+            homeStore.setRecentlyAdded(items)
+          }
+        } catch (err) {
+          console.error('[Home] 刷新最近入库失败:', err)
         }
       }
     } catch (err) {
       setPageState('error')
       setErrorMsg(err instanceof Error ? err.message : '发生未知错误')
     }
-  }, [activeServerId])
+  }, [activeServerId, homeStore])
+
+  const refreshLibrary = useCallback(async () => {
+    homeStore.invalidate()
+    await loadMediaData()
+  }, [homeStore, loadMediaData])
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true)
@@ -430,7 +508,7 @@ function Home(): ReactElement {
     setHistoryLoading(false)
   }, [])
 
-  // 加载最近入库数据和配置
+  // 加载最近入库数据 - 使用 Jellyfin 官方 getLatestMedia 接口
   const loadRecentlyAdded = useCallback(async (): Promise<void> => {
     setRecentlyAddedLoading(true)
     try {
@@ -441,14 +519,39 @@ function Home(): ReactElement {
       setRecentlyAddedScrollPos(config.scrollPosition)
 
       if (config.enabled) {
-        const items = await getRecentlyAdded(config.displayCount, true)
-        setRecentlyAddedItems(items)
+        // 调用 Jellyfin 官方 getLatestMedia 接口
+        // 该接口按 DateCreated 倒序返回最新入库媒体，无需本地排序
+        const result = await window.api.jellyfin.getLatestMedia(config.displayCount)
+        if (result.success && result.data && Array.isArray(result.data)) {
+          // 将 Jellyfin 原始数据映射为 RecentlyAddedItem 格式
+          const items: RecentlyAddedItem[] = (result.data as any[]).map((item: any) => ({
+            itemId: item.Id,
+            name: item.Name,
+            type: (item.Type === 'Movie' ? 'Movie' : 'Series') as 'Movie' | 'Series',
+            productionYear: item.ProductionYear,
+            imageTag: item.ImageTags?.Primary,
+            seriesName: item.SeriesName,
+            seriesId: item.SeriesId,
+            seasonId: item.SeasonId,
+            indexNumber: item.IndexNumber,
+            parentIndexNumber: item.ParentIndexNumber,
+            addedAt: item.DateCreated ? new Date(item.DateCreated).getTime() : Date.now(),
+            serverId: activeServerId || undefined
+          }))
+
+          console.log(`[Home] 最近入库加载完成: ${items.length} 条, 第一条: ${items[0]?.name || '空'}`)
+          setRecentlyAddedItems(items)
+        } else {
+          console.warn('[Home] 最近入库接口返回空数据，隐藏板块')
+          setRecentlyAddedItems([])
+        }
       }
     } catch (err) {
       console.error('[Home] 加载最近入库失败:', err)
+      setRecentlyAddedItems([])
     }
     setRecentlyAddedLoading(false)
-  }, [])
+  }, [activeServerId])
 
   // 处理最近入库项点击 - 直接播放
   const handleRecentlyAddedClick = useCallback((item: RecentlyAddedItem): void => {
@@ -525,6 +628,8 @@ function Home(): ReactElement {
         if (d.server) {
           setConnectedServer(d.server.url.replace(/\/+$/, ''))
           setJellyfinToken(d.server.token)
+          // 获取服务器类型，默认 jellyfin
+          setServerType((d.server as any).type === 'emby' ? 'emby' : 'jellyfin')
         }
       }
     } catch { /* ignore */ }
@@ -536,17 +641,16 @@ function Home(): ReactElement {
     try {
       const result = await window.api.server.switch(id)
       if (result.success) {
-        // 切换服务器时清除缓存，确保获取最新数据
+        // 切换服务器时清除所有缓存（包括 Jellyfin 和 Emby），确保获取最新数据
         clearCache('jellyfin.')
-        clearRecentlyAddedCache()
+        clearCache('emby.')
         await loadServers()
         await loadMediaData()
         await loadHistory()
-        await loadRecentlyAdded()
       }
     } catch { /* ignore */ }
     setSwitchingServer(false)
-  }, [loadServers, loadMediaData, loadHistory, loadRecentlyAdded])
+  }, [loadServers, loadMediaData, loadHistory])
 
   useEffect(() => {
     loadServers()
@@ -748,13 +852,32 @@ function Home(): ReactElement {
       if (urlPath.match(/^[A-Z]:/i)) urlPath = '/' + urlPath
       return `local-file://${urlPath}`
     }
-    if (!item.ImageTags?.Primary) return null
+
+    // 检查是否有封面图片
+    if (!item.ImageTags?.Primary) {
+      console.log(`[Poster] ${item.Name} 无 Primary 图片标签`)
+      return null
+    }
+
     const base = connectedServer || 'http://localhost:8096'
+
+    // Emby 服务器：使用 emby-image:// 协议，Token 通过 URL 参数传递
+    // 主进程协议处理器会自动添加 X-Emby-Token 请求头
+    if (serverType === 'emby') {
+      const imgBase = base
+        .replace(/^https:\/\//, 'emby-image://https/')
+        .replace(/^http:\/\//, 'emby-image://http/')
+      const tokenParam = jellyfinToken ? `&token=${encodeURIComponent(jellyfinToken)}` : ''
+      const url = `${imgBase}/Items/${item.Id}/Images/Primary?maxHeight=400&tag=${item.ImageTags.Primary}&quality=90${tokenParam}`
+      console.log(`[Emby Poster] ${item.Name}: ${url.replace(/token=[^&]+/, 'token=***')}`)
+      return url
+    }
+
+    // Jellyfin 服务器：使用 api_key 参数
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
-    // 使用 jellyfin-image:// 协议安全加载跨域图片（替代 webSecurity: false）
     const imgBase = base.replace(/^https?:\/\//, 'jellyfin-image://')
     return `${imgBase}/Items/${item.Id}/Images/Primary?maxHeight=400&tag=${item.ImageTags.Primary}&quality=90${authParam}`
-  }, [connectedServer, jellyfinToken, doubanPosters])
+  }, [connectedServer, jellyfinToken, doubanPosters, serverType])
 
   const breadcrumb = drillStack.map((d) => d.parentName)
   const currentDrill = drillStack.length > 0 ? drillStack[drillStack.length - 1] : null
@@ -882,7 +1005,7 @@ function Home(): ReactElement {
           <div className="text-center py-24">
             <h2 className="text-[20px] font-semibold text-[var(--text-primary)] mb-3">加载失败</h2>
             <p className="text-[15px] text-[var(--text-secondary)] mb-10">{errorMsg}</p>
-            <motion.button onClick={loadMediaData} className="ios-btn ios-btn-primary" whileTap={{ scale: 0.96 }}>重试</motion.button>
+            <motion.button onClick={refreshLibrary} className="ios-btn ios-btn-primary" whileTap={{ scale: 0.96 }}>重试</motion.button>
           </div>
         </div>
       </div>
@@ -1234,6 +1357,7 @@ function Home(): ReactElement {
               onItemClick={handleRecentlyAddedClick}
               baseUrl={connectedServer || 'http://localhost:8096'}
               token={jellyfinToken}
+              serverType={serverType}
               scrollSpeed={recentlyAddedScrollSpeed}
               savedScrollPosition={recentlyAddedScrollPos}
               onScrollPositionChange={handleScrollPositionChange}
@@ -1283,7 +1407,7 @@ function Home(): ReactElement {
             <p className="text-[15px] text-[var(--text-tertiary)] mb-4">
               {libraries.length > 0 ? '媒体库中没有找到视频文件' : 'Jellyfin 服务器上没有配置媒体库'}
             </p>
-            <motion.button onClick={loadMediaData} className="ios-btn ios-btn-secondary" whileTap={{ scale: 0.96 }}>刷新</motion.button>
+            <motion.button onClick={refreshLibrary} className="ios-btn ios-btn-secondary" whileTap={{ scale: 0.96 }}>刷新</motion.button>
           </div>
         )}
 
