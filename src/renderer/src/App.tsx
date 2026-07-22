@@ -5,6 +5,7 @@ import { useState, useEffect, lazy, Suspense, type ReactElement } from 'react'
 import AppLogo from './components/AppLogo'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { PlayerStoreProvider } from './utils/playerStore'
+import { HomeStoreProvider } from './providers/HomeStoreProvider'
 
 /* 路由懒加载 — Player 最重，按需加载 */
 const Home = lazy(() => import('./pages/Home'))
@@ -207,13 +208,15 @@ function AppLayout(): ReactElement {
       <TopBar dark={dark} toggleTheme={toggle} />
       <main className="flex-1 overflow-auto relative z-10">
         <AnimatePresence mode="wait">
-          <Routes location={location} key={location.pathname}>
-            <Route path="/" element={<PageTransition><Suspense fallback={<LoadingFallback />}><ErrorBoundary><Home /></ErrorBoundary></Suspense></PageTransition>} />
-            <Route path="/detail/:itemId" element={<PageTransition><Suspense fallback={<LoadingFallback />}><ErrorBoundary><Detail /></ErrorBoundary></Suspense></PageTransition>} />
-            <Route path="/player" element={<PageTransition><Suspense fallback={<LoadingFallback />}><ErrorBoundary><Player /></ErrorBoundary></Suspense></PageTransition>} />
-            <Route path="/history" element={<PageTransition><Suspense fallback={<LoadingFallback />}><ErrorBoundary><HistoryPage /></ErrorBoundary></Suspense></PageTransition>} />
-            <Route path="/settings" element={<PageTransition><Suspense fallback={<LoadingFallback />}><ErrorBoundary><SettingsPage /></ErrorBoundary></Suspense></PageTransition>} />
-          </Routes>
+          <HomeStoreProvider>
+            <Routes location={location} key={location.pathname}>
+              <Route path="/" element={<PageTransition><Suspense fallback={<LoadingFallback />}><ErrorBoundary><Home /></ErrorBoundary></Suspense></PageTransition>} />
+              <Route path="/detail/:itemId" element={<PageTransition><Suspense fallback={<LoadingFallback />}><ErrorBoundary><Detail /></ErrorBoundary></Suspense></PageTransition>} />
+              <Route path="/player" element={<PageTransition><Suspense fallback={<LoadingFallback />}><ErrorBoundary><Player /></ErrorBoundary></Suspense></PageTransition>} />
+              <Route path="/history" element={<PageTransition><Suspense fallback={<LoadingFallback />}><ErrorBoundary><HistoryPage /></ErrorBoundary></Suspense></PageTransition>} />
+              <Route path="/settings" element={<PageTransition><Suspense fallback={<LoadingFallback />}><ErrorBoundary><SettingsPage /></ErrorBoundary></Suspense></PageTransition>} />
+            </Routes>
+          </HomeStoreProvider>
         </AnimatePresence>
       </main>
     </div>
