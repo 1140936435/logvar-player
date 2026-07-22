@@ -10,17 +10,19 @@ import {
   dialog,
   protocol,
   net,
-  safeStorage
+  safeStorage,
+  type NativeImage
 } from 'electron'
 import * as crypto from 'crypto'
 import { join, dirname, basename } from 'path'
 import { pathToFileURL } from 'url'
 
 import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'fs'
-import type { DanmakuComment, DanmakuCommentRaw, DanmakuCommentsResponse, DanmakuSearchResponse, JellyfinServerInfo } from '../shared/types'
+import type { DanmakuComment, DanmakuCommentRaw, DanmakuCommentsResponse, DanmakuSearchResponse, JellyfinServerInfo, ServerType } from '../shared/types'
 import * as http from 'http'
 import * as https from 'https'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { posterCache } from './services/poster-cache'
 
 // ==================== 资源路径工具 ====================
 
@@ -32,26 +34,34 @@ function getResourcePath(relativePath: string): string {
 }
 
 // ==================== 统一图标资源入口 ====================
-// 全局图标统一入口：所有图标（窗口/托盘/任务栏）均从 assets/icon 读取同一套液态玻璃风格素材
-// 开发环境：从项目根/assets/icon 读取
-// 打包环境：extraResources 将 assets/icon 复制到 resources/icon，从该路径读取
+// 全局图标统一入口：所有图标（窗口/托盘/任务栏）均从 build/ 读取透明派生资源
+// 开发环境：从项目根/build 读取透明派生资源
+// 打包环境：extraResources 将透明派生资源复制到 resources/icon
+// assets/icon 下的原图始终只读，不直接用于系统图标渲染。
 
 /** 获取统一图标资源路径（开发/打包环境自适应） */
 function getIconPath(name: string): string {
   if (app.isPackaged) {
     return join(process.resourcesPath, 'icon', name)
   }
-  return join(__dirname, '../../', 'assets', 'icon', name)
+  return join(__dirname, '../../', 'build', name)
 }
 
-/** 窗口图标：256px（适配高 DPI 任务栏） */
-function getWindowIcon(): string {
-  return getIconPath('icon-256.png')
+/** 读取透明 PNG，不创建画布、不填充背景色。 */
+function loadNativeIcon(name: string, size?: number): NativeImage {
+  const icon = nativeImage.createFromPath(getIconPath(name))
+  if (icon.isEmpty()) return icon
+  return size ? icon.resize({ width: size, height: size, quality: 'best' }) : icon
 }
 
-/** 托盘图标：32px（Windows 任务栏托盘标准尺寸） */
-function getTrayIcon(): string {
-  return getIconPath('icon-32.png')
+/** 窗口图标：完整保留 PNG Alpha，适配高 DPI 任务栏。 */
+function getWindowIcon(): NativeImage {
+  return loadNativeIcon('icon-256.png')
+}
+
+/** 托盘图标：完整保留 PNG Alpha。 */
+function getTrayIcon(): NativeImage {
+  return loadNativeIcon('icon-32.png', 32)
 }
 
 // ==================== 日志系统 ====================
@@ -280,6 +290,12 @@ interface JellyfinServerConfig {
   url: string
   token: string
   userId?: string
+  /** 服务器类型，旧配置无该字段时默认按 'jellyfin' 处理 */
+  type?: ServerType
+  /** Emby 专属：登录账号 */
+  username?: string
+  /** Emby 专属：加密保存的密码（密文） */
+  password?: string
 }
 
 function getServers(): JellyfinServerConfig[] {
@@ -335,16 +351,43 @@ async function connectToServer(id: string): Promise<{ success: boolean; data?: J
     return { success: false, error: `服务器 "${server.name}" 的凭据无法解密（safeStorage 版本变更），请在设置中重新输入 URL 和 Token` }
   }
 
+  // Emby 服务器：使用登录时保存的 token + userId，直接校验可用性
+  if (server.type === 'emby') {
+    try {
+      if (!server.userId) {
+        throw new Error('Emby 服务器缺少 userId，请重新输入账号密码')
+      }
+      const auth: JellyfinAuth = { url: server.url, token: server.token, userId: server.userId }
+      // 调用 /System/Info 校验 token 是否有效
+      const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
+        auth, '/System/Info'
+      )
+      jellyfinAuth = auth
+      setActiveServerId(id)
+      // 同步旧 key（兼容 Home.tsx 的 connectedServer/token 读取逻辑）
+      configData['jellyfin'] = { url: server.url, token: server.token }
+      saveConfigFile()
+      console.log(`[server][emby] 已连接: ${info.ServerName} v${info.Version}, userId=${auth.userId}`)
+      return { success: true, data: info }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[server][emby] 连接失败 (${server.name}): ${msg}`)
+      return { success: false, error: msg }
+    }
+  }
+
+  // Jellyfin 服务器：通过 /Users/Me 获取当前用户 ID（不需要管理员权限）
   try {
     const auth: JellyfinAuth = { url: server.url, token: server.token, userId: '' }
     const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
       auth, '/System/Info'
     )
-    const users = await jellyfinRequest<{ Id: string; Name: string }[]>(auth, '/Users')
-    if (!Array.isArray(users) || users.length === 0) {
-      throw new Error('服务器上没有找到用户')
+    // 使用 /Users/Me 获取当前认证用户信息（普通用户也有权限访问）
+    const me = await jellyfinRequest<{ Id: string; Name?: string }>(auth, '/Users/Me')
+    if (!me || !me.Id) {
+      throw new Error('无法获取当前用户信息')
     }
-    auth.userId = users[0].Id
+    auth.userId = me.Id
     jellyfinAuth = auth
 
     // 更新 userId
@@ -365,6 +408,92 @@ async function connectToServer(id: string): Promise<{ success: boolean; data?: J
   }
 }
 
+// ==================== Emby 登录认证 ====================
+
+/** Emby 客户端标识，用于 X-Emby-Authorization 头 */
+const EMBY_CLIENT_INFO = 'MediaBrowser Client="logvar-player", Device="PC", DeviceId="logvar-player-' + 
+  (process.env.COMPUTERNAME || 'unknown') + '", Version="1.0.0"'
+
+/**
+ * Emby 账号密码登录：调用 /Users/AuthenticateByName 获取 AccessToken + User.Id
+ * @returns token, userId, 可选 serverName/version
+ */
+async function embyLogin(
+  url: string,
+  username: string,
+  password: string
+): Promise<{ success: boolean; data?: { token: string; userId: string; serverName?: string; version?: string; username?: string }; error?: string }> {
+  try {
+    const baseUrl = normalizeUrl(url)
+    if (!baseUrl) throw new Error('Emby 服务器地址不能为空')
+    const endpoint = `${baseUrl}/Users/AuthenticateByName`
+    console.log(`[emby:login] POST ${endpoint}, username=${username}`)
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'X-Emby-Authorization': EMBY_CLIENT_INFO,
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      },
+      body: JSON.stringify({ Username: username, Pw: password }),
+      signal: AbortSignal.timeout(15000)
+    })
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      // 401 = 账号密码错误
+      if (response.status === 401) {
+        throw new Error('账号或密码错误')
+      }
+      throw new Error(`Emby 登录失败 HTTP ${response.status}: ${text || response.statusText}`)
+    }
+
+    const buffer = await response.arrayBuffer()
+    const text = new TextDecoder('utf-8').decode(buffer)
+    const data = JSON.parse(text) as {
+      AccessToken?: string
+      User?: { Id?: string; Name?: string; ConnectUserName?: string }
+      SessionInfo?: unknown
+    }
+
+    if (!data.AccessToken || !data.User?.Id) {
+      throw new Error('Emby 登录响应缺少 AccessToken 或 User.Id')
+    }
+
+    // 获取服务器信息（不阻塞登录成功）
+    let serverName: string | undefined
+    let version: string | undefined
+    try {
+      const info = await fetch(`${baseUrl}/System/Info`, {
+        headers: { 'X-Emby-Token': data.AccessToken, Accept: 'application/json' },
+        signal: AbortSignal.timeout(10000)
+      })
+      if (info.ok) {
+        const infoData = await info.json() as { ServerName?: string; Version?: string }
+        serverName = infoData.ServerName
+        version = infoData.Version
+      }
+    } catch { /* ignore — 登录已成功，服务器信息可选 */ }
+
+    console.log(`[emby:login] 登录成功: user=${data.User.Name || username}, userId=${data.User.Id}, server=${serverName || 'unknown'}`)
+    return {
+      success: true,
+      data: {
+        token: data.AccessToken,
+        userId: data.User.Id,
+        serverName,
+        version,
+        username: data.User.Name || username
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[emby:login] 失败: ${msg}`)
+    return { success: false, error: msg }
+  }
+}
+
 ipcMain.handle('jellyfin:connect', async (_event, url: string, token: string) => {
   if (isUnresolvedEncrypted(url) || isUnresolvedEncrypted(token)) {
     console.warn('[server] Jellyfin 凭据未解密，请在设置中重新输入')
@@ -372,21 +501,34 @@ ipcMain.handle('jellyfin:connect', async (_event, url: string, token: string) =>
   }
   try {
     console.log(`Attempting Jellyfin connection to ${url}`)
-    const auth: JellyfinAuth = { url, token, userId: '' }
+    const normalizedUrl = normalizeUrl(url)
+    const auth: JellyfinAuth = { url: normalizedUrl, token, userId: '' }
 
     const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
       auth,
       '/System/Info'
     )
 
-    const users = await jellyfinRequest<{ Id: string; Name: string }[]>(
-      auth,
-      '/Users'
-    )
-    if (!Array.isArray(users) || users.length === 0) {
-      throw new Error('Jellyfin 服务器上没有找到用户')
+    // 检查是否为 Emby 服务器（通过 URL 匹配已保存的服务器配置）
+    const servers = getServers()
+    const matchedServer = servers.find(s => normalizeUrl(s.url) === normalizedUrl)
+    const isEmby = matchedServer?.type === 'emby'
+
+    if (isEmby && matchedServer?.userId) {
+      // Emby 服务器：使用登录时保存的 userId（Emby 不支持 /Users/Me 接口）
+      auth.userId = matchedServer.userId
+      console.log(`[server][emby] 使用已保存的 userId: ${auth.userId}`)
+    } else {
+      // Jellyfin 服务器：通过 /Users/Me 获取当前用户 ID（不需要管理员权限）
+      const me = await jellyfinRequest<{ Id: string; Name?: string }>(
+        auth,
+        '/Users/Me'
+      )
+      if (!me || !me.Id) {
+        throw new Error('无法获取当前用户信息')
+      }
+      auth.userId = me.Id
     }
-    auth.userId = users[0].Id
 
     jellyfinAuth = auth
     console.log(`Jellyfin connected: ${info.ServerName} v${info.Version}, userId=${auth.userId}`)
@@ -467,6 +609,60 @@ ipcMain.handle('server:test', async (_event, url: string, token: string) => {
     return { success: true, data: info, elapsed }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err), elapsed: Date.now() - startTime }
+  }
+})
+
+// ==================== Emby 登录 / 测试 / 添加 IPC ====================
+
+ipcMain.handle('emby:login', async (_event, url: string, username: string, password: string) => {
+  return embyLogin(url, username, password)
+})
+
+ipcMain.handle('server:test-emby', async (_event, params: { url: string; username: string; password: string }) => {
+  const startTime = Date.now()
+  const result = await embyLogin(params.url, params.username, params.password)
+  const elapsed = Date.now() - startTime
+  if (!result.success || !result.data) {
+    return { success: false, error: result.error, elapsed }
+  }
+  return {
+    success: true,
+    data: {
+      ServerName: result.data.serverName,
+      Version: result.data.version,
+      username: result.data.username
+    },
+    elapsed
+  }
+})
+
+ipcMain.handle('server:add-emby', async (_event, params: {
+  name: string
+  url: string
+  username: string
+  password: string
+  token: string
+  userId: string
+}) => {
+  try {
+    const servers = getServers()
+    const id = generateServerId()
+    const server: JellyfinServerConfig = {
+      id,
+      name: params.name || `Emby (${params.username})`,
+      url: params.url.replace(/\/+$/, ''),
+      token: params.token,
+      userId: params.userId,
+      type: 'emby',
+      username: params.username,
+      password: params.password
+    }
+    servers.push(server)
+    saveServers(servers)
+    console.log(`[server][emby] 已添加服务器: ${server.name} (userId=${server.userId})`)
+    return { success: true, data: server }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
 })
 
@@ -934,6 +1130,41 @@ ipcMain.handle('jellyfin:get-genre-items', async (_event, genre: string, startIn
   }
 })
 
+// ==================== IPC: Jellyfin 最近入库（官方 getLatestMedia 接口） ====================
+
+ipcMain.handle('jellyfin:get-latest-media', async (_event, limit: number = 16) => {
+  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  try {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      includeItemTypes: 'Movie,Series',
+      enableImages: 'true',
+      enableUserData: 'true',
+      groupItems: 'false',
+      fields: 'Overview,PremiereDate,CommunityRating,DateCreated'
+    })
+    const endpoint = `/Users/${jellyfinAuth.userId}/Items/Latest?${params.toString()}`
+    console.log(`[jellyfin:get-latest-media] 请求参数: userId=${jellyfinAuth.userId}, limit=${limit}, includeItemTypes=Movie,Series`)
+
+    const data = await jellyfinRequest<unknown[]>(jellyfinAuth, endpoint)
+
+    if (!Array.isArray(data)) {
+      console.warn('[jellyfin:get-latest-media] 接口返回非数组，返回空列表')
+      return { success: true, data: [] }
+    }
+
+    console.log(`[jellyfin:get-latest-media] 接口返回 ${data.length} 条数据`)
+    data.forEach((item: any, idx: number) => {
+      console.log(`[jellyfin:get-latest-media] #${idx + 1} 名称: "${item.Name}" | 类型: ${item.Type} | DateCreated: ${item.DateCreated || '无'} | Id: ${item.Id}`)
+    })
+
+    return { success: true, data }
+  } catch (err) {
+    console.error('[jellyfin:get-latest-media] 请求失败:', err)
+    return { success: false, error: String(err) }
+  }
+})
+
 // ==================== IPC: Store ====================
 
 // ==================== 敏感数据加密（safeStorage） ====================
@@ -1074,6 +1305,8 @@ function encryptConfig(data: Record<string, unknown>): Record<string, unknown> {
       const sv = { ...s }
       if (typeof sv.url === 'string' && needsEncryption(sv.url)) sv.url = encryptValue(sv.url)
       if (typeof sv.token === 'string' && needsEncryption(sv.token)) sv.token = encryptValue(sv.token)
+      // Emby 专属：加密 password
+      if (typeof sv.password === 'string' && needsEncryption(sv.password)) sv.password = encryptValue(sv.password)
       return sv
     })
   }
@@ -1100,12 +1333,13 @@ function decryptConfig(data: Record<string, unknown>): Record<string, unknown> {
     }
     out.jellyfin = jf
   }
-  // 解密 jellyfin:servers 数组中每个服务器的 url 和 token
+  // 解密 jellyfin:servers 数组中每个服务器的 url / token / password
   if (Array.isArray(out['jellyfin:servers'])) {
     out['jellyfin:servers'] = (out['jellyfin:servers'] as Record<string, unknown>[]).map(s => {
       const sv = { ...s }
       if (typeof sv.url === 'string' && needsDecryption(sv.url)) sv.url = decryptValue(sv.url)
       if (typeof sv.token === 'string' && needsDecryption(sv.token)) sv.token = decryptValue(sv.token)
+      if (typeof sv.password === 'string' && needsDecryption(sv.password)) sv.password = decryptValue(sv.password)
       return sv
     })
   }
@@ -1384,10 +1618,29 @@ function saveRecentlyAddedConfig(config: RecentlyAddedConfig): void {
 ipcMain.handle('recentlyAdded:list', async (_event, limit?: number) => {
   try {
     let items = loadRecentlyAdded()
+
+    items = items.filter(item => {
+      const isValid = typeof item.addedAt === 'number' && item.addedAt > 0 && item.addedAt < Date.now() + 86400000
+      if (!isValid) {
+        console.warn(`[RecentlyAdded] 过滤无效记录: "${item.name}" | itemId: ${item.itemId} | addedAt: ${item.addedAt}`)
+      }
+      return isValid
+    })
+
+    const beforeSort = items.map(i => `${i.name}(${i.addedAt})`).join(', ')
+    console.log(`[RecentlyAdded] 查询列表 - 过滤前: ${items.length} 条, 排序前: [${beforeSort.slice(0, 200)}${beforeSort.length > 200 ? '...' : ''}]`)
+
     items = items.sort((a, b) => b.addedAt - a.addedAt)
+
+    const afterSort = items.map(i => `${i.name}(${i.addedAt})`).join(', ')
+    console.log(`[RecentlyAdded] 查询列表 - 排序后: [${afterSort.slice(0, 200)}${afterSort.length > 200 ? '...' : ''}]`)
+
     if (limit && limit > 0) {
       items = items.slice(0, limit)
     }
+
+    console.log(`[RecentlyAdded] 查询列表 - 返回: ${items.length} 条, 第一条: ${items[0]?.name || '空'}`)
+
     return { success: true, data: items }
   } catch (err) {
     console.error('recentlyAdded:list failed:', err)
@@ -1419,18 +1672,32 @@ ipcMain.handle('recentlyAdded:addBatch', async (_event, newItems: RecentlyAddedI
   try {
     const items = loadRecentlyAdded()
     const now = Date.now()
-    for (const item of newItems) {
+
+    console.log(`[RecentlyAdded] 批量添加 - 待添加: ${newItems.length} 条`)
+
+    for (let i = 0; i < newItems.length; i++) {
+      const item = newItems[i]
       const idx = items.findIndex((i) => i.itemId === item.itemId)
-      const entry: RecentlyAddedItem = { ...item, addedAt: item.addedAt || now }
+      const entry: RecentlyAddedItem = {
+        ...item,
+        addedAt: item.addedAt > 0 ? item.addedAt : now + i
+      }
       if (idx >= 0) {
         items.splice(idx, 1)
+        console.log(`[RecentlyAdded] 批量添加 - 更新已有记录: "${item.name}"`)
       }
       items.unshift(entry)
+      console.log(`[RecentlyAdded] 批量添加 - 新增记录: "${item.name}" | 时间戳: ${entry.addedAt}`)
     }
+
     if (items.length > MAX_RECENTLY_ADDED) {
+      const removed = items.length - MAX_RECENTLY_ADDED
       items.length = MAX_RECENTLY_ADDED
+      console.log(`[RecentlyAdded] 批量添加 - 超出最大限制，移除 ${removed} 条旧记录`)
     }
+
     saveRecentlyAdded(items)
+    console.log(`[RecentlyAdded] 批量添加 - 完成，总数: ${items.length} 条`)
     return { success: true }
   } catch (err) {
     console.error('recentlyAdded:addBatch failed:', err)
@@ -2517,14 +2784,113 @@ function registerDoubanImageProtocol(): void {
 
 
 function registerJellyfinImageProtocol(): void {
-  protocol.handle('jellyfin-image', (request) => {
-    // 将 jellyfin-image://host:port/path 转换为 http://host:port/path
-    const realUrl = request.url.replace('jellyfin-image://', 'http://')
-    return net.fetch(realUrl, {
-      signal: AbortSignal.timeout(15000),
-      bypassCustomProtocolHandlers: true
-    })
-  })
+  protocol.handle('jellyfin-image', async (request) => {
+    try {
+      const url = new URL(request.url);
+      const token = url.searchParams.get('api_key') || '';
+      url.searchParams.delete('api_key');
+      const realUrl = 'http://' + url.host + url.pathname + url.search;
+
+      const cacheKey = `jellyfin_${url.pathname}_${url.search}`;
+      const cachedData = await posterCache.get(cacheKey);
+
+      if (cachedData) {
+        console.log(`[jellyfin-image] 缓存命中: ${cacheKey}`);
+        return new Response(cachedData, {
+          headers: { 'Content-Type': 'image/png' },
+        });
+      }
+
+      console.log(`[jellyfin-image] 请求: ${realUrl}`);
+
+      try {
+        const response = await net.fetch(realUrl, {
+          signal: AbortSignal.timeout(15000),
+          bypassCustomProtocolHandlers: true,
+        });
+
+        if (!response.ok) {
+          throw new Error(`${response.status} ${response.statusText}`);
+        }
+
+        const buffer = Buffer.from(await response.arrayBuffer());
+        await posterCache.set(cacheKey, buffer, realUrl);
+
+        return new Response(buffer, {
+          headers: { 'Content-Type': response.headers.get('content-type') || 'image/png' },
+        });
+      } catch (err) {
+        console.error(`[jellyfin-image] 请求失败: ${err}`);
+        return new Response('Error loading image', { status: 500 });
+      }
+    } catch (err) {
+      console.error(`[jellyfin-image] 解析失败: ${err}`);
+      return new Response('Invalid URL', { status: 400 });
+    }
+  });
+}
+
+// ==================== 自定义协议: emby-image ====================
+// Emby 图片协议：URL 格式 emby-image://http/host:port/path?token=xxx 或 emby-image://https/host:port/path?token=xxx
+// 必须使用 X-Emby-Token 请求头传递令牌，不能像 Jellyfin 用 api_key 参数
+
+function registerEmbyImageProtocol(): void {
+  protocol.handle('emby-image', async (request) => {
+    try {
+      let realUrl = request.url
+        .replace(/^emby-image:\/\/https\//, 'https://')
+        .replace(/^emby-image:\/\/http\//, 'http://')
+        .replace(/^emby-image:\/\//, 'http://');
+
+      const urlObj = new URL(realUrl);
+      const token = urlObj.searchParams.get('token') || '';
+      urlObj.searchParams.delete('token');
+      realUrl = urlObj.toString();
+
+      const cacheKey = `emby_${urlObj.pathname}_${urlObj.search}`;
+      const cachedData = await posterCache.get(cacheKey);
+
+      if (cachedData) {
+        console.log(`[emby-image] 缓存命中: ${cacheKey}`);
+        return new Response(cachedData, {
+          headers: { 'Content-Type': 'image/png' },
+        });
+      }
+
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['X-Emby-Token'] = token;
+      }
+
+      console.log(`[emby-image] ===== 请求开始 =====`);
+      console.log(`[emby-image] URL: ${realUrl}`);
+
+      try {
+        const response = await net.fetch(realUrl, {
+          signal: AbortSignal.timeout(15000),
+          bypassCustomProtocolHandlers: true,
+          headers,
+        });
+
+        if (!response.ok) {
+          throw new Error(`${response.status} ${response.statusText}`);
+        }
+
+        const buffer = Buffer.from(await response.arrayBuffer());
+        await posterCache.set(cacheKey, buffer, realUrl);
+
+        return new Response(buffer, {
+          headers: { 'Content-Type': response.headers.get('content-type') || 'image/png' },
+        });
+      } catch (err) {
+        console.error(`[emby-image] 请求失败: ${err}`);
+        return new Response('Error loading image', { status: 500 });
+      }
+    } catch (err) {
+      console.error(`[emby-image] 解析失败: ${err}`);
+      return new Response('Invalid URL', { status: 400 });
+    }
+  });
 }
 
 
@@ -2598,13 +2964,13 @@ function createWindow(): void {
     height: 800,
     minWidth: 900,
     minHeight: 600,
-    icon: getWindowIcon(),  // 统一图标入口：窗口图标读取 assets/icon/icon-256.png
+    icon: getWindowIcon(),  // 统一图标入口：窗口图标读取 build/icon-256.png（透明派生资源）
     show: false,
     transparent: true,
     frame: false,
     hasShadow: false,
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(__dirname, '../preload/preload.js'),
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
@@ -2641,14 +3007,12 @@ function createWindow(): void {
 }
 
 function createTray(): void {
-  // 统一图标入口：托盘图标读取 assets/icon/icon-32.png
-  const iconPath = getTrayIcon()
-  let icon = nativeImage.createFromPath(iconPath)
+  // 直接读取带 Alpha 的派生 PNG，不使用白色画布或背景填充。
+  let icon = getTrayIcon()
   if (icon.isEmpty()) {
     // 回退：从 256px 母版缩放到 32px
     console.warn('[tray] 32px 图标缺失，从 256px 母版缩放')
-    icon = nativeImage.createFromPath(getIconPath('icon-256.png'))
-    icon = icon.resize({ width: 32, height: 32 })
+    icon = loadNativeIcon('icon-256.png', 32)
   }
   tray = new Tray(icon)
 
@@ -2690,7 +3054,8 @@ function createTray(): void {
 
 // 注册自定义协议为 privileged，使渲染进程的 <img> 标签可以加载
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'jellyfin-image', privileges: { bypassCSP: true, supportFetchAPI: true, corsEnabled: true, stream: true } }
+  { scheme: 'jellyfin-image', privileges: { bypassCSP: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+  { scheme: 'emby-image', privileges: { bypassCSP: true, supportFetchAPI: true, corsEnabled: true, stream: true } }
 ])
 
 app.whenReady().then(() => {
@@ -2698,6 +3063,7 @@ app.whenReady().then(() => {
 
   // 注册自定义协议
   registerJellyfinImageProtocol()
+  registerEmbyImageProtocol()
   registerLocalFileProtocol()
   registerDoubanImageProtocol()
 
