@@ -2,89 +2,30 @@ import { useRef, useState, useEffect, useCallback, type ReactElement } from 'rea
 // 修复点 1.15: pages 目录下深一层，从 ../../ → ../../../shared/types
 import type { DanmakuComment, DanmakuSearchResult, DanmakuSearchResponse, JellyfinItem } from '../../../shared/types'
 import { useSearchParams, useNavigate, Link } from 'react-router-dom'
-import { motion, AnimatePresence } from 'framer-motion'
-import { Volume2, VolumeX, Volume1, Gauge, List, X, ChevronLeft, ChevronRight, ArrowLeft } from 'lucide-react'
+import { ArrowLeft } from 'lucide-react'
 import { cachedFetch } from '../utils/apiCache'
 import { MediaTimeBus, createMediaTimeBus } from '../utils/mediaTimeBus'
 import { usePlayerStore } from '../utils/playerStore'
 import { DanmakuEngine } from '../utils/danmakuEngine'
 import { danmakuRequestManager } from '../utils/danmakuRequestManager'
-
-// ==================== 字幕类型 ====================
-
-interface SubtitleCue {
-  start: number
-  end: number
-  text: string
-}
-
-function parseVTT(vtt: string): SubtitleCue[] {
-  const cues: SubtitleCue[] = []
-  const lines = vtt.split(/\r?\n/)
-  // 跳过 WEBVTT 头部
-  let i = 0
-  while (i < lines.length && (lines[i].trim() === '' || lines[i].startsWith('WEBVTT') || lines[i].startsWith('Kind:') || lines[i].startsWith('Language:'))) {
-    i++
-  }
-  // 解析时间轴块
-  const timeRe = /^(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})/
-  function parseTime(s: string): number {
-    const parts = s.split(':')
-    const secParts = parts[2].split(/[.,]/)
-    return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(secParts[0]) + parseInt(secParts[1]) / 1000
-  }
-  while (i < lines.length) {
-    const line = lines[i].trim()
-    const m = line.match(timeRe)
-    if (m) {
-      const start = parseTime(m[1])
-      const end = parseTime(m[2])
-      i++
-      const textLines: string[] = []
-      while (i < lines.length && lines[i].trim() !== '') {
-        textLines.push(lines[i].trim())
-        i++
-      }
-      // 过滤掉 VTT 标签（如 <v ...>）
-      const text = textLines.join('\n').replace(/<[^>]+>/g, '').trim()
-      if (text) cues.push({ start, end, text })
-    } else {
-      i++
-    }
-  }
-  return cues
-}
-
-
-
-// ==================== 工具 ====================
-
-function formatTime(seconds: number): string {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = Math.floor(seconds % 60)
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-}
-
-function cleanTitleForMatch(name: string): string {
-  return name
-    .replace(/\.[^.]+$/, '')
-    .replace(/\[.*?\]/g, '').replace(/【.*?】/g, '').replace(/\(.*?\)/g, '')
-    .replace(/\d{4}[./-]\d{2}[./-]\d{2}/g, '')
-    .replace(/1080[Pp]|720[Pp]|4K|BD|HD|WEB|DL/gi, '')
-    .replace(/x264|x265|H264|HEVC|AVC|AAC|FLAC|AUTO/gi, '')
-    .trim()
-}
-
-function extractSeriesNameFromFilename(filename: string): string {
-  const name = filename.replace(/\.[^.]+$/, '')
-  return name
-    .replace(/E?P?\s*\d{1,3}/gi, '').replace(/第\s*\d{1,3}\s*[话集]/g, '')
-    .replace(/S\d+E\d{1,3}/gi, '').replace(/\s*-\s*\d{1,3}/, '')
-    .replace(/\[.*?\]/g, '').replace(/【.*?】/g, '').replace(/\(.*?\)/g, '')
-    .trim()
-}
+import {
+  type FolderVideo,
+  type PlayerContextMenuState,
+  type SubtitleCue,
+  type SubtitleTrack,
+  cleanTitleForMatch,
+  extractSeriesNameFromFilename,
+  formatBytes,
+  formatTime,
+  parseVTT,
+  DanmakuSearchPanel,
+  DanmakuSettingsPanel,
+  MediaInfoOverlays,
+  PlayerContextMenu,
+  SubtitleSettingsPanel,
+  PlayerPopups,
+  PlayerControls
+} from '../features/player'
 
 // ==================== Player ====================
 
@@ -108,11 +49,10 @@ function Player(): ReactElement {
   // 剧集列表状态
   const [episodeList, setEpisodeList] = useState<JellyfinItem[]>([])
   const [currentEpisodeIndex, setCurrentEpisodeIndex] = useState(-1)
-  const [showEpisodeList, setShowEpisodeList] = useState(false)
   const [episodePopup, setEpisodePopup] = useState(false)
   
   // 本地文件夹视频列表
-  const [folderVideos, setFolderVideos] = useState<{name: string; path: string}[]>([])
+  const [folderVideos, setFolderVideos] = useState<FolderVideo[]>([])
 
   useEffect(() => {
     window.api.store.get('jellyfin').then((saved: unknown) => {
@@ -241,7 +181,7 @@ function Player(): ReactElement {
   const [volumePopup, setVolumePopup] = useState(false)
   const [speedPopup, setSpeedPopup] = useState(false)
   const [subtitlePopup, setSubtitlePopup] = useState(false)
-  const [subtitleTracks, setSubtitleTracks] = useState<{ index: number; label: string; language: string; url: string }[]>([])
+  const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([])
   const [activeSubtitleIndex, setActiveSubtitleIndex] = useState(-1)
   const [subtitleCues, setSubtitleCues] = useState<SubtitleCue[]>([])
   const [currentSubtitleText, setCurrentSubtitleText] = useState('')
@@ -249,6 +189,10 @@ function Player(): ReactElement {
   const [subtitleFontSize, setSubtitleFontSize] = useState(22) // 字幕字体大小 px
   const [subtitleLetterSpacing, setSubtitleLetterSpacing] = useState(0) // 字间距 px
   const [subtitleSettingsOpen, setSubtitleSettingsOpen] = useState(false)
+
+  // 竖屏视频检测
+  const [isPortrait, setIsPortrait] = useState(false)
+  const [videoAspectRatio, setVideoAspectRatio] = useState(16 / 9)
 
   // P2: 窗口置顶
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
@@ -266,6 +210,18 @@ function Player(): ReactElement {
     setSearchOpen(false)
   }, [])
 
+  const detectVideoOrientation = useCallback(() => {
+    if (videoRef.current) {
+      const { videoWidth, videoHeight } = videoRef.current
+      if (videoWidth > 0 && videoHeight > 0) {
+        const ratio = videoWidth / videoHeight
+        setVideoAspectRatio(ratio)
+        setIsPortrait(videoHeight > videoWidth)
+        console.log(`[Player] 视频方向: ${videoHeight > videoWidth ? '竖屏' : '横屏'}, 比例: ${ratio.toFixed(2)}`)
+      }
+    }
+  }, [])
+
   // 点击其它地方关闭弹出面板
   useEffect(() => {
     if (!volumePopup && !speedPopup && !subtitlePopup && !subtitleSettingsOpen && !settingsOpen && !searchOpen) return
@@ -279,7 +235,20 @@ function Player(): ReactElement {
     return () => document.removeEventListener('mousedown', handleClick)
   }, [volumePopup, speedPopup, subtitlePopup, subtitleSettingsOpen, settingsOpen, searchOpen, closeAllPopups])
 
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; visible: boolean }>({ x: 0, y: 0, visible: false })
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+
+    video.addEventListener('loadedmetadata', detectVideoOrientation)
+    video.addEventListener('play', detectVideoOrientation)
+
+    return () => {
+      video.removeEventListener('loadedmetadata', detectVideoOrientation)
+      video.removeEventListener('play', detectVideoOrientation)
+    }
+  }, [detectVideoOrientation])
+
+  const [contextMenu, setContextMenu] = useState<PlayerContextMenuState>({ x: 0, y: 0, visible: false })
   const [infoOverlay, setInfoOverlay] = useState(false)
   const [itemInfo, setItemInfo] = useState<Record<string, unknown> | null>(null)
   const [itemInfoLoading, setItemInfoLoading] = useState(false)
@@ -504,6 +473,27 @@ function Player(): ReactElement {
     setDanmakuBottomBoundary(value)
     engineRef.current?.setBoundary(danmakuTopBoundary, value)
     window.api.store.set('danmakuBottomBoundary', value)
+  }
+
+  const handleSubtitleBottomChange = (value: number): void => {
+    setSubtitleBottom(value)
+    window.api.store.set('subtitleBottom', value)
+  }
+
+  const handleSubtitleFontSizeChange = (value: number): void => {
+    setSubtitleFontSize(value)
+    window.api.store.set('subtitleFontSize', value)
+  }
+
+  const handleSubtitleLetterSpacingChange = (value: number): void => {
+    setSubtitleLetterSpacing(value)
+    window.api.store.set('subtitleLetterSpacing', value)
+  }
+
+  const handleSubtitleSettingsReset = (): void => {
+    handleSubtitleBottomChange(8)
+    handleSubtitleFontSizeChange(22)
+    handleSubtitleLetterSpacingChange(0)
   }
 
   const handleDanmakuSearch = async (keyword?: string): Promise<void> => {
@@ -766,6 +756,22 @@ function Player(): ReactElement {
     setSpeedToast(`${rate}x`); setTimeout(() => setSpeedToast(''), 2000)
   }
 
+  const handleVolumeChange = (value: number): void => {
+    playerActions.setVolume(value)
+    const video = videoRef.current
+    if (video) {
+      video.volume = value / 100
+      video.muted = value === 0
+    }
+  }
+
+  const handleToggleMute = (): void => {
+    const video = videoRef.current
+    if (!video) return
+    video.muted = !video.muted
+    playerActions.setVolume(video.muted ? 0 : Math.round(video.volume * 100))
+  }
+
   // 沉浸式控制栏 — 鼠标不动 3 秒自动隐藏
   const [controlsVisible, setControlsVisible] = useState(true)
   const hideTimerRef = useRef<NodeJS.Timeout | null>(null)
@@ -801,31 +807,13 @@ function Player(): ReactElement {
   }
   const handleCloseInfo = (): void => { setInfoOverlay(false); setItemInfo(null) }
 
-  // 修复点 1.5: 补齐 fd / fb 的参数类型与返回值类型，消除严格模式下 implicit any
-  const fd = (s: number): string => {
-    const safe = isFinite(s) ? Math.max(0, s) : 0
-    const h = Math.floor(safe / 3600)
-    const m = Math.floor((safe % 3600) / 60)
-    const sec = Math.floor(safe % 60)
-    return h > 0
-      ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-      : `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-  }
-  const fb = (b: number): string => {
-    const safe = isFinite(b) ? Math.max(0, b) : 0
-    return safe >= 1e9 ? `${(safe / 1e9).toFixed(1)} GB`
-      : safe >= 1e6 ? `${(safe / 1e6).toFixed(1)} MB`
-      : safe >= 1e3 ? `${(safe / 1e3).toFixed(1)} KB`
-      : `${safe} B`
-  }
-
   const handleVideoSourceInfo = async (): Promise<void> => {
     setContextMenu({ x: 0, y: 0, visible: false })
     const info: Record<string, string> = {}
     const v = videoRef.current
     if (v) {
       info["视频分辨率"] = `${v.videoWidth || '--'} × ${v.videoHeight || '--'}`
-      info["时长"] = fd(v.duration || 0)
+      info["时长"] = formatTime(v.duration || 0)
       const q = v.getVideoPlaybackQuality?.()
       if (q) {
         info["总帧数"] = String(q.totalVideoFrames || '--')
@@ -857,7 +845,7 @@ function Player(): ReactElement {
             const anyMs = ms as Record<string, unknown>
             if (anyMs.Container) info["封装格式"] = String(anyMs.Container)
             if (anyMs.Bitrate) info["码率"] = `${(Number(anyMs.Bitrate) / 1e6).toFixed(1)} Mbps`
-            if (anyMs.Size) info["文件大小"] = fb(Number(anyMs.Size))
+            if (anyMs.Size) info["文件大小"] = formatBytes(Number(anyMs.Size))
             const streams = (anyMs.MediaStreams as MediaStream[] | undefined) || []
             const vs = streams.find(s => s.Type === "Video")
             if (vs) {
@@ -1036,15 +1024,12 @@ function Player(): ReactElement {
     )
   }
 
-  const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0
-  const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0
-
   return (
     // 修复全屏黑条: 容器改为纯 relative，子元素均 absolute 定位，控件悬浮覆盖视频
     <div ref={containerRef} className="h-full relative bg-black outline-none" onKeyDown={handleKeyDown} tabIndex={0}>
 
       {/* 视频区域 — 全屏铺满容器 */}
-      <div className="absolute inset-0 bg-black overflow-hidden" onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
+      <div className={`absolute inset-0 bg-black overflow-hidden flex items-center justify-center ${isPortrait ? 'portrait-mode' : ''}`} onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
         {/* 顶部信息栏 */}
         <div className={`absolute top-0 left-0 right-0 z-30 transition-opacity duration-300 ease-in-out ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
           <div className="player-glass-bar bg-gradient-to-b from-black/60 to-black/30 px-4 py-3 flex items-center gap-3 border-none">
@@ -1068,8 +1053,10 @@ function Player(): ReactElement {
           </div>
         </div>
 
-        <video ref={videoRef} className="absolute inset-0 w-full h-full object-contain" controls={false} playsInline preload="metadata" crossOrigin="anonymous" />
-        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-10" />
+        <div className="relative bg-black" style={{ maxWidth: isPortrait ? '60vh' : '100%', maxHeight: '100%', aspectRatio: String(videoAspectRatio) }}>
+          <video ref={videoRef} className="w-full h-full object-contain" controls={false} playsInline preload="metadata" crossOrigin="anonymous" />
+          <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-10" />
+        </div>
 
         {/* 自定义字幕渲染（位置/大小/字间距可调） */}
         {currentSubtitleText && activeSubtitleIndex >= 0 && (
@@ -1126,561 +1113,135 @@ function Player(): ReactElement {
       </div>
 
       {/* 弹幕搜索面板 */}
-      {searchOpen && (
-        <div style={{ position: 'fixed', bottom: '72px', right: '20px' }} className="danmaku-search-popup w-72 player-glass-panel z-50 p-4">
-          <div className="flex gap-2 mb-3">
-            <input type="text" value={searchKeyword} onChange={(e) => setSearchKeyword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleDanmakuSearch() }} placeholder="搜索弹幕" className="flex-1 bg-white/5 border border-white/5 rounded-md px-3 py-2 text-xs text-white/90 placeholder-white/25 focus:outline-none focus:border-[#8b82f6]/40 focus:bg-white/8" autoFocus />
-            <button onClick={() => handleDanmakuSearch()} disabled={searchLoading} className="px-3 py-2 bg-[#8b82f6] hover:bg-[#7a72e5] rounded-md text-xs font-medium text-white disabled:opacity-40 transition-colors">{searchLoading ? '...' : '搜索'}</button>
-          </div>
-          {searchLoading && (
-            <div className="flex items-center justify-center py-6">
-              <svg className="animate-spin h-5 w-5 text-[#8b82f6]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              <span className="ml-2 text-xs text-white/40">搜索中...</span>
-            </div>
-          )}
-          {!searchLoading && searchResults.length > 0 && (
-            <div className="max-h-60 overflow-y-auto space-y-0.5">
-              {searchResults.map((ep, i) => (
-                <button key={`${ep.episodeId}-${i}`} onClick={() => handleDanmakuSelect(ep)} className="w-full text-left px-3 py-2 rounded hover:bg-white/5 transition-colors">
-                  <div className="text-xs text-white truncate">{ep.animeTitle}</div>
-                  <div className="text-[10px] text-white/35 mt-0.5">{ep.episodeTitle} &middot; {ep.typeDescription}</div>
-                </button>
-              ))}
-            </div>
-          )}
-          {!searchLoading && searchResults.length === 0 && searchKeyword.trim() && (
-            <div className="text-center py-4 text-xs text-white/25">无搜索结果</div>
-          )}
-          {localFile && (
-            <button onClick={handleLoadLocalXml} className="mt-2 w-full text-[10px] text-white/30 hover:text-[#8b82f6] py-2 border-t border-white/5 transition-colors">加载本地 XML 弹幕</button>
-          )}
-          <button onClick={() => { closeAllPopups(); setSearchResults([]) }} className="mt-2 w-full text-[10px] text-white/25 hover:text-white/70 py-1 transition-colors">关闭</button>
-        </div>
-      )}
+      <DanmakuSearchPanel
+        open={searchOpen}
+        keyword={searchKeyword}
+        loading={searchLoading}
+        results={searchResults}
+        hasLocalFile={Boolean(localFile)}
+        onKeywordChange={setSearchKeyword}
+        onSearch={() => { void handleDanmakuSearch() }}
+        onSelect={(result) => { void handleDanmakuSelect(result) }}
+        onLoadLocalXml={() => { void handleLoadLocalXml() }}
+        onClose={() => { closeAllPopups(); setSearchResults([]) }}
+      />
 
       {/* 弹幕设置面板 */}
-      {settingsOpen && (
-        <div style={{ position: 'fixed', bottom: '72px', right: '20px' }} className="danmaku-settings-popup w-60 player-glass-panel z-50 p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-xs font-medium">弹幕设置</h3>
-            <button onClick={closeAllPopups} className="text-white/30 hover:text-white/80 transition-colors text-sm">&times;</button>
-          </div>
-          <div className="space-y-4">
-            <div>
-              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>透明度</span><span>{Math.round(danmakuOpacity * 100)}%</span></div>
-              <input type="range" min="0" max="1" step="0.1" value={danmakuOpacity} onChange={(e) => handleOpacityChange(parseFloat(e.target.value))} className="w-full" />
-            </div>
-            <div>
-              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>字体大小</span><span>{danmakuFontSize}px</span></div>
-              <input type="range" min="12" max="48" step="1" value={danmakuFontSize} onChange={(e) => handleFontSizeChange(parseInt(e.target.value))} className="w-full" />
-            </div>
-            <div>
-              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>速度</span><span>{danmakuSpeed}px/s</span></div>
-              <input type="range" min="60" max="300" step="10" value={danmakuSpeed} onChange={(e) => handleSpeedChange(parseInt(e.target.value))} className="w-full" />
-            </div>
-            <div>
-              <div className="flex justify-between text-[10px] text-white/35 mb-1.5">
-                <span>弹幕密度</span>
-                <span>{danmakuMaxCount} 条</span>
-              </div>
-              <input
-                type="range"
-                min="50"
-                max="500"
-                step="50"
-                value={danmakuMaxCount}
-                onChange={(e) => handleDensityChange(parseInt(e.target.value))}
-                className="w-full"
-              />
-              <div className="flex justify-between text-[9px] text-white/25 mt-1">
-                <span>稀疏 (50)</span>
-                <span>密集 (500)</span>
-              </div>
-            </div>
-            <div>
-              <div className="flex justify-between text-[10px] text-white/35 mb-1.5">
-                <span>时间偏移</span>
-                <span className={danmakuOffset !== 0 ? 'text-[#8b82f6]' : ''}>{danmakuOffset > 0 ? `+${danmakuOffset.toFixed(1)}` : danmakuOffset.toFixed(1)}s</span>
-              </div>
-              <input
-                type="range"
-                min="-30"
-                max="30"
-                step="0.5"
-                value={danmakuOffset}
-                onChange={(e) => handleOffsetChange(parseFloat(e.target.value))}
-                className="w-full"
-              />
-              <div className="flex justify-between text-[9px] text-white/25 mt-1">
-                <span>提前 (-30s)</span>
-                <span>延后 (+30s)</span>
-              </div>
-              {danmakuOffset !== 0 && (
-                <button
-                  onClick={() => handleOffsetChange(0)}
-                  className="mt-2 w-full text-[10px] text-[#8b82f6] hover:text-[#a29bfe] py-1 transition-colors"
-                >
-                  重置偏移
-                </button>
-              )}
-            </div>
-            {/* 弹幕显示区域边界 */}
-            <div>
-              <div className="flex justify-between text-[10px] text-white/35 mb-1.5">
-                <span>上边界</span>
-                <span>{danmakuTopBoundary}%</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="1"
-                value={danmakuTopBoundary}
-                onChange={(e) => handleTopBoundaryChange(Math.min(parseInt(e.target.value), danmakuBottomBoundary - 1))}
-                className="w-full"
-              />
-              <div className="flex justify-between text-[9px] text-white/25 mt-1">
-                <span>顶部</span>
-                <span>向下</span>
-              </div>
-            </div>
-            <div>
-              <div className="flex justify-between text-[10px] text-white/35 mb-1.5">
-                <span>下边界</span>
-                <span>{danmakuBottomBoundary}%</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="1"
-                value={danmakuBottomBoundary}
-                onChange={(e) => handleBottomBoundaryChange(Math.max(parseInt(e.target.value), danmakuTopBoundary + 1))}
-                className="w-full"
-              />
-              <div className="flex justify-between text-[9px] text-white/25 mt-1">
-                <span>向上</span>
-                <span>底部</span>
-              </div>
-            </div>
-            {/* 快捷预设按钮 */}
-            <div className="flex gap-1.5 mt-1">
-              <button
-                onClick={() => { handleTopBoundaryChange(0); handleBottomBoundaryChange(100) }}
-                className="flex-1 text-[9px] py-1.5 rounded bg-white/5 hover:bg-white/10 text-white/60 hover:text-white/80 transition-colors"
-              >
-                全屏
-              </button>
-              <button
-                onClick={() => { handleTopBoundaryChange(0); handleBottomBoundaryChange(50) }}
-                className="flex-1 text-[9px] py-1.5 rounded bg-white/5 hover:bg-white/10 text-white/60 hover:text-white/80 transition-colors"
-              >
-                上半屏
-              </button>
-              <button
-                onClick={() => { handleTopBoundaryChange(50); handleBottomBoundaryChange(100) }}
-                className="flex-1 text-[9px] py-1.5 rounded bg-white/5 hover:bg-white/10 text-white/60 hover:text-white/80 transition-colors"
-              >
-                下半屏
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <DanmakuSettingsPanel
+        open={settingsOpen}
+        opacity={danmakuOpacity}
+        fontSize={danmakuFontSize}
+        speed={danmakuSpeed}
+        maxCount={danmakuMaxCount}
+        offset={danmakuOffset}
+        topBoundary={danmakuTopBoundary}
+        bottomBoundary={danmakuBottomBoundary}
+        onOpacityChange={handleOpacityChange}
+        onFontSizeChange={handleFontSizeChange}
+        onSpeedChange={handleSpeedChange}
+        onMaxCountChange={handleDensityChange}
+        onOffsetChange={handleOffsetChange}
+        onTopBoundaryChange={handleTopBoundaryChange}
+        onBottomBoundaryChange={handleBottomBoundaryChange}
+        onClose={closeAllPopups}
+      />
 
       {/* 字幕设置面板 */}
-      {subtitleSettingsOpen && (
-        <div style={{ position: 'fixed', bottom: '72px', right: '20px' }} className="subtitle-settings-popup w-60 player-glass-panel z-50 p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-xs font-medium">字幕设置</h3>
-            <button onClick={closeAllPopups} className="text-white/30 hover:text-white/80 transition-colors text-sm">&times;</button>
-          </div>
-          <div className="space-y-4">
-            <div>
-              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>上下位置</span><span>{subtitleBottom}%</span></div>
-              <input type="range" min="0" max="30" step="1" value={subtitleBottom} onChange={(e) => { const v = parseInt(e.target.value); setSubtitleBottom(v); window.api.store.set('subtitleBottom', v) }} className="w-full" />
-              <div className="flex justify-between text-[9px] text-white/25 mt-1"><span>靠上</span><span>靠下</span></div>
-            </div>
-            <div>
-              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>字体大小</span><span>{subtitleFontSize}px</span></div>
-              <input type="range" min="12" max="48" step="1" value={subtitleFontSize} onChange={(e) => { const v = parseInt(e.target.value); setSubtitleFontSize(v); window.api.store.set('subtitleFontSize', v) }} className="w-full" />
-              <div className="flex justify-between text-[9px] text-white/25 mt-1"><span>小</span><span>大</span></div>
-            </div>
-            <div>
-              <div className="flex justify-between text-[10px] text-white/35 mb-1.5"><span>字间距</span><span>{subtitleLetterSpacing}px</span></div>
-              <input type="range" min="0" max="12" step="0.5" value={subtitleLetterSpacing} onChange={(e) => { const v = parseFloat(e.target.value); setSubtitleLetterSpacing(v); window.api.store.set('subtitleLetterSpacing', v) }} className="w-full" />
-              <div className="flex justify-between text-[9px] text-white/25 mt-1"><span>紧凑</span><span>宽松</span></div>
-            </div>
-            <button
-              onClick={() => { setSubtitleBottom(8); setSubtitleFontSize(22); setSubtitleLetterSpacing(0); window.api.store.set('subtitleBottom', 8); window.api.store.set('subtitleFontSize', 22); window.api.store.set('subtitleLetterSpacing', 0) }}
-              className="w-full text-[10px] text-[#8b82f6] hover:text-[#a29bfe] py-1 transition-colors"
-            >
-              恢复默认
-            </button>
-          </div>
-        </div>
-      )}
+      <SubtitleSettingsPanel
+        open={subtitleSettingsOpen}
+        bottom={subtitleBottom}
+        fontSize={subtitleFontSize}
+        letterSpacing={subtitleLetterSpacing}
+        onBottomChange={handleSubtitleBottomChange}
+        onFontSizeChange={handleSubtitleFontSizeChange}
+        onLetterSpacingChange={handleSubtitleLetterSpacingChange}
+        onReset={handleSubtitleSettingsReset}
+        onClose={closeAllPopups}
+      />
 
       {/* 右键菜单 */}
-      {contextMenu.visible && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={handleCloseContextMenu} onContextMenu={(e) => { e.preventDefault(); handleCloseContextMenu() }} />
-          <div className="fixed z-50 w-40 player-glass-panel rounded-md py-1" style={{ left: Math.min(contextMenu.x, window.innerWidth - 170), top: Math.min(contextMenu.y, window.innerHeight - 280) }}>
-            <button onClick={handleShowInfo} className="w-full text-left px-3 py-2 text-xs text-white/80 hover:bg-white/5 transition-colors">影片信息</button>
-            <hr className="border-white/5 my-0.5" />
-            <button onClick={handleVideoSourceInfo} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">视频源信息</button>
-            <div className="px-3 py-1 text-[10px] text-white/35">播放速度</div>
-            {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
-              <button key={rate} onClick={() => handlePlaybackRateChange(rate)} className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${playbackRate === rate ? 'text-[#8b82f6]' : 'text-white/60 hover:bg-white/5'}`}>{rate}x</button>
-            ))}
-            <hr className="border-white/5 my-0.5" />
-            <button onClick={() => { handleDanmakuToggle(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">{danmakuEnabled ? '关闭弹幕' : '开启弹幕'}</button>
-            <button onClick={() => { handleOpenDanmakuSearch(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">搜索弹幕</button>
-            <button onClick={() => { handleLoadLocalXml(); handleCloseContextMenu() }} className="w-full text-left px-3 py-1.5 text-xs text-white/80 hover:bg-white/5 transition-colors">加载本地弹幕</button>
-          </div>
-        </>
-      )}
+      <PlayerContextMenu
+        state={contextMenu}
+        playbackRate={playbackRate}
+        danmakuEnabled={danmakuEnabled}
+        onClose={handleCloseContextMenu}
+        onShowInfo={() => { void handleShowInfo() }}
+        onShowVideoSourceInfo={() => { void handleVideoSourceInfo() }}
+        onPlaybackRateChange={handlePlaybackRateChange}
+        onToggleDanmaku={handleDanmakuToggle}
+        onOpenDanmakuSearch={handleOpenDanmakuSearch}
+        onLoadLocalXml={() => { void handleLoadLocalXml() }}
+      />
 
       {/* 影片信息覆盖层 */}
-      {infoOverlay && (
-        <div className="absolute inset-0 z-30 bg-black/70 backdrop-blur-sm flex items-center justify-center animate-page-in" onClick={handleCloseInfo}>
-          <div className="w-[480px] max-h-[70vh] player-glass-panel p-8 overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-sm font-medium">影片信息</h3>
-              <button onClick={handleCloseInfo} className="w-6 h-6 rounded flex items-center justify-center text-white/50 hover:text-white hover:bg-white/10 transition-all text-sm">&times;</button>
-            </div>
-            {itemInfoLoading ? (
-              <div className="flex items-center justify-center py-10">
-                <div className="w-5 h-5 border border-[#8b82f6] border-t-transparent rounded-full animate-spin" />
-              </div>
-            ) : itemInfo ? (
-              // 修复点 1.14: Record<string,unknown> 里的所有属性都是 unknown，渲染前必须显式 String() 化，
-              // 消除 Type 'unknown' is not assignable to type 'ReactNode'
-              <div className="space-y-4 text-xs">
-                <div className="flex justify-between"><span className="text-white/35">片名</span><span className="text-white/80">{String(itemInfo.Name ?? '-')}</span></div>
-                {/* 修复点 1.17: strict 模式下 unknown 不能作为条件表达式，否则整个 && 表达式类型=unknown 无法作为 ReactNode。
-                    先显式转为 boolean（!!）或做 nullish 比较。 */}
-                {!!itemInfo.OriginalTitle && <div className="flex justify-between"><span className="text-white/35">原名</span><span className="text-white/50">{String(itemInfo.OriginalTitle)}</span></div>}
-                <div className="flex justify-between"><span className="text-white/35">年份</span><span className="text-white/50">{String(itemInfo.ProductionYear ?? '-')}</span></div>
-                {Array.isArray(itemInfo.Genres) && (itemInfo.Genres as unknown[]).length > 0 && <div className="flex justify-between"><span className="text-white/35">类型</span><span className="text-white/50">{(itemInfo.Genres as unknown[]).map((g) => String(g)).join(' / ')}</span></div>}
-                <div className="flex justify-between"><span className="text-white/35">时长</span><span className="text-white/50">{itemInfo.RunTimeTicks ? formatTime((Number(itemInfo.RunTimeTicks) / 10000000)) : '-'}</span></div>
-                {itemInfo.CommunityRating != null && <div className="flex justify-between"><span className="text-white/35">评分</span><span className="text-[#8b82f6] font-medium">{String(itemInfo.CommunityRating)}</span></div>}
-                {itemInfo.Overview != null && <div><div className="text-white/35 mb-2">简介</div><p className="text-white/50 leading-relaxed">{String(itemInfo.Overview)}</p></div>}
-              </div>
-            ) : <p className="text-xs text-white/25 text-center py-10">无法获取影片信息</p>}
-          </div>
-        </div>
-      )}
-
-
-      {/* 视频源信息覆盖层 */}
-      {videoSourceInfo && (
-        <div className="absolute inset-0 z-30 bg-black/70 backdrop-blur-sm flex items-center justify-center animate-page-in" onClick={handleCloseVideoInfo}>
-          <div className="w-[520px] max-h-[75vh] player-glass-panel p-8 overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-sm font-medium">视频源信息</h3>
-              <button onClick={handleCloseVideoInfo} className="w-6 h-6 rounded flex items-center justify-center text-white/50 hover:text-white hover:bg-white/5 transition-colors"><X size={15} /></button>
-            </div>
-            <div className="space-y-2 text-xs">
-              {Object.entries(videoSourceInfo).map(([key, val]) => (
-                <div key={key} className="flex justify-between py-1.5 border-b border-white/5 last:border-0">
-                  <span className="text-white/40 min-w-[120px]">{key}</span>
-                  <span className="text-white/80 text-right font-mono">{val}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
+      <MediaInfoOverlays
+        itemInfoOpen={infoOverlay}
+        itemInfoLoading={itemInfoLoading}
+        itemInfo={itemInfo}
+        videoSourceInfo={videoSourceInfo}
+        onCloseItemInfo={handleCloseInfo}
+        onCloseVideoSourceInfo={handleCloseVideoInfo}
+      />
       {/* 控制栏 — 悬浮在视频底部，不占据固定高度，修复全屏黑条 */}
-      <div className={`absolute bottom-0 left-0 right-0 player-glass-bar h-16 flex items-center px-5 gap-6 z-20 transition-opacity duration-300 ease-in-out ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onMouseMove={handleMouseMove}>
-        {/* 播放/暂停 */}
-        <button onClick={handlePlayPause} className="glass-btn-sm text-white/80 hover:text-white" title={isPlaying ? '暂停' : '播放'}>
-          {isPlaying ? (
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
-          ) : (
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg>
-          )}
-        </button>
-
-        {/* 剧集切换按钮 */}
-        {(episodeList.length > 0 || folderVideos.length > 0) && (
-          <div className="relative flex items-center gap-2">
-            <button
-              onClick={() => handleSwitchEpisode(currentEpisodeIndex - 1)}
-              disabled={currentEpisodeIndex <= 0}
-              className="glass-btn-sm text-white/60 hover:text-white/80 disabled:opacity-20 disabled:cursor-not-allowed"
-              title="上一集"
-            >
-              <ChevronLeft size={18} />
-            </button>
-            <span className="text-xs text-[#8b82f6] font-medium tabular-nums whitespace-nowrap min-w-[80px] text-center">
-              第 {currentEpisodeIndex + 1} / {Math.max(episodeList.length, folderVideos.length)} 集
-            </span>
-            <button
-              onClick={() => handleSwitchEpisode(currentEpisodeIndex + 1)}
-              disabled={currentEpisodeIndex >= Math.max(episodeList.length, folderVideos.length) - 1}
-              className="glass-btn-sm text-white/60 hover:text-white/80 disabled:opacity-20 disabled:cursor-not-allowed"
-              title="下一集"
-            >
-              <ChevronRight size={18} />
-            </button>
-            <div className="w-[1px] h-4 bg-white/8 mx-1" />
-            <button
-              onClick={() => setEpisodePopup(!episodePopup)}
-              className="glass-btn-sm text-white/60 hover:text-white/80 flex items-center gap-1"
-              title="剧集列表"
-            >
-              <List size={18} />
-              <span className="text-xs text-white/40">{Math.max(episodeList.length, folderVideos.length)}集</span>
-            </button>
-          </div>
-        )}
-
-        {/* 进度条 */}
-        <div className="flex-1 h-6 flex items-center cursor-pointer group relative" onClick={handleSeek}>
-          <div className="absolute left-0 right-0 h-[2px] bg-white/5 rounded-full group-hover:h-[4px] transition-all">
-            <div className="h-full bg-white/10 rounded-full" style={{ width: `${bufferedPercent}%` }} />
-            <div className="h-full bg-[#8b82f6] rounded-full absolute top-0 left-0" style={{ width: `${progressPercent}%` }} />
-            <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-[#8b82f6] rounded-full opacity-0 group-hover:opacity-100 transition-opacity" style={{ left: `${progressPercent}%` }} />
-          </div>
+      <div className={`absolute bottom-0 left-0 right-0 z-30 ${isPortrait ? 'flex justify-center' : ''}`}>
+        <div className="relative w-full" style={{ maxWidth: isPortrait ? '60vh' : '100%' }}>
+          <PlayerControls
+            visible={controlsVisible}
+            isPlaying={isPlaying}
+            episodeCount={Math.max(episodeList.length, folderVideos.length)}
+            currentEpisodeIndex={currentEpisodeIndex}
+            currentTime={currentTime}
+            duration={duration}
+            buffered={buffered}
+            playbackRate={playbackRate}
+            volume={volume}
+            subtitleTrackCount={subtitleTracks.length}
+            activeSubtitleIndex={activeSubtitleIndex}
+            danmakuEnabled={danmakuEnabled}
+            danmakuOffset={danmakuOffset}
+            pipActive={pipActive}
+            subtitleSettingsOpen={subtitleSettingsOpen}
+            onMouseMove={handleMouseMove}
+            onPlayPause={handlePlayPause}
+            onPreviousEpisode={() => handleSwitchEpisode(currentEpisodeIndex - 1)}
+            onNextEpisode={() => handleSwitchEpisode(currentEpisodeIndex + 1)}
+            onToggleEpisodePopup={() => setEpisodePopup((open) => !open)}
+            onSeek={handleSeek}
+            onToggleSpeedPopup={() => { if (speedPopup) setSpeedPopup(false); else { closeAllPopups(); setSpeedPopup(true) } }}
+            onToggleVolumePopup={() => { if (volumePopup) setVolumePopup(false); else { closeAllPopups(); setVolumePopup(true) } }}
+            onToggleSubtitlePopup={() => { if (subtitlePopup) setSubtitlePopup(false); else { closeAllPopups(); setSubtitlePopup(true) } }}
+            onToggleSubtitleSettings={() => { if (subtitleSettingsOpen) setSubtitleSettingsOpen(false); else { closeAllPopups(); setSubtitleSettingsOpen(true) } }}
+            onToggleDanmaku={handleDanmakuToggle}
+            onOpenDanmakuSearch={handleOpenDanmakuSearch}
+            onResetDanmakuOffset={() => handleOffsetChange(0)}
+            onToggleDanmakuSettings={() => { if (settingsOpen) setSettingsOpen(false); else { closeAllPopups(); setSettingsOpen(true) } }}
+            onScreenshot={() => { void handleScreenshot() }}
+            onPictureInPicture={() => { void handlePictureInPicture() }}
+            onFullscreen={handleFullscreen}
+          />
         </div>
-
-        {/* 时间 */}
-        <span className="text-xs text-white/40 font-mono tabular-nums w-[90px] text-right whitespace-nowrap">
-          {formatTime(currentTime)}&nbsp;/&nbsp;{formatTime(duration)}
-        </span>
-
-        {/* 倍速 */}
-        <div className="speed-popup">
-          <button
-            onClick={() => { if (speedPopup) { setSpeedPopup(false) } else { closeAllPopups(); setSpeedPopup(true) } }}
-            className={`glass-btn-sm text-xs font-medium ${playbackRate !== 1 ? 'text-[#8b82f6]' : 'text-white/60 hover:text-white/80'}`}
-            title="播放速度"
-          >
-            <span className="flex items-center gap-1"><Gauge size={13} />{playbackRate}x</span>
-          </button>
-        </div>
-
-        {/* 音量 */}
-        <div className="volume-popup">
-          <button
-            onClick={() => { if (volumePopup) { setVolumePopup(false) } else { closeAllPopups(); setVolumePopup(true) } }}
-            className="glass-btn-icon text-white/50 hover:text-white/80"
-            title="音量"
-          >
-            {volume === 0 ? <VolumeX size={17} /> : volume < 50 ? <Volume1 size={17} /> : <Volume2 size={17} />}
-          </button>
-        </div>
-
-        {/* 字幕选择按钮 */}
-        {subtitleTracks.length > 0 && (
-          <button
-            onClick={() => { if (subtitlePopup) { setSubtitlePopup(false) } else { closeAllPopups(); setSubtitlePopup(true) } }}
-            className={`glass-btn-icon ${activeSubtitleIndex >= 0 ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/80'}`}
-            title="字幕轨道"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 15h2M11 15h6M7 11h10"/></svg>
-          </button>
-        )}
-        {activeSubtitleIndex >= 0 && (
-          <button
-            onClick={() => { if (subtitleSettingsOpen) { setSubtitleSettingsOpen(false) } else { closeAllPopups(); setSubtitleSettingsOpen(true) } }}
-            className={`glass-btn-icon ${subtitleSettingsOpen ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/80'}`}
-            title="字幕设置"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>
-          </button>
-        )}
-
-        {/* 弹幕按钮 */}
-        <button onClick={handleDanmakuToggle} className={`glass-btn-sm text-xs ${danmakuEnabled ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/70'}`} title="弹幕">
-          弹
-        </button>
-        <button onClick={handleOpenDanmakuSearch} className="glass-btn-icon text-white/50 hover:text-white/80" title="搜索弹幕">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        </button>
-        {danmakuOffset !== 0 && (
-          <button onClick={() => handleOffsetChange(0)} className="glass-btn-sm text-[10px] text-[#8b82f6] hover:text-[#a29bfe]" title={`弹幕偏移 ${danmakuOffset > 0 ? '+' : ''}${danmakuOffset.toFixed(1)}s，点击重置`}>
-            {danmakuOffset > 0 ? '+' : ''}{danmakuOffset.toFixed(1)}s
-          </button>
-        )}
-        <button onClick={() => { if (settingsOpen) { setSettingsOpen(false) } else { closeAllPopups(); setSettingsOpen(true) } }} className="glass-btn-icon text-white/50 hover:text-white/80" title="弹幕设置">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-        </button>
-
-        {/* P2: 截图 */}
-        <button onClick={handleScreenshot} className="glass-btn-icon text-white/50 hover:text-white/80" title="截图 (S)">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
-        </button>
-
-        {/* P2: 画中画 */}
-        <button onClick={handlePictureInPicture} className={`glass-btn-icon ${pipActive ? 'text-[#8b82f6]' : 'text-white/50 hover:text-white/80'}`} title="画中画 (D)">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill={pipActive ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><rect x="11" y="9" width="9" height="7" rx="1" fill={pipActive ? 'currentColor' : 'none'} opacity="0.7"/></svg>
-        </button>
-
-        {/* 全屏 */}
-        <button onClick={handleFullscreen} className="glass-btn-icon text-white/50 hover:text-white/80" title="全屏">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
-        </button>
       </div>
 
-      {/* 剧集列表弹窗 — fixed 定位，不受视频 overflow 影响 */}
-      <AnimatePresence>
-        {episodePopup && (
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 10 }}
-            className="fixed bottom-20 right-4 player-glass-panel p-3 z-50 max-h-[400px] overflow-y-auto"
-          >
-            <div className="flex items-center justify-between mb-2 pb-2 border-b border-white/5">
-              <span className="text-xs text-white/60 font-medium">剧集列表</span>
-              <button onClick={() => setEpisodePopup(false)} className="text-white/40 hover:text-white transition-colors">
-                <X size={14} />
-              </button>
-            </div>
-            <div className="grid grid-cols-6 gap-2" style={{ minWidth: '280px' }}>
-              {episodeList.length > 0 ? episodeList.map((ep, idx) => {
-                const epId = (ep as any).Id || (ep as any).id
-                const isActive = idx === currentEpisodeIndex
-                return (
-                  <button
-                    key={epId}
-                    onClick={() => {
-                      handleSwitchEpisode(idx)
-                      setEpisodePopup(false)
-                    }}
-                    className={`text-xs py-1.5 px-2 rounded transition-colors truncate ${
-                      isActive 
-                        ? 'bg-[#8b82f6] text-white shadow-[0_0_12px_rgba(139,130,246,0.3)]' 
-                        : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white/90'
-                    }`}
-                    title={ep.Name || `第${idx + 1}集`}
-                  >
-                    {idx + 1}
-                  </button>
-                )
-              }) : folderVideos.map((video, idx) => (
-                <button
-                  key={video.path}
-                  onClick={() => {
-                    handleSwitchEpisode(idx)
-                    setEpisodePopup(false)
-                  }}
-                  className={`text-xs py-1.5 px-2 rounded transition-colors truncate ${
-                    idx === currentEpisodeIndex
-                      ? 'bg-[#8b82f6] text-white shadow-[0_0_12px_rgba(139,130,246,0.3)]' 
-                      : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white/90'
-                  }`}
-                  title={video.name}
-                >
-                  {idx + 1}
-                </button>
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* 倍速弹窗 */}
-      <AnimatePresence>
-        {speedPopup && (
-          <motion.div
-            className="fixed bottom-20 right-4 speed-popup player-glass-panel rounded-lg py-2 min-w-[120px] z-50"
-            initial={{ opacity: 0, y: 8, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 8, scale: 0.95 }}
-            transition={{ duration: 0.15 }}
-          >
-            {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
-              <button
-                key={rate}
-                onClick={() => { handlePlaybackRateChange(rate); setSpeedPopup(false) }}
-                className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${playbackRate === rate ? 'text-[#8b82f6] bg-white/5' : 'text-white/60 hover:bg-white/5'}`}
-              >
-                {rate === 1 ? '正常' : `${rate}x`}
-                {playbackRate === rate && <span className="float-right text-[#8b82f6]">✓</span>}
-              </button>
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* 音量弹窗 */}
-      <AnimatePresence>
-        {volumePopup && (
-          <motion.div
-            className="fixed bottom-20 right-4 volume-popup player-glass-panel rounded-lg p-3 z-50 w-52"
-            initial={{ opacity: 0, y: 8, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 8, scale: 0.95 }}
-            transition={{ duration: 0.15 }}
-          >
-            <div className="flex items-center gap-3">
-              <span className="text-[10px] text-white/40 w-8 text-right">{volume}%</span>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={volume}
-                onChange={(e) => {
-                  const v = Number(e.target.value)
-                  playerActions.setVolume(v)
-                  const video = videoRef.current
-                  if (video) { video.volume = v / 100; video.muted = v === 0 }
-                }}
-                className="flex-1 h-1 appearance-none bg-white/8 rounded-full cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:cursor-pointer"
-              />
-            </div>
-            <div className="flex items-center gap-2 mt-2">
-              <button
-                onClick={() => {
-                  const video = videoRef.current; if (!video) return
-                  const muted = !video.muted; video.muted = muted; playerActions.setVolume(muted ? 0 : Math.round(video.volume * 100))
-                }}
-                className="text-[10px] text-white/40 hover:text-white/80 transition-colors"
-              >
-                {volume === 0 ? '取消静音' : '静音'}
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* 字幕弹窗 */}
-      <AnimatePresence>
-        {subtitlePopup && (
-          <motion.div
-            className="fixed bottom-20 right-4 subtitle-popup player-glass-panel rounded-lg py-1 min-w-[160px] z-50"
-            initial={{ opacity: 0, y: 8, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 8, scale: 0.95 }}
-            transition={{ duration: 0.15 }}
-          >
-            <button
-              onClick={() => handleSubtitleSelect(-1)}
-              className={`w-full text-left px-4 py-2 text-xs hover:bg-white/5 flex items-center gap-2 ${activeSubtitleIndex === -1 ? 'text-[#8b82f6]' : 'text-white/70'}`}
-            >
-              <span className="w-3 text-center">{activeSubtitleIndex === -1 ? '✓' : ''}</span>
-              关闭字幕
-            </button>
-            {subtitleTracks.map((track, i) => (
-              <button
-                key={i}
-                onClick={() => handleSubtitleSelect(i)}
-                className={`w-full text-left px-4 py-2 text-xs hover:bg-white/5 flex items-center gap-2 ${activeSubtitleIndex === i ? 'text-[#8b82f6]' : 'text-white/70'}`}
-              >
-                <span className="w-3 text-center">{activeSubtitleIndex === i ? '✓' : ''}</span>
-                {track.label}
-              </button>
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <PlayerPopups
+        episodeOpen={episodePopup}
+        episodes={episodeList}
+        folderVideos={folderVideos}
+        currentEpisodeIndex={currentEpisodeIndex}
+        speedOpen={speedPopup}
+        playbackRate={playbackRate}
+        volumeOpen={volumePopup}
+        volume={volume}
+        subtitleOpen={subtitlePopup}
+        subtitleTracks={subtitleTracks}
+        activeSubtitleIndex={activeSubtitleIndex}
+        onEpisodeClose={() => setEpisodePopup(false)}
+        onEpisodeSwitch={handleSwitchEpisode}
+        onSpeedClose={() => setSpeedPopup(false)}
+        onPlaybackRateChange={handlePlaybackRateChange}
+        onVolumeChange={handleVolumeChange}
+        onToggleMute={handleToggleMute}
+        onSubtitleSelect={handleSubtitleSelect}
+      />
     </div>
   )
 }
