@@ -7,9 +7,13 @@
   
   nsExec::Exec 'tasklist /FI "IMAGENAME eq mplay.exe" 2>NUL | find /I "mplay.exe"'
   Pop $0
-  StrCmp $0 "" no_old_process
   
-  !echo "发现旧版mplay.exe进程，尝试关闭..."
+  StrCmp $0 "0" process_found
+  !echo "未发现mplay.exe进程，跳过关闭步骤"
+  Goto preInstall_done
+  
+process_found:
+  !echo "发现mplay.exe进程，尝试关闭..."
   nsExec::Exec 'taskkill /F /IM mplay.exe'
   Pop $0
   !echo "taskkill返回码: $0"
@@ -18,13 +22,15 @@
   
   nsExec::Exec 'tasklist /FI "IMAGENAME eq mplay.exe" 2>NUL | find /I "mplay.exe"'
   Pop $0
-  StrCmp $0 "" no_old_process
+  StrCmp $0 "0" force_kill
+  Goto preInstall_done
   
-  !echo "警告: mplay.exe仍在运行，尝试强制终止..."
+force_kill:
+  !echo "mplay.exe仍在运行，尝试强制终止..."
   nsExec::Exec 'taskkill /F /T /IM mplay.exe'
   Sleep 2000
   
-no_old_process:
+preInstall_done:
   !echo "=== preInstall: 进程检查完成 ==="
 !macroend
 
@@ -67,7 +73,7 @@ no_old_process:
   
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
   
-  SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment"
+  System::Call 'user32::SendMessageTimeout(i 0xFFFF, i 0x001A, i 0, i 0, i 2, i 3000, *i .r0)'
   
   !echo "[3/3] 系统刷新通知已发送"
 
@@ -95,7 +101,7 @@ no_old_process:
   
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
   
-  SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment"
+  System::Call 'user32::SendMessageTimeout(i 0xFFFF, i 0x001A, i 0, i 0, i 2, i 3000, *i .r0)'
   
   !echo "[2/2] 系统刷新通知已发送"
 
