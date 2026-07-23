@@ -48,3 +48,6 @@ nsis:
   createDesktopShortcut: always
   oneClick: false
   allowToChangeInstallationDirectory: true
+  include: scripts/installer.nsh
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
