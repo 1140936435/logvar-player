@@ -1,37 +1,37 @@
-## mplay v1.2.0 Update Notes
+## mplay v1.2.0 更新说明
 
-### New Features
+### 🎯 新功能
 
-- **Portrait Video Detection & Playback Optimization**: Auto-detect portrait videos (9:16), support "Full Frame Display" (contain) and "Fill to Screen" (cover) dual modes
-- **Portrait Background Blur Fill**: Real-time Canvas video frame capture as blurred background, reducing visual disconnect
-- **Portrait Custom Control Bar**: Larger buttons, optimized spacing, frosted glass semi-transparent effect, smart auto-hide/float
-- **Danmaku System Upgrade**: Real-time danmaku display and interaction
-- **Poster Loading Architecture Refactor**: Virtual scrolling grid, DOM nodes reduced from hundreds to ~20
-- **Three-tier Poster Cache**: Browser cache -> Memory cache (100MB LRU) -> Disk cache (500MB LRU)
-- **Full WebP Support**: 30-50% image size reduction
+- **竖屏视频智能检测与播放优化**：自动识别竖屏视频（9:16），支持「完整全画面显示」(contain) 和「等比填充全屏」(cover) 双模式切换
+- **竖屏黑边模糊背景填充**：Canvas 实时捕获视频帧作为模糊背景，弱化视觉割裂感
+- **竖屏专属控制栏**：增大按钮尺寸、优化布局间距、半透明磨砂效果，智能自动隐藏/悬浮呼出
+- **弹幕系统全面升级**：支持实时弹幕显示与互动
+- **海报加载架构重构**：虚拟滚动网格组件，DOM 节点数从数百降至约 20 个
+- **海报三级缓存系统**：浏览器缓存 → 内存缓存（100MB LRU）→ 磁盘缓存（500MB LRU）
+- **全面支持 WebP 图片格式**：减少 30-50% 图片大小
 
-### Bug Fixes
+### 🐛 Bug 修复
 
-- Fix Jellyfin API /Users/Me 400 error, add /Users endpoint fallback
-- Fix player state management, optimize play/pause/progress control
-- Fix homepage poster loading lag, add concurrent request control (max 6)
-- Fix LazyImage component dependency error
+- 修复 Jellyfin API `/Users/Me` 400 错误，增加 `/Users` 端点回退逻辑
+- 修复播放器状态管理问题，优化播放/暂停/进度控制
+- 修复首页海报加载卡顿，增加并发请求控制（6 个）
+- 修复 LazyImage 组件未导入导致的运行时错误
 
-### Performance
+### ⚡ 性能优化
 
-- Virtual scrolling for homepage, significantly reduce DOM nodes
-- Image concurrent request control (max 6), prevent network congestion
-- Memory and disk cache with LRU eviction strategy
-- Dynamic image resolution, load appropriate size based on container
-- All sync I/O migrated to async fs.promises, eliminate main process blocking
-- MediaCard uses CSS transitions instead of framer-motion, reducing CPU usage
+- 首页虚拟滚动优化，大幅减少 DOM 节点数量
+- 图片并发请求控制（6 个），避免网络阻塞
+- 内存与磁盘缓存 LRU 淘汰策略
+- 图片动态分辨率调整，按容器大小加载合适尺寸
+- 同步 I/O 全部迁移至异步 `fs.promises`，消除主进程阻塞
+- MediaCard 使用 CSS 过渡替代 framer-motion 动画，降低 CPU 占用
 
-### Compatibility
+### 🖥 兼容性
 
-- Support Emby and Jellyfin servers
-- Windows 10/11 64-bit
-- Electron 33.x runtime
+- 支持 Emby 和 Jellyfin 双服务器类型
+- Windows 10/11 64 位系统
+- Electron 33.x 运行时
 
-### Download
+### 📦 下载
 
-- **mplay-1.2.0-setup.exe** -- Windows installer
+- **mplay-1.2.0-setup.exe** — Windows 安装包

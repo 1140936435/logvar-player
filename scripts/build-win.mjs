@@ -1,100 +1,77 @@
-import { rm, mkdir, rename } from 'fs/promises';
-import { existsSync } from 'fs';
-import { exec } from 'child_process';
+import { execSync } from 'child_process'
+import { existsSync, rmSync, mkdirSync } from 'fs'
+import { resolve, dirname } from 'path'
+import { fileURLToPath } from 'url'
 
-async function removeDirWithRetry(path, maxRetries = 3, delay = 1000) {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      if (existsSync(path)) {
-        await rm(path, { recursive: true, force: true });
-        console.log(`✅ 成功删除目录: ${path}`);
-        return true;
-      }
-      return true;
-    } catch (err) {
-      console.warn(`⚠️ 删除目录失败 (尝试 ${i + 1}/${maxRetries}): ${path}`);
-      console.warn(`   错误: ${err.message}`);
-      if (i < maxRetries - 1) {
-        await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
-      }
-    }
-  }
-  return false;
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+const ROOT = resolve(__dirname, '..')
+
+const TEMP_DIR = resolve('C:\\Temp\\logvar-build')
+
+function run(cmd, options = {}) {
+  console.log(`> ${cmd}`)
+  return execSync(cmd, { stdio: 'inherit', ...options })
 }
 
-async function ensureDir(path) {
-  if (!existsSync(path)) {
-    await mkdir(path, { recursive: true });
-  }
-}
+function main() {
+  console.log('=== mplay Windows 构建脚本 ===')
+  console.log(`项目目录: ${ROOT}`)
+  console.log(`临时构建目录: ${TEMP_DIR}\n`)
 
-function execCommand(command, cwd) {
-  return new Promise((resolve, reject) => {
-    console.log(`执行命令: ${command}`);
-    const child = exec(command, { cwd, maxBuffer: 1024 * 1024 * 10 });
-    
-    child.stdout.on('data', data => {
-      process.stdout.write(data);
-    });
-    
-    child.stderr.on('data', data => {
-      process.stderr.write(data);
-    });
-    
-    child.on('close', code => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`命令失败，退出码: ${code}`));
-      }
-    });
-  });
-}
-
-async function main() {
-  console.log('=== 开始 Windows 打包 ===\n');
-  
-  const cwd = process.cwd();
-  
   try {
-    console.log('1. 清理旧构建文件...');
-    await removeDirWithRetry('.generated.old');
-    await removeDirWithRetry('.generated');
-    await removeDirWithRetry('dist');
-    await removeDirWithRetry('dist3');
-    await removeDirWithRetry('out');
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    console.log('\n2. 执行构建...');
-    await execCommand('npm run build', cwd);
-    
-    console.log('\n3. 执行 Electron Builder...');
-    await execCommand('npx electron-builder --win --dir --config', cwd);
-    
-    console.log('\n✅ 打包成功!');
-    
-  } catch (err) {
-    console.error('\n❌ 打包失败:', err.message);
-    
-    if (err.message.includes('EPERM') && err.message.includes('.generated.old')) {
-      console.log('\n🔄 检测到 .generated.old 权限问题，尝试修复...');
-      try {
-        await removeDirWithRetry('.generated.old', 5, 2000);
-        console.log('✅ .generated.old 目录已清理');
-        console.log('\n🔄 重新执行打包...');
-        await execCommand('npx electron-builder --win --dir --config', cwd);
-        console.log('\n✅ 打包成功!');
-      } catch (retryErr) {
-        console.error('\n❌ 重试打包失败:', retryErr.message);
-        process.exit(1);
-      }
-    } else {
-      process.exit(1);
+    console.log('[1/5] 清理旧构建文件...')
+    if (existsSync(TEMP_DIR)) {
+      rmSync(TEMP_DIR, { recursive: true, force: true })
+      console.log('  ✅ 已清理临时目录')
     }
+
+    console.log('[2/5] 创建临时目录结构...')
+    mkdirSync(resolve(TEMP_DIR, 'src'), { recursive: true })
+    mkdirSync(resolve(TEMP_DIR, 'out'), { recursive: true })
+    mkdirSync(resolve(TEMP_DIR, 'build'), { recursive: true })
+    mkdirSync(resolve(TEMP_DIR, 'assets'), { recursive: true })
+    console.log('  ✅ 临时目录结构创建成功')
+
+    console.log('[3/5] 复制项目文件到临时目录...')
+    run(`xcopy "${ROOT}\\src" "${TEMP_DIR}\\src\\" /E /H /C /R /Y /Q`)
+    run(`xcopy "${ROOT}\\out" "${TEMP_DIR}\\out\\" /E /H /C /R /Y /Q`)
+    run(`xcopy "${ROOT}\\build" "${TEMP_DIR}\\build\\" /E /H /C /R /Y /Q`)
+    run(`xcopy "${ROOT}\\assets" "${TEMP_DIR}\\assets\\" /E /H /C /R /Y /Q`)
+    run(`xcopy "${ROOT}\\package.json" "${TEMP_DIR}\\" /Y`)
+    run(`xcopy "${ROOT}\\package-lock.json" "${TEMP_DIR}\\" /Y`)
+    run(`xcopy "${ROOT}\\electron-builder.yml" "${TEMP_DIR}\\" /Y`)
+    run(`xcopy "${ROOT}\\electron.vite.config.cts" "${TEMP_DIR}\\" /Y`)
+    run(`xcopy "${ROOT}\\tsconfig.json" "${TEMP_DIR}\\" /Y`)
+    run(`xcopy "${ROOT}\\tsconfig.node.json" "${TEMP_DIR}\\" /Y`)
+    run(`xcopy "${ROOT}\\tsconfig.web.json" "${TEMP_DIR}\\" /Y`)
+    console.log('  ✅ 项目文件复制成功')
+
+    console.log('[4/5] 在临时目录安装依赖...')
+    run('npm ci', { cwd: TEMP_DIR })
+    console.log('  ✅ 依赖安装成功')
+
+    console.log('[5/5] 在临时目录执行构建和打包...')
+    run('npm run build:win', { cwd: TEMP_DIR })
+    console.log('  ✅ 打包成功')
+
+    const distSrc = resolve(TEMP_DIR, 'dist')
+    const distDest = resolve(ROOT, 'dist')
+
+    console.log(`\n[6/6] 复制安装包到项目目录...`)
+    if (existsSync(distDest)) {
+      rmSync(distDest, { recursive: true, force: true })
+    }
+    run(`xcopy "${distSrc}" "${distDest}\\" /E /H /C /R /Y /Q`)
+    console.log(`  ✅ 安装包已复制到 ${distDest}`)
+
+    console.log('\n=== 构建完成 ===')
+    console.log(`安装包位置: ${distDest}`)
+
+  } catch (err) {
+    console.error('\n❌ 构建失败:', err.message)
+    process.exit(1)
   }
 }
 
-main().catch(err => {
-  console.error('脚本出错:', err);
-  process.exit(1);
-});
+main()
