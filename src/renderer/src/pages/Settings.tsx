@@ -409,15 +409,14 @@ function Settings(): ReactElement {
     setDanmakuInfo('')
     try {
       const result = await window.api.danmaku.testApi(url)
-      if (result.data) {
+      if (result.success && result.data) {
         setDanmakuTestResult(result.data)
-        if (result.data.success) {
-          setDanmakuInfo(`主 API 可用 - ${result.data.elapsed}ms - 测试关键词返回 ${result.data.animeCount ?? 0} 部 ${result.data.epCount ?? 0} 集`)
-        } else {
-          setDanmakuInfo('主 API 不可用，将自动尝试备用地址')
-        }
+      } else if (result.error) {
+        setDanmakuTestResult({ success: false, error: result.error, elapsed: 0 })
       }
-    } catch (err) { setDanmakuTestResult({ success: false, error: String(err), elapsed: 0 }) }
+    } catch (err) {
+      setDanmakuTestResult({ success: false, error: String(err), elapsed: 0 })
+    }
     setDanmakuTesting(false)
   }
 

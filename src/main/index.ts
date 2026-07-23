@@ -2052,14 +2052,20 @@ ipcMain.handle('danmaku:test-api', async (_event, url: string) => {
 
     if (!response.ok) {
       const bodyText = await readResponseBody(response).catch(() => '')
-      return { success: false, error: `HTTP ${response.status}`, detail: bodyText.slice(0, 300), elapsed }
+      return {
+        success: true,
+        data: { success: false, error: `HTTP ${response.status}`, detail: bodyText.slice(0, 300), elapsed }
+      }
     }
 
     const contentType = response.headers.get('content-type') || ''
     const bodyText = await readResponseBody(response)
 
     if (!contentType.includes('application/json')) {
-      return { success: false, error: '返回非 JSON', detail: bodyText.slice(0, 300), elapsed }
+      return {
+        success: true,
+        data: { success: false, error: '返回非 JSON', detail: bodyText.slice(0, 300), elapsed }
+      }
     }
 
     const data = JSON.parse(bodyText) as Record<string, unknown>
@@ -2071,9 +2077,12 @@ ipcMain.handle('danmaku:test-api', async (_event, url: string) => {
       0
     ) || 0
 
-    return { success: true, elapsed, animeCount, epCount }
+    return { success: true, data: { success: true, elapsed, animeCount, epCount } }
   } catch (err) {
-    return { success: false, error: String(err), elapsed: Date.now() - startTime }
+    return {
+      success: true,
+      data: { success: false, error: String(err), elapsed: Date.now() - startTime }
+    }
   }
 })
 
