@@ -1,3 +1,9 @@
+// ===== 服务器类型 =====
+// Jellyfin 与 Emby 共享同一套 API 结构（Emby 是 Jellyfin 的前身），
+// 因此下方 Jellyfin* 类型在两种服务器上通用。
+
+export type ServerType = 'jellyfin' | 'emby'
+
 // ===== Jellyfin 类型 =====
 
 export interface JellyfinConfig {

@@ -1,4 +1,4 @@
-import fs from 'fs';
+import fs from 'fs/promises';
 import path from 'path';
 import { app } from 'electron';
 
@@ -8,21 +8,35 @@ interface CacheMetadata {
   originalUrl: string;
 }
 
+interface MemoryCacheEntry {
+  data: Buffer;
+  size: number;
+  lastAccessed: number;
+}
+
 export class PosterCacheService {
   private cacheDir: string;
   private maxSizeBytes: number;
   private maxAgeMs: number;
+  private memoryCache: Map<string, MemoryCacheEntry>;
+  private maxMemoryBytes: number;
+  private currentMemoryBytes: number;
 
   constructor() {
     this.cacheDir = path.join(app.getPath('userData'), 'poster-cache');
     this.maxSizeBytes = 500 * 1024 * 1024;
     this.maxAgeMs = 7 * 24 * 60 * 60 * 1000;
+    this.memoryCache = new Map();
+    this.maxMemoryBytes = 100 * 1024 * 1024;
+    this.currentMemoryBytes = 0;
     this.ensureCacheDir();
   }
 
-  private ensureCacheDir(): void {
-    if (!fs.existsSync(this.cacheDir)) {
-      fs.mkdirSync(this.cacheDir, { recursive: true });
+  private async ensureCacheDir(): Promise<void> {
+    try {
+      await fs.access(this.cacheDir);
+    } catch {
+      await fs.mkdir(this.cacheDir, { recursive: true });
     }
   }
 
@@ -34,31 +48,70 @@ export class PosterCacheService {
     };
   }
 
+  private cleanupMemoryIfNeeded(): void {
+    if (this.currentMemoryBytes <= this.maxMemoryBytes) return;
+
+    const entries = Array.from(this.memoryCache.entries())
+      .sort((a, b) => a[1].lastAccessed - b[1].lastAccessed);
+
+    for (const [k, entry] of entries) {
+      if (this.currentMemoryBytes <= this.maxMemoryBytes) break;
+      this.memoryCache.delete(k);
+      this.currentMemoryBytes -= entry.size;
+    }
+  }
+
   async get(key: string): Promise<Buffer | null> {
+    const memEntry = this.memoryCache.get(key);
+    if (memEntry) {
+      memEntry.lastAccessed = Date.now();
+      return memEntry.data;
+    }
+
     const paths = this.getKeyPath(key);
-    if (!fs.existsSync(paths.data)) return null;
+    try {
+      await fs.access(paths.data);
+    } catch {
+      return null;
+    }
 
     try {
-      const metaStr = fs.readFileSync(paths.meta, 'utf-8');
+      const metaStr = await fs.readFile(paths.meta, 'utf-8');
       const meta: CacheMetadata = JSON.parse(metaStr);
       if (Date.now() > meta.expiresAt) {
-        fs.unlinkSync(paths.data);
-        fs.unlinkSync(paths.meta);
+        await fs.unlink(paths.data);
+        await fs.unlink(paths.meta);
         return null;
       }
-      return fs.readFileSync(paths.data);
+      const data = await fs.readFile(paths.data);
+
+      const size = data.byteLength;
+      this.memoryCache.set(key, { data, size, lastAccessed: Date.now() });
+      this.currentMemoryBytes += size;
+      this.cleanupMemoryIfNeeded();
+
+      return data;
     } catch {
-      try { fs.unlinkSync(paths.data); } catch {}
-      try { fs.unlinkSync(paths.meta); } catch {}
+      try { await fs.unlink(paths.data); } catch {}
+      try { await fs.unlink(paths.meta); } catch {}
       return null;
     }
   }
 
   async set(key: string, data: Buffer, originalUrl: string): Promise<void> {
     try {
+      const size = data.byteLength;
+      const existing = this.memoryCache.get(key);
+      if (existing) {
+        this.currentMemoryBytes -= existing.size;
+      }
+      this.memoryCache.set(key, { data, size, lastAccessed: Date.now() });
+      this.currentMemoryBytes += size;
+      this.cleanupMemoryIfNeeded();
+
       const paths = this.getKeyPath(key);
-      fs.writeFileSync(paths.data, data);
-      fs.writeFileSync(paths.meta, JSON.stringify({
+      await fs.writeFile(paths.data, data);
+      await fs.writeFile(paths.meta, JSON.stringify({
         createdAt: Date.now(),
         expiresAt: Date.now() + this.maxAgeMs,
         originalUrl,
@@ -71,9 +124,9 @@ export class PosterCacheService {
 
   async has(key: string): Promise<boolean> {
     const paths = this.getKeyPath(key);
-    if (!fs.existsSync(paths.data)) return false;
     try {
-      const metaStr = fs.readFileSync(paths.meta, 'utf-8');
+      await fs.access(paths.data);
+      const metaStr = await fs.readFile(paths.meta, 'utf-8');
       const meta: CacheMetadata = JSON.parse(metaStr);
       return Date.now() <= meta.expiresAt;
     } catch {
@@ -83,25 +136,26 @@ export class PosterCacheService {
 
   async delete(key: string): Promise<void> {
     const paths = this.getKeyPath(key);
-    try { fs.unlinkSync(paths.data); } catch {}
-    try { fs.unlinkSync(paths.meta); } catch {}
+    try { await fs.unlink(paths.data); } catch {}
+    try { await fs.unlink(paths.meta); } catch {}
   }
 
   async clear(): Promise<void> {
     try {
-      fs.rmSync(this.cacheDir, { recursive: true, force: true });
-      this.ensureCacheDir();
+      await fs.rm(this.cacheDir, { recursive: true, force: true });
+      await this.ensureCacheDir();
     } catch {}
   }
 
   private async cleanupIfNeeded(): Promise<void> {
     try {
-      const files = fs.readdirSync(this.cacheDir).filter(f => f.endsWith('.png'));
-      const items = files.map(file => {
+      const files = (await fs.readdir(this.cacheDir)).filter(f => f.endsWith('.png'));
+      const items = await Promise.all(files.map(async file => {
         const filePath = path.join(this.cacheDir, file);
-        const stat = fs.statSync(filePath);
+        const stat = await fs.stat(filePath);
         return { file, mtime: stat.mtime.getTime(), size: stat.size };
-      }).sort((a, b) => a.mtime - b.mtime);
+      }));
+      items.sort((a, b) => a.mtime - b.mtime);
 
       let totalSize = items.reduce((sum, item) => sum + item.size, 0);
       for (const item of items) {
@@ -117,20 +171,20 @@ export class PosterCacheService {
 
   async cleanup(): Promise<void> {
     try {
-      const files = fs.readdirSync(this.cacheDir).filter(f => f.endsWith('.png'));
+      const files = (await fs.readdir(this.cacheDir)).filter(f => f.endsWith('.png'));
       for (const file of files) {
         const key = file.replace(/\.png$/, '');
         const paths = this.getKeyPath(key);
         try {
-          const metaStr = fs.readFileSync(paths.meta, 'utf-8');
+          const metaStr = await fs.readFile(paths.meta, 'utf-8');
           const meta: CacheMetadata = JSON.parse(metaStr);
           if (Date.now() > meta.expiresAt) {
-            fs.unlinkSync(paths.data);
-            fs.unlinkSync(paths.meta);
+            await fs.unlink(paths.data);
+            await fs.unlink(paths.meta);
           }
         } catch {
-          fs.unlinkSync(paths.data);
-          try { fs.unlinkSync(paths.meta); } catch {}
+          try { await fs.unlink(paths.data); } catch {}
+          try { await fs.unlink(paths.meta); } catch {}
         }
       }
     } catch {

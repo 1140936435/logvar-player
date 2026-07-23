@@ -1,8 +1,7 @@
 import type { ReactElement } from 'react'
 import { motion } from 'framer-motion'
-// 统一图标资源入口：前端 logo 读取 assets/icon/icon-256.png
-// 开发环境通过 Vite 的 public 目录或 import 解析，打包后从 resources/icon 读取
-import iconUrl from '../../../../assets/icon/icon-256.png'
+// 前端 Logo 使用构建生成的透明派生资源；assets/icon 下的原图始终只读。
+import iconUrl from '../../../../build/icon-256.png'
 
 // 修复点 1.18: JSX.Element 来自 @types/react，jsx runtime 模式下文件里依然要显式 import 对应类型。
 // 用 ReactElement 是 React 官方推荐的 JSX.Element 替代品。
@@ -13,12 +12,13 @@ function AppLogo(): ReactElement {
       <motion.img
         src={iconUrl}
         alt="mplay"
-        className="w-7 h-7 rounded-lg"
+        className="w-7 h-7 object-contain bg-transparent"
         whileHover={{ scale: 1.05 }}
         whileTap={{ scale: 0.95 }}
         draggable={false}
         style={{
-          boxShadow: '0 2px 10px rgba(0,122,255,0.28), 0 0 1px rgba(255,255,255,0.25)',
+          background: 'transparent',
+          boxShadow: '0 2px 10px rgba(0,122,255,0.28)',
         }}
       />
 

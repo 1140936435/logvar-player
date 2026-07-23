@@ -153,19 +153,17 @@ export async function detectAndRecordNewMedia(
   serverId?: string
 ): Promise<number> {
   try {
-    // 获取现有列表（完整列表用于对比）
-    const existing = await getRecentlyAdded(100, false)
+    const existing = await getRecentlyAdded(100, true)
     const existingIds = new Set(existing.map(item => item.itemId))
 
-    // 筛选新增项
     const newEntries: RecentlyAddedItem[] = []
     const now = Date.now()
 
-    for (const item of newItems) {
+    for (let i = 0; i < newItems.length; i++) {
+      const item = newItems[i]
       if (!existingIds.has(item.Id)) {
-        // 只记录电影和剧集（不记录单集，避免数量过多）
         if (item.Type === 'Movie' || item.Type === 'Series') {
-          newEntries.push({
+          const entry: RecentlyAddedItem = {
             itemId: item.Id,
             name: item.Name,
             type: item.Type as 'Movie' | 'Series',
@@ -176,16 +174,22 @@ export async function detectAndRecordNewMedia(
             seasonId: item.SeasonId,
             indexNumber: item.IndexNumber,
             parentIndexNumber: item.ParentIndexNumber,
-            addedAt: now,
+            addedAt: now + i,
             serverId
-          })
+          }
+          newEntries.push(entry)
+          console.log(`[RecentlyAdded] 新增入库: "${item.Name}" | ID: ${item.Id} | 类型: ${item.Type} | 时间戳: ${entry.addedAt}`)
         }
       }
     }
 
     if (newEntries.length > 0) {
-      console.log(`[RecentlyAdded] 检测到 ${newEntries.length} 部新增媒体`)
-      await addRecentlyAddedBatch(newEntries)
+      console.log(`[RecentlyAdded] 检测到 ${newEntries.length} 部新增媒体，准备写入数据库`)
+      const success = await addRecentlyAddedBatch(newEntries)
+      if (success) {
+        console.log(`[RecentlyAdded] 新增媒体写入成功，强制刷新缓存`)
+        clearRecentlyAddedCache()
+      }
     }
 
     return newEntries.length

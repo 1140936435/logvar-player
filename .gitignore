@@ -3,7 +3,15 @@ node_modules/
 
 # 构建产物
 dist/
+dist2/
+dist3/
+dist4/
+dist5/
 out/
+.generated/
+.generated.old/
+.generated.old.quarantine.*
+.generated.quarantine.*
 *.egg-info/
 
 # Electron 打包

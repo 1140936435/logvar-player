@@ -2,7 +2,7 @@ appId: com.mplay.player
 productName: mplay
 directories:
   buildResources: build
-  output: dist3
+  output: dist
 files:
   - "!**/.vscode/*"
   - "!src/**"
@@ -18,25 +18,22 @@ files:
   - "!logvar-player/**"
   - "!.qoder/**"
   - "!dist*/**"
-  - "!assets/icon/icon-512.png"
-  - "!assets/icon/icon-128.png"
-  - "!assets/icon/icon-64.png"
-  - "!assets/icon/icon-16.png"
+  - "!assets/icon/**"
   - "!scripts/**"
 asarUnpack:
   - out/tools/**
-# 统一图标资源：将 assets/icon 整目录复制到打包后的 resources/icon
-# 主进程通过 getIconPath() 从 resources/icon 读取，开发环境从 assets/icon 读取
 extraResources:
-  - from: assets/icon
+  - from: build
     to: icon
     filter:
       - "icon-256.png"
       - "icon-32.png"
-  - from: build
-    to: build
-    filter:
-      - "icon*"
+      - "icon-512.png"
+      - "icon-128.png"
+      - "icon-64.png"
+      - "icon-16.png"
+      - "icon.png"
+      - "icon.ico"
 win:
   executableName: mplay
   icon: build/icon.ico
@@ -51,6 +48,3 @@ nsis:
   createDesktopShortcut: always
   oneClick: false
   allowToChangeInstallationDirectory: true
-  installerIcon: build/icon.ico
-  uninstallerIcon: build/icon.ico
-  installerHeaderIcon: build/icon.ico

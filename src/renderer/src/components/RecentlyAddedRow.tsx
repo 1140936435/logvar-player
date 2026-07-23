@@ -8,6 +8,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronLeft, ChevronRight, Sparkles, Film, TvMinimal } from 'lucide-react'
 import type { RecentlyAddedItem } from '../../../../shared/types'
 import { formatAddedTimeAgo } from '../utils/recentlyAdded'
+import { LazyImage } from './LazyImage'
+import { getPosterUrl as buildPosterUrl, getOptimalPosterHeight } from '../utils/posterUrl'
 
 interface RecentlyAddedRowProps {
   items: RecentlyAddedItem[]
@@ -18,9 +20,11 @@ interface RecentlyAddedRowProps {
   savedScrollPosition?: number
   onScrollPositionChange?: (position: number) => void
   doubanPosters?: Record<string, string>
+  /** 服务器类型：'jellyfin' | 'emby'，默认 jellyfin */
+  serverType?: 'jellyfin' | 'emby'
 }
 
-// 单张海报卡片（带懒加载）
+// 单张海报卡片（使用 LazyImage 懒加载）
 const PosterCard = memo(function PosterCard({
   item,
   posterUrl,
@@ -32,36 +36,21 @@ const PosterCard = memo(function PosterCard({
   onClick: () => void
   index: number
 }): ReactElement {
-  const [isVisible, setIsVisible] = useState(false)
-  const [imageLoaded, setImageLoaded] = useState(false)
-  const cardRef = useRef<HTMLDivElement>(null)
-
-  // 使用 IntersectionObserver 实现懒加载
-  useEffect(() => {
-    if (!cardRef.current) return
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
-            setIsVisible(true)
-            observer.disconnect()
-          }
-        })
-      },
-      { root: null, rootMargin: '200px', threshold: 0.1 }
-    )
-
-    observer.observe(cardRef.current)
-    return () => observer.disconnect()
-  }, [])
-
   const isMovie = item.type === 'Movie'
   const typeLabel = isMovie ? '电影' : '剧集'
 
+  const fallbackIcon = (
+    <div className="w-full h-full flex items-center justify-center bg-[var(--bg-elevated)]">
+      {isMovie ? (
+        <Film size={32} className="text-[var(--text-quaternary)]" />
+      ) : (
+        <TvMinimal size={32} className="text-[var(--text-quaternary)]" />
+      )}
+    </div>
+  )
+
   return (
     <motion.div
-      ref={cardRef}
       onClick={onClick}
       className="flex-shrink-0 group cursor-pointer relative w-[140px] sm:w-[160px] lg:w-[180px]"
       whileHover={{ y: -4 }}
@@ -73,34 +62,12 @@ const PosterCard = memo(function PosterCard({
       <div
         className="aspect-[2/3] rounded-[var(--radius-lg)] overflow-hidden relative bg-[var(--bg-elevated)] border border-[var(--separator)] shadow-[0_4px_12px_rgba(0,0,0,0.15)] group-hover:shadow-[0_8px_24px_rgba(0,0,0,0.25)] transition-shadow duration-300"
       >
-        {isVisible && posterUrl ? (
-          <>
-            <img
-              src={posterUrl}
-              alt={item.name}
-              loading="lazy"
-              decoding="async"
-              className={`w-full h-full object-cover transition-opacity duration-300 ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
-              onLoad={() => setImageLoaded(true)}
-              onError={(e) => {
-                (e.target as HTMLImageElement).style.display = 'none'
-              }}
-            />
-            {!imageLoaded && (
-              <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-elevated)]">
-                <div className="w-8 h-8 border-2 border-[var(--text-quaternary)] border-t-[var(--accent)] rounded-full animate-spin" />
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="w-full h-full flex items-center justify-center bg-[var(--bg-elevated)]">
-            {isMovie ? (
-              <Film size={32} className="text-[var(--text-quaternary)]" />
-            ) : (
-              <TvMinimal size={32} className="text-[var(--text-quaternary)]" />
-            )}
-          </div>
-        )}
+        <LazyImage
+          src={posterUrl}
+          alt={item.name}
+          className="w-full h-full relative"
+          fallback={fallbackIcon}
+        />
 
         {/* Hover 播放图标 */}
         <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 backdrop-blur-[2px]">
@@ -144,7 +111,8 @@ export function RecentlyAddedRow({
   scrollSpeed = 1,
   savedScrollPosition = 0,
   onScrollPositionChange,
-  doubanPosters = {}
+  doubanPosters = {},
+  serverType = 'jellyfin'
 }: RecentlyAddedRowProps): ReactElement | null {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const [showLeftArrow, setShowLeftArrow] = useState(false)
@@ -159,19 +127,19 @@ export function RecentlyAddedRow({
   const lastTime = useRef(0)
   const animationFrame = useRef<number | null>(null)
 
-  // 构建海报 URL
+  // 鼠标悬浮状态追踪（用于滚轮事件隔离）
+  const isHovering = useRef(false)
+
   const getPosterUrl = useCallback((item: RecentlyAddedItem): string | null => {
-    // 优先使用本地刮削封面
-    if (doubanPosters[item.itemId]) {
-      let urlPath = doubanPosters[item.itemId].replace(/\\/g, '/')
-      if (urlPath.match(/^[A-Z]:/i)) urlPath = '/' + urlPath
-      return `local-file://${urlPath}`
-    }
-    if (!item.imageTag) return null
-    const authParam = token ? `&api_key=${token}` : ''
-    const imgBase = baseUrl.replace(/^https?:\/\//, 'jellyfin-image://')
-    return `${imgBase}/Items/${item.itemId}/Images/Primary?maxHeight=400&tag=${item.imageTag}&quality=90${authParam}`
-  }, [baseUrl, token, doubanPosters])
+    return buildPosterUrl({
+      baseUrl,
+      token,
+      serverType: serverType || 'jellyfin',
+      itemId: item.itemId,
+      imageTag: item.imageTag,
+      doubanPosterPath: doubanPosters[item.itemId],
+    })
+  }, [baseUrl, token, serverType, doubanPosters])
 
   // 更新箭头显示状态
   const updateArrowVisibility = useCallback(() => {
@@ -262,21 +230,67 @@ export function RecentlyAddedRow({
     }
   }, [])
 
-  // 鼠标离开
-  const handleMouseLeave = useCallback(() => {
+  // 滚轮横向滚动 - 分层拦截，防止页面上下滚动冲突
+  // 使用原生 DOM 事件 + passive:false 确保 preventDefault 真正生效
+  const nativeWheelHandler = useCallback((e: WheelEvent) => {
+    const container = scrollContainerRef.current
+    if (!container) return
+
+    // 仅处理竖向滚轮（ deltaY ），将其转换为横向滚动
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      const delta = e.deltaY * scrollSpeed * 0.5
+      const maxScroll = container.scrollWidth - container.clientWidth
+
+      // 边界检测：滚动到尽头时允许页面竖向滚动
+      const atLeftEdge = container.scrollLeft <= 0 && delta < 0
+      const atRightEdge = container.scrollLeft >= maxScroll && delta > 0
+
+      if (atLeftEdge || atRightEdge) {
+        // 已到达边界，释放滚轮，允许页面滚动
+        console.log(`[RecentlyAddedRow] 滚轮边界释放: ${atLeftEdge ? '左侧尽头' : '右侧尽头'}`)
+        return
+      }
+
+      // 【关键代码】阻止事件冒泡 + 阻止默认行为
+      // stopPropagation: 阻止事件向上传播到父容器（页面滚动容器）
+      // preventDefault: 阻止浏览器默认的页面滚动行为
+      e.stopPropagation()
+      e.preventDefault()
+
+      console.log(`[RecentlyAddedRow] 滚轮拦截: 鼠标在海报区域, 横向滑动 ${delta.toFixed(1)}px, 当前位置 ${container.scrollLeft.toFixed(0)}`)
+
+      container.scrollLeft += delta
+    }
+  }, [scrollSpeed])
+
+  // 注册/注销原生滚轮事件监听（使用 useEffect 确保 passive:false）
+  useEffect(() => {
+    const container = scrollContainerRef.current
+    if (!container) return
+
+    // 添加原生事件监听，passive:false 是 preventDefault 生效的必要条件
+    container.addEventListener('wheel', nativeWheelHandler, { passive: false, capture: false })
+
+    return () => {
+      container.removeEventListener('wheel', nativeWheelHandler)
+    }
+  }, [nativeWheelHandler])
+
+  // 鼠标进入海报区域 - 记录悬浮状态
+  const handleMouseEnter = useCallback(() => {
+    isHovering.current = true
+    console.log('[RecentlyAddedRow] 鼠标进入海报区域，启用滚轮拦截')
+  }, [])
+
+  // 鼠标离开海报区域 - 释放悬浮状态
+  const handleMouseLeaveArea = useCallback(() => {
+    isHovering.current = false
+    console.log('[RecentlyAddedRow] 鼠标离开海报区域，释放滚轮拦截')
+    // 如果正在拖拽，也要结束拖拽
     if (isDragging.current) {
       handleMouseUp()
     }
   }, [handleMouseUp])
-
-  // 滚轮横向滚动
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (!scrollContainerRef.current) return
-    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-      e.preventDefault()
-      scrollContainerRef.current.scrollLeft += e.deltaY * scrollSpeed
-    }
-  }, [scrollSpeed])
 
   // 左箭头
   const scrollLeftByPage = useCallback(() => {
@@ -384,8 +398,8 @@ export function RecentlyAddedRow({
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseLeave}
-          onWheel={handleWheel}
+          onMouseEnter={handleMouseEnter}
+          onMouseLeave={handleMouseLeaveArea}
         >
           {items.map((item, index) => (
             <PosterCard

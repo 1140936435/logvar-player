@@ -9,6 +9,10 @@ import { cachedFetch, clearCache } from '../utils/apiCache'
 import { formatTimeAgo } from '../utils/time'
 import { useHomeStore } from '../providers/HomeStoreProvider'
 import { RecentlyAddedRow } from '../components/RecentlyAddedRow'
+import { MediaCard } from '../components/MediaCard'
+import { VirtualMediaGrid } from '../components/VirtualMediaGrid'
+import { LazyImage } from '../components/LazyImage'
+import { getPosterUrl as buildPosterUrl, getOptimalPosterHeight } from '../utils/posterUrl'
 import {
   getRecentlyAddedConfig,
   saveRecentlyAddedConfig
@@ -74,119 +78,6 @@ interface ServerInfo {
   server: ServerConfig | null
 }
 
-/* ==================== 子组件 ==================== */
-
-const MediaCard = memo(function MediaCard({ item, posterUrl, displayName, communityRating, onClick, onScrape }: {
-  item: MediaItem
-  posterUrl: string | null
-  displayName: string
-  communityRating?: number | null
-  onClick: () => void
-  onScrape?: () => void
-}): ReactElement {
-  const imgRef = useRef<HTMLImageElement>(null)
-  const [isVisible, setIsVisible] = useState(false)
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setIsVisible(true)
-          observer.disconnect()
-        }
-      },
-      { threshold: 0.1, rootMargin: '100px' }
-    )
-
-    if (imgRef.current) {
-      observer.observe(imgRef.current)
-    }
-
-    return () => observer.disconnect()
-  }, [])
-
-  const isFolder = item.IsFolder || (!!item.ChildCount && item.ChildCount > 0)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyItem = item as any
-  const isTv = anyItem.CollectionType === 'tvshows'
-  const isMovie = anyItem.CollectionType === 'movies'
-  const collectionIcon = isTv
-    ? <TvMinimal size={28} className="text-[var(--text-quaternary)]" />
-    : isMovie
-      ? <Film size={28} className="text-[var(--text-quaternary)]" />
-      : <Folder size={28} className="text-[var(--text-quaternary)]" />
-
-  return (
-    <motion.div
-      onClick={onClick}
-      className="media-card group"
-      style={{ aspectRatio: '2/3' }}
-      whileHover={{ y: -3 }}
-      whileTap={{ scale: 0.97 }}
-      transition={{ type: 'spring', stiffness: 400, damping: 25 }}
-    >
-      <div className="media-card-poster w-full h-full">
-        {posterUrl ? (
-          <img
-            ref={imgRef}
-            src={isVisible ? posterUrl : undefined}
-            alt={item.Name}
-            loading="lazy"
-            decoding="async"
-            className="w-full h-full object-cover"
-            onError={(e) => {
-              const target = e.target as HTMLImageElement
-              console.error(`[Poster Error] 图片加载失败: ${item.Name}, src=${target.src}`)
-              target.style.display = 'none'
-              const parent = target.parentElement
-              if (parent && !parent.querySelector('.fallback-icon')) {
-                const div = document.createElement('div')
-                div.className = 'fallback-icon w-full h-full flex items-center justify-center bg-[var(--bg-elevated)]'
-                div.textContent = isFolder ? '📁' : '🎬'
-                parent.appendChild(div)
-              }
-            }}
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center bg-[var(--bg-elevated)]">
-            {collectionIcon}
-          </div>
-        )}
-      </div>
-
-      {/* 刮削按钮 */}
-      {onScrape && (
-        <motion.button
-          onClick={(e) => { e.stopPropagation(); onScrape() }}
-          className="absolute top-2 left-2 w-6 h-6 rounded-md bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity z-20"
-          whileTap={{ scale: 0.9 }}
-        >
-          <ImagePlus size={12} className="text-white/80" />
-        </motion.button>
-      )}
-
-      {/* 评分角标 */}
-      {communityRating != null && communityRating > 0 && (
-        <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-[var(--accent)]/90 text-white backdrop-blur-sm shadow-sm z-10">
-          ★ {communityRating.toFixed(1)}
-        </div>
-      )}
-
-      {/* 底部标题条 */}
-      <div className="absolute inset-x-0 bottom-0 p-2.5 bg-gradient-to-t from-black/70 via-black/30 to-transparent opacity-60 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-10">
-        <p className="text-[11px] text-white/90 font-medium truncate drop-shadow-lg group-hover:text-white transition-colors duration-200">{displayName}</p>
-      </div>
-
-      {/* 文件夹角标 — 电视剧不显示 */}
-      {isFolder && item.Type !== 'Series' && (
-        <div className="absolute top-2 right-2 px-2 py-0.5 bg-[var(--accent)]/90 backdrop-blur-sm rounded-md text-[10px] font-semibold text-white z-10">
-          {item.ChildCount ? `${item.ChildCount}项` : '文件夹'}
-        </div>
-      )}
-    </motion.div>
-  )
-})
-
 const HistoryCard = memo(function HistoryCard({ item, onClick, onDelete }: {
   item: PlayHistoryItem
   onClick: () => void
@@ -195,28 +86,22 @@ const HistoryCard = memo(function HistoryCard({ item, onClick, onDelete }: {
   const progressPercent = item.duration > 0 ? (item.position / item.duration) * 100 : 0
 
   return (
-    <motion.div
+    <div
       onClick={onClick}
       className="flex-shrink-0 group cursor-pointer relative w-[180px] sm:w-[200px] lg:w-[240px]"
-      whileHover={{ y: -2 }}
-      whileTap={{ scale: 0.97 }}
-      transition={{ type: 'spring', stiffness: 400, damping: 25 }}
     >
       <div className="aspect-video rounded-[var(--radius-lg)] overflow-hidden relative bg-[var(--bg-elevated)] border border-[var(--separator)]">
-        {item.posterUrl ? (
-          <img
-            src={item.posterUrl}
-            alt={item.name}
-            className="w-full h-full object-cover"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <Video size={24} className="text-[var(--text-quaternary)]" />
-          </div>
-        )}
+        <LazyImage
+          src={item.posterUrl || null}
+          alt={item.name}
+          className="w-full h-full relative"
+          fallback={
+            <div className="w-full h-full flex items-center justify-center">
+              <Video size={24} className="text-[var(--text-quaternary)]" />
+            </div>
+          }
+        />
 
-        {/* 播放进度条 */}
         <div className="absolute bottom-0 inset-x-0 h-[3px] bg-[var(--separator)]">
           <div
             className="h-full bg-[var(--accent)] transition-all"
@@ -224,14 +109,12 @@ const HistoryCard = memo(function HistoryCard({ item, onClick, onDelete }: {
           />
         </div>
 
-        {/* Hover 播放图标 */}
         <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/30">
           <div className="w-10 h-10 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="white" className="ml-0.5"><polygon points="6,3 20,12 6,21" /></svg>
           </div>
         </div>
 
-        {/* 删除按钮 */}
         <button
           onClick={onDelete}
           className="absolute top-1.5 right-1.5 w-6 h-6 rounded-md bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[var(--error)]/50"
@@ -244,7 +127,7 @@ const HistoryCard = memo(function HistoryCard({ item, onClick, onDelete }: {
         <p className="text-[12px] text-[var(--text-primary)] font-medium truncate" title={item.name}>{item.name}</p>
         <p className="text-[11px] text-[var(--text-tertiary)] mt-0.5">{formatTimeAgo(item.watchedAt)}</p>
       </div>
-    </motion.div>
+    </div>
   )
 })
 
@@ -638,19 +521,36 @@ function Home(): ReactElement {
   const handleSwitchServer = useCallback(async (id: string): Promise<void> => {
     setSwitchingServer(true)
     setShowServerDropdown(false)
+    setErrorMsg('')
     try {
       const result = await window.api.server.switch(id)
       if (result.success) {
-        // 切换服务器时清除所有缓存（包括 Jellyfin 和 Emby），确保获取最新数据
+        // 关键：使 homeStore 缓存失效，否则 loadMediaData 会直接使用旧服务器缓存
+        homeStore.invalidate()
+        // 清除 API 内存缓存
         clearCache('jellyfin.')
         clearCache('emby.')
+        // 重置分类和搜索状态
+        setActiveLibrary('')
+        setIsSearching(false)
+        setSearchResults([])
+        setSearchQuery('')
+        setDrillStack([])
+        // 重新加载数据
         await loadServers()
         await loadMediaData()
         await loadHistory()
+        await loadRecentlyAdded()
+      } else {
+        setErrorMsg(result.error || '切换服务器失败')
+        console.error('[Home] 切换服务器失败:', result.error)
       }
-    } catch { /* ignore */ }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : '切换服务器时发生未知错误')
+      console.error('[Home] 切换服务器异常:', err)
+    }
     setSwitchingServer(false)
-  }, [loadServers, loadMediaData, loadHistory])
+  }, [homeStore, loadServers, loadMediaData, loadHistory, loadRecentlyAdded])
 
   useEffect(() => {
     loadServers()
@@ -846,38 +746,15 @@ function Home(): ReactElement {
 
 
   const getPosterUrl = useCallback((item: MediaItem): string | null => {
-    // 优先使用本地刮削的封面
-    if (doubanPosters[item.Id]) {
-      let urlPath = doubanPosters[item.Id].replace(/\\/g, '/')
-      if (urlPath.match(/^[A-Z]:/i)) urlPath = '/' + urlPath
-      return `local-file://${urlPath}`
-    }
-
-    // 检查是否有封面图片
-    if (!item.ImageTags?.Primary) {
-      console.log(`[Poster] ${item.Name} 无 Primary 图片标签`)
-      return null
-    }
-
-    const base = connectedServer || 'http://localhost:8096'
-
-    // Emby 服务器：使用 emby-image:// 协议，Token 通过 URL 参数传递
-    // 主进程协议处理器会自动添加 X-Emby-Token 请求头
-    if (serverType === 'emby') {
-      const imgBase = base
-        .replace(/^https:\/\//, 'emby-image://https/')
-        .replace(/^http:\/\//, 'emby-image://http/')
-      const tokenParam = jellyfinToken ? `&token=${encodeURIComponent(jellyfinToken)}` : ''
-      const url = `${imgBase}/Items/${item.Id}/Images/Primary?maxHeight=400&tag=${item.ImageTags.Primary}&quality=90${tokenParam}`
-      console.log(`[Emby Poster] ${item.Name}: ${url.replace(/token=[^&]+/, 'token=***')}`)
-      return url
-    }
-
-    // Jellyfin 服务器：使用 api_key 参数
-    const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
-    const imgBase = base.replace(/^https?:\/\//, 'jellyfin-image://')
-    return `${imgBase}/Items/${item.Id}/Images/Primary?maxHeight=400&tag=${item.ImageTags.Primary}&quality=90${authParam}`
-  }, [connectedServer, jellyfinToken, doubanPosters, serverType])
+    return buildPosterUrl({
+      baseUrl: connectedServer || 'http://localhost:8096',
+      token: jellyfinToken,
+      serverType,
+      itemId: item.Id,
+      imageTag: item.ImageTags?.Primary,
+      doubanPosterPath: doubanPosters[item.Id],
+    })
+  }, [connectedServer, jellyfinToken, serverType, doubanPosters])
 
   const breadcrumb = drillStack.map((d) => d.parentName)
   const currentDrill = drillStack.length > 0 ? drillStack[drillStack.length - 1] : null

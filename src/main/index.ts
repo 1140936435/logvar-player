@@ -24,6 +24,41 @@ import * as https from 'https'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { posterCache } from './services/poster-cache'
 
+// ==================== 并发请求控制 ====================
+
+class ConcurrencyLimiter {
+  private maxConcurrent: number;
+  private queue: Array<() => void>;
+  private running: number;
+
+  constructor(maxConcurrent: number) {
+    this.maxConcurrent = maxConcurrent;
+    this.queue = [];
+    this.running = 0;
+  }
+
+  async acquire(): Promise<void> {
+    if (this.running < this.maxConcurrent) {
+      this.running++;
+      return;
+    }
+    return new Promise((resolve) => {
+      this.queue.push(() => {
+        this.running++;
+        resolve();
+      });
+    });
+  }
+
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
+const imageFetchLimiter = new ConcurrencyLimiter(6);
+
 // ==================== 资源路径工具 ====================
 
 function getResourcePath(relativePath: string): string {
@@ -222,14 +257,18 @@ interface JellyfinAuth {
   url: string
   token: string
   userId: string
+  type: ServerType
 }
 
-function buildJellyfinHeaders(token: string): Record<string, string> {
-  return {
-    'X-Emby-Token': token,
-    'Content-Type': 'application/json',
+function buildJellyfinHeaders(token: string, serverType: ServerType): Record<string, string> {
+  const headers: Record<string, string> = {
     Accept: 'application/json'
   }
+  const cleanToken = token.trim()
+  if (cleanToken) {
+    headers['X-Emby-Token'] = cleanToken
+  }
+  return headers
 }
 
 function normalizeUrl(url: string): string {
@@ -250,17 +289,27 @@ async function jellyfinRequest<T>(
   }
   const baseUrl = normalizeUrl(auth.url)
   const url = `${baseUrl}${endpoint}`
-  const headers = { ...buildJellyfinHeaders(auth.token), ...((options.headers as Record<string, string>) || {}) }
+  const headers: Record<string, string> = { ...buildJellyfinHeaders(auth.token, auth.type) }
+  const method = (options.method || 'GET').toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD') {
+    headers['Content-Type'] = 'application/json'
+  }
+  Object.assign(headers, (options.headers as Record<string, string>) || {})
 
-  console.log(`Jellyfin request: ${options.method || 'GET'} ${url}`)
+  console.log(`[jellyfinRequest] ${method} ${url}`)
+  console.log(`[jellyfinRequest] serverType=${auth.type}, token_length=${auth.token.length}, userId=${auth.userId || '(empty)'}`)
+  console.log(`[jellyfinRequest] headers=${JSON.stringify(headers)}`)
 
   const response = await fetch(url, {
     ...options,
     headers
   })
 
+  console.log(`[jellyfinRequest] response status=${response.status}, statusText=${response.statusText}`)
+
   if (!response.ok) {
     const text = await response.text().catch(() => '')
+    console.error(`[jellyfinRequest] ERROR ${response.status}: ${text || response.statusText}`)
     throw new Error(`Jellyfin API error ${response.status}: ${text || response.statusText}`)
   }
 
@@ -357,7 +406,7 @@ async function connectToServer(id: string): Promise<{ success: boolean; data?: J
       if (!server.userId) {
         throw new Error('Emby 服务器缺少 userId，请重新输入账号密码')
       }
-      const auth: JellyfinAuth = { url: server.url, token: server.token, userId: server.userId }
+      const auth: JellyfinAuth = { url: server.url, token: server.token, userId: server.userId, type: 'emby' }
       // 调用 /System/Info 校验 token 是否有效
       const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
         auth, '/System/Info'
@@ -378,16 +427,30 @@ async function connectToServer(id: string): Promise<{ success: boolean; data?: J
 
   // Jellyfin 服务器：通过 /Users/Me 获取当前用户 ID（不需要管理员权限）
   try {
-    const auth: JellyfinAuth = { url: server.url, token: server.token, userId: '' }
+    const auth: JellyfinAuth = { url: server.url, token: server.token, userId: '', type: 'jellyfin' }
     const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
       auth, '/System/Info'
     )
     // 使用 /Users/Me 获取当前认证用户信息（普通用户也有权限访问）
-    const me = await jellyfinRequest<{ Id: string; Name?: string }>(auth, '/Users/Me')
-    if (!me || !me.Id) {
-      throw new Error('无法获取当前用户信息')
+    // 如果使用的是 API Key（系统级凭证），/Users/Me 会返回 400，此时回退到 /Users 获取第一个用户
+    let userId: string
+    try {
+      const me = await jellyfinRequest<{ Id: string; Name?: string }>(auth, '/Users/Me')
+      if (!me || !me.Id) {
+        throw new Error('无法获取当前用户信息')
+      }
+      userId = me.Id
+      console.log(`[server] 使用 /Users/Me 获取用户: ${userId}`)
+    } catch (meErr) {
+      console.warn(`[server] /Users/Me 请求失败，尝试回退到 /Users: ${meErr}`)
+      const users = await jellyfinRequest<Array<{ Id: string; Name?: string }>>(auth, '/Users')
+      if (!users || users.length === 0) {
+        throw new Error('无法获取用户列表，API Key可能没有足够权限')
+      }
+      userId = users[0].Id
+      console.log(`[server] 使用 /Users 回退获取第一个用户: ${userId} (${users[0].Name || 'unknown'})`)
     }
-    auth.userId = me.Id
+    auth.userId = userId
     jellyfinAuth = auth
 
     // 更新 userId
@@ -502,32 +565,47 @@ ipcMain.handle('jellyfin:connect', async (_event, url: string, token: string) =>
   try {
     console.log(`Attempting Jellyfin connection to ${url}`)
     const normalizedUrl = normalizeUrl(url)
-    const auth: JellyfinAuth = { url: normalizedUrl, token, userId: '' }
+    
+    // 检查是否为 Emby 服务器（通过 URL 匹配已保存的服务器配置）
+    const servers = getServers()
+    const matchedServer = servers.find(s => normalizeUrl(s.url) === normalizedUrl)
+    const serverType: ServerType = matchedServer?.type === 'emby' ? 'emby' : 'jellyfin'
+    
+    const auth: JellyfinAuth = { url: normalizedUrl, token, userId: '', type: serverType }
 
     const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
       auth,
       '/System/Info'
     )
 
-    // 检查是否为 Emby 服务器（通过 URL 匹配已保存的服务器配置）
-    const servers = getServers()
-    const matchedServer = servers.find(s => normalizeUrl(s.url) === normalizedUrl)
-    const isEmby = matchedServer?.type === 'emby'
-
-    if (isEmby && matchedServer?.userId) {
+    if (serverType === 'emby' && matchedServer?.userId) {
       // Emby 服务器：使用登录时保存的 userId（Emby 不支持 /Users/Me 接口）
       auth.userId = matchedServer.userId
       console.log(`[server][emby] 使用已保存的 userId: ${auth.userId}`)
     } else {
       // Jellyfin 服务器：通过 /Users/Me 获取当前用户 ID（不需要管理员权限）
-      const me = await jellyfinRequest<{ Id: string; Name?: string }>(
-        auth,
-        '/Users/Me'
-      )
-      if (!me || !me.Id) {
-        throw new Error('无法获取当前用户信息')
+      // 如果使用的是 API Key（系统级凭证），/Users/Me 会返回 400，此时回退到 /Users 获取第一个用户
+      let userId: string
+      try {
+        const me = await jellyfinRequest<{ Id: string; Name?: string }>(
+          auth,
+          '/Users/Me'
+        )
+        if (!me || !me.Id) {
+          throw new Error('无法获取当前用户信息')
+        }
+        userId = me.Id
+        console.log(`[server] 使用 /Users/Me 获取用户: ${userId}`)
+      } catch (meErr) {
+        console.warn(`[server] /Users/Me 请求失败，尝试回退到 /Users: ${meErr}`)
+        const users = await jellyfinRequest<Array<{ Id: string; Name?: string }>>(auth, '/Users')
+        if (!users || users.length === 0) {
+          throw new Error('无法获取用户列表，API Key可能没有足够权限')
+        }
+        userId = users[0].Id
+        console.log(`[server] 使用 /Users 回退获取第一个用户: ${userId} (${users[0].Name || 'unknown'})`)
       }
-      auth.userId = me.Id
+      auth.userId = userId
     }
 
     jellyfinAuth = auth
@@ -601,7 +679,7 @@ ipcMain.handle('server:switch', async (_event, id: string) => {
 ipcMain.handle('server:test', async (_event, url: string, token: string) => {
   const startTime = Date.now()
   try {
-    const auth: JellyfinAuth = { url: url.replace(/\/+$/, ''), token, userId: '' }
+    const auth: JellyfinAuth = { url: url.replace(/\/+$/, ''), token, userId: '', type: 'jellyfin' }
     const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
       auth, '/System/Info'
     )
@@ -1118,7 +1196,7 @@ ipcMain.handle('jellyfin:get-genre-items', async (_event, genre: string, startIn
     const baseUrl = normalizeUrl(jellyfinAuth.url)
     const url = `${baseUrl}/Items?userId=${jellyfinAuth.userId}&genres=${encodeURIComponent(genre)}&recursive=true&includeItemTypes=Movie,Series&sortBy=SortName&startIndex=${startIndex || 0}&limit=50`
     console.log(`[jellyfin:get-genre-items] GET ${url}`)
-    const response = await fetch(url, { headers: buildJellyfinHeaders(jellyfinAuth.token) })
+    const response = await fetch(url, { headers: buildJellyfinHeaders(jellyfinAuth.token, jellyfinAuth.type) })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const buffer = await response.arrayBuffer()
     const text = new TextDecoder('utf-8').decode(buffer)
@@ -2795,19 +2873,21 @@ function registerJellyfinImageProtocol(): void {
       const cachedData = await posterCache.get(cacheKey);
 
       if (cachedData) {
-        console.log(`[jellyfin-image] 缓存命中: ${cacheKey}`);
         return new Response(cachedData, {
-          headers: { 'Content-Type': 'image/png' },
+          headers: {
+            'Content-Type': 'image/png',
+            'Cache-Control': 'public, max-age=604800',
+          },
         });
       }
 
-      console.log(`[jellyfin-image] 请求: ${realUrl}`);
-
       try {
+        await imageFetchLimiter.acquire();
         const response = await net.fetch(realUrl, {
           signal: AbortSignal.timeout(15000),
           bypassCustomProtocolHandlers: true,
         });
+        imageFetchLimiter.release();
 
         if (!response.ok) {
           throw new Error(`${response.status} ${response.statusText}`);
@@ -2817,9 +2897,13 @@ function registerJellyfinImageProtocol(): void {
         await posterCache.set(cacheKey, buffer, realUrl);
 
         return new Response(buffer, {
-          headers: { 'Content-Type': response.headers.get('content-type') || 'image/png' },
+          headers: {
+            'Content-Type': response.headers.get('content-type') || 'image/png',
+            'Cache-Control': 'public, max-age=604800',
+          },
         });
       } catch (err) {
+        imageFetchLimiter.release();
         console.error(`[jellyfin-image] 请求失败: ${err}`);
         return new Response('Error loading image', { status: 500 });
       }
@@ -2851,9 +2935,11 @@ function registerEmbyImageProtocol(): void {
       const cachedData = await posterCache.get(cacheKey);
 
       if (cachedData) {
-        console.log(`[emby-image] 缓存命中: ${cacheKey}`);
         return new Response(cachedData, {
-          headers: { 'Content-Type': 'image/png' },
+          headers: {
+            'Content-Type': 'image/png',
+            'Cache-Control': 'public, max-age=604800',
+          },
         });
       }
 
@@ -2862,15 +2948,14 @@ function registerEmbyImageProtocol(): void {
         headers['X-Emby-Token'] = token;
       }
 
-      console.log(`[emby-image] ===== 请求开始 =====`);
-      console.log(`[emby-image] URL: ${realUrl}`);
-
       try {
+        await imageFetchLimiter.acquire();
         const response = await net.fetch(realUrl, {
           signal: AbortSignal.timeout(15000),
           bypassCustomProtocolHandlers: true,
           headers,
         });
+        imageFetchLimiter.release();
 
         if (!response.ok) {
           throw new Error(`${response.status} ${response.statusText}`);
@@ -2880,9 +2965,13 @@ function registerEmbyImageProtocol(): void {
         await posterCache.set(cacheKey, buffer, realUrl);
 
         return new Response(buffer, {
-          headers: { 'Content-Type': response.headers.get('content-type') || 'image/png' },
+          headers: {
+            'Content-Type': response.headers.get('content-type') || 'image/png',
+            'Cache-Control': 'public, max-age=604800',
+          },
         });
       } catch (err) {
+        imageFetchLimiter.release();
         console.error(`[emby-image] 请求失败: ${err}`);
         return new Response('Error loading image', { status: 500 });
       }

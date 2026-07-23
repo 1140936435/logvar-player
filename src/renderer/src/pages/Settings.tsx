@@ -2,14 +2,14 @@ import { useState, useEffect, useCallback, useMemo, type ReactElement } from 're
 import { useNavigate } from 'react-router-dom'
 // 修复点 1.21: preload-types 实际上没有导出 ServerInfo/ServerTestResult，只有 ServerConfig。
 // ServerInfo / ServerTestResult 是 Settings 里内聚的本地类型，自行定义。
-import type { ServerConfig as ApiServerConfig } from '../../../shared/preload-types'
-import type { JellyfinServerInfo } from '../../../shared/types'
+import type { ServerConfig as ApiServerConfig, EmbyTestResponse } from '../../../shared/preload-types'
+import type { JellyfinServerInfo, ServerType } from '../../../shared/types'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Database, Plug, WifiOff, Save, Loader2, CheckCircle,
   MessageCircleMore, Radar, MonitorPlay, Info,
   ChevronDown, Key, Link as LinkIcon, CirclePlus, Trash2, Settings as SettingsIcon,
-  CircleDot, Sparkles
+  CircleDot, Sparkles, User, Lock, Server
 } from 'lucide-react'
 
 /* ==================== 类型 ==================== */
@@ -136,7 +136,12 @@ function Settings(): ReactElement {
   const [activeServerId, setActiveServerId] = useState<string | null>(null)
   const [editingServer, setEditingServer] = useState<ServerConfig | null>(null)
   const [showAddForm, setShowAddForm] = useState(false)
-  const [serverForm, setServerForm] = useState({ name: '', url: '', token: '' })
+  // 服务类型：'jellyfin' 使用 API Token；'emby' 使用账号密码
+  const [serverType, setServerType] = useState<ServerType>('jellyfin')
+  // 通用字段：name / url；jellyfin 用 token；emby 用 username / password
+  // 测试成功后 emby 还会暂存 loginResult（含 token/userId），供保存时使用
+  const [serverForm, setServerForm] = useState({ name: '', url: '', token: '', username: '', password: '' })
+  const [embyLoginResult, setEmbyLoginResult] = useState<{ token: string; userId: string } | null>(null)
   const [serverConnecting, setServerConnecting] = useState(false)
   const [serverTesting, setServerTesting] = useState(false)
   const [serverTestResult, setServerTestResult] = useState<ServerTestResult | null>(null)
@@ -180,49 +185,143 @@ function Settings(): ReactElement {
   }, [])
 
   const handleTestServer = useCallback(async (): Promise<void> => {
-    if (!serverForm.url.trim() || !serverForm.token.trim()) return
+    if (!serverForm.url.trim()) return
     setServerTesting(true)
     setServerTestResult(null)
+    setEmbyLoginResult(null)
     try {
-      const result = await window.api.server.test(serverForm.url.trim(), serverForm.token.trim())
-      setServerTestResult(result as ServerTestResult)
-    } catch (err) { setServerTestResult({ success: false, error: err instanceof Error ? err.message : String(err), elapsed: 0 }) }
+      if (serverType === 'emby') {
+        if (!serverForm.username.trim() || !serverForm.password) return
+        const result = await window.api.server.testEmby({
+          url: serverForm.url.trim(),
+          username: serverForm.username.trim(),
+          password: serverForm.password
+        }) as EmbyTestResponse
+        // 测试成功后保存 token/userId 供"添加服务器"使用
+        if (result.success && result.data) {
+          // 调用 emby.login 获取完整 token/userId（testEmby 仅返回校验信息）
+          const loginRes = await window.api.emby.login(
+            serverForm.url.trim(),
+            serverForm.username.trim(),
+            serverForm.password
+          )
+          if (loginRes.success && loginRes.data) {
+            setEmbyLoginResult({ token: loginRes.data.token, userId: loginRes.data.userId })
+          }
+        }
+        setServerTestResult({
+          success: result.success,
+          error: result.error,
+          elapsed: result.elapsed,
+          data: result.data ? { ServerName: result.data.ServerName, Version: result.data.Version } : undefined
+        })
+      } else {
+        if (!serverForm.token.trim()) return
+        const result = await window.api.server.test(serverForm.url.trim(), serverForm.token.trim())
+        setServerTestResult(result as ServerTestResult)
+      }
+    } catch (err) {
+      setServerTestResult({ success: false, error: err instanceof Error ? err.message : String(err), elapsed: 0 })
+    }
     setServerTesting(false)
-  }, [serverForm.url, serverForm.token])
+  }, [serverForm.url, serverForm.token, serverForm.username, serverForm.password, serverType])
 
   const handleSaveServer = useCallback(async (): Promise<void> => {
-    if (!serverForm.url.trim() || !serverForm.token.trim()) return
+    if (!serverForm.url.trim()) return
     try {
-      if (editingServer) {
-        await window.api.server.update({
-          id: editingServer.id,
-          name: serverForm.name.trim() || 'Jellyfin',
-          url: serverForm.url.trim(),
-          token: serverForm.token.trim()
-        })
-        setServerStatus({ type: 'success', message: '服务器已更新' })
+      if (serverType === 'emby') {
+        // Emby：必须先测试成功拿到 token/userId 才能保存
+        if (!embyLoginResult) {
+          setServerStatus({ type: 'error', message: '请先点击「测试连接」验证账号密码' })
+          return
+        }
+        if (!serverForm.username.trim() || !serverForm.password) {
+          setServerStatus({ type: 'error', message: '请填写账号和密码' })
+          return
+        }
+        if (editingServer) {
+          // 编辑模式下更新 Emby 服务器（仅 name/url/账号密码/token/userId 可变）
+          // 复用 server.update 更新基础字段，再用 store 直接写回 type/username/password/userId
+          await window.api.server.update({
+            id: editingServer.id,
+            name: serverForm.name.trim() || `Emby (${serverForm.username.trim()})`,
+            url: serverForm.url.trim(),
+            token: embyLoginResult.token
+          })
+          // 直接更新 servers 数组中的 Emby 专属字段
+          const listRes = await window.api.server.list()
+          if (listRes.success && listRes.data) {
+            const updated = listRes.data.map((s) => {
+              if (s.id === editingServer.id) {
+                return {
+                  ...s,
+                  type: 'emby' as ServerType,
+                  username: serverForm.username.trim(),
+                  password: serverForm.password,
+                  userId: embyLoginResult.userId,
+                  token: embyLoginResult.token,
+                  url: serverForm.url.trim(),
+                  name: serverForm.name.trim() || `Emby (${serverForm.username.trim()})`
+                }
+              }
+              return s
+            })
+            await window.api.store.set('jellyfin:servers', updated)
+          }
+          setServerStatus({ type: 'success', message: '服务器已更新' })
+        } else {
+          const result = await window.api.server.addEmby({
+            name: serverForm.name.trim() || `Emby (${serverForm.username.trim()})`,
+            url: serverForm.url.trim(),
+            username: serverForm.username.trim(),
+            password: serverForm.password,
+            token: embyLoginResult.token,
+            userId: embyLoginResult.userId
+          })
+          if (result.success && result.data) {
+            const newServer = result.data as ServerConfig
+            setServerStatus({ type: 'success', message: 'Emby 服务器已添加' })
+            handleConnectServer(newServer.id)
+          } else {
+            setServerStatus({ type: 'error', message: result.error || '添加失败' })
+            return
+          }
+        }
       } else {
-        const result = await window.api.server.add({
-          name: serverForm.name.trim() || 'Jellyfin',
-          url: serverForm.url.trim(),
-          token: serverForm.token.trim()
-        })
-        if (result.success && result.data) {
-          const newServer = result.data as ServerConfig
-          setServerStatus({ type: 'success', message: '服务器已添加' })
-          handleConnectServer(newServer.id)
+        // Jellyfin：使用原有逻辑
+        if (!serverForm.token.trim()) return
+        if (editingServer) {
+          await window.api.server.update({
+            id: editingServer.id,
+            name: serverForm.name.trim() || 'Jellyfin',
+            url: serverForm.url.trim(),
+            token: serverForm.token.trim()
+          })
+          setServerStatus({ type: 'success', message: '服务器已更新' })
+        } else {
+          const result = await window.api.server.add({
+            name: serverForm.name.trim() || 'Jellyfin',
+            url: serverForm.url.trim(),
+            token: serverForm.token.trim()
+          })
+          if (result.success && result.data) {
+            const newServer = result.data as ServerConfig
+            setServerStatus({ type: 'success', message: '服务器已添加' })
+            handleConnectServer(newServer.id)
+          }
         }
       }
       setShowAddForm(false)
       setEditingServer(null)
-      setServerForm({ name: '', url: '', token: '' })
+      setServerForm({ name: '', url: '', token: '', username: '', password: '' })
       setServerTestResult(null)
+      setEmbyLoginResult(null)
       await loadServers()
       setTimeout(() => setServerStatus(null), 3000)
     } catch (err) {
       setServerStatus({ type: 'error', message: err instanceof Error ? err.message : '操作失败' })
     }
-  }, [serverForm, editingServer, loadServers])
+  }, [serverForm, editingServer, loadServers, serverType, embyLoginResult])
 
   const handleConnectServer = useCallback(async (id: string): Promise<void> => {
     setServerConnecting(true)
@@ -235,7 +334,8 @@ function Settings(): ReactElement {
         const info = (result.data as unknown as JellyfinServerInfo) ?? ({} as JellyfinServerInfo)
         setActiveServerId(id)
         const server = servers.find(s => s.id === id)
-        setServerStatus({ type: 'success', message: `已连接 - ${info.ServerName || server?.name || 'Jellyfin'}` })
+        const fallbackName = server?.name || (server?.type === 'emby' ? 'Emby' : 'Jellyfin')
+        setServerStatus({ type: 'success', message: `已连接 - ${info.ServerName || fallbackName}` })
         await loadServers()
         // 导航回 Home 页面，触发媒体库刷新
         navigate('/')
@@ -262,7 +362,16 @@ function Settings(): ReactElement {
 
   const handleEditServer = useCallback((server: ServerConfig): void => {
     setEditingServer(server)
-    setServerForm({ name: server.name, url: server.url, token: server.token })
+    setServerType(server.type || 'jellyfin')
+    setServerForm({
+      name: server.name,
+      url: server.url,
+      token: server.token,
+      username: server.username || '',
+      password: server.password || ''
+    })
+    // 编辑模式下清空登录缓存，要求用户重新测试以刷新 token
+    setEmbyLoginResult(null)
     setShowAddForm(true)
     setServerTestResult(null)
   }, [])
@@ -371,8 +480,8 @@ function Settings(): ReactElement {
         {/* ======== 双栏布局 ======== */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
 
-          {/* ======== 左栏：Jellyfin 服务器 ======== */}
-          <GlassCard title="Jellyfin 服务器" icon={Database}>
+          {/* ======== 左栏：媒体服务器（Jellyfin / Emby） ======== */}
+          <GlassCard title="媒体服务器" icon={Server}>
             {/* 连接状态 */}
             <AnimatePresence>
               {serverStatus && (
@@ -398,13 +507,15 @@ function Settings(): ReactElement {
             <div className="space-y-3">
               {servers.length === 0 && !showAddForm && (
                 <div className="text-center py-8">
-                  <Database size={32} className="mx-auto text-[var(--text-quaternary)] mb-3" />
+                  <Server size={32} className="mx-auto text-[var(--text-quaternary)] mb-3" />
                   <p className="text-[14px] text-[var(--text-tertiary)] mb-1">还没有保存的服务器</p>
-                  <p className="text-[12px] text-[var(--text-quaternary)]">点击下方按钮添加你的第一个 Jellyfin 服务器</p>
+                  <p className="text-[12px] text-[var(--text-quaternary)]">点击下方按钮添加你的第一个 Jellyfin 或 Emby 服务器</p>
                 </div>
               )}
 
-              {servers.map((server) => (
+              {servers.map((server) => {
+                const isEmby = server.type === 'emby'
+                return (
                 <div
                   key={server.id}
                   className={`p-4 rounded-[var(--radius-lg)] border transition-colors ${
@@ -418,16 +529,25 @@ function Settings(): ReactElement {
                       {server.id === activeServerId ? (
                         <CircleDot size={18} className="text-[var(--accent)] flex-shrink-0" />
                       ) : (
-                        <Database size={18} className="text-[var(--text-quaternary)] flex-shrink-0" />
+                        <Server size={18} className="text-[var(--text-quaternary)] flex-shrink-0" />
                       )}
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-[14px] font-medium text-[var(--text-primary)] truncate">{server.name}</span>
+                          <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded-full ${
+                            isEmby
+                              ? 'bg-[var(--success)]/15 text-[var(--success)] border border-[var(--success)]/30'
+                              : 'bg-[var(--accent)]/15 text-[var(--accent)] border border-[var(--accent)]/30'
+                          }`}>
+                            {isEmby ? 'Emby' : 'Jellyfin'}
+                          </span>
                           {server.id === activeServerId && (
                             <span className="px-1.5 py-0.5 text-[10px] font-medium bg-[var(--accent)] text-white rounded-full">当前</span>
                           )}
                         </div>
-                        <p className="text-[12px] text-[var(--text-tertiary)] truncate mt-0.5">{server.url}</p>
+                        <p className="text-[12px] text-[var(--text-tertiary)] truncate mt-0.5">
+                          {isEmby && server.username ? `${server.username} @ ` : ''}{server.url}
+                        </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -461,7 +581,8 @@ function Settings(): ReactElement {
                     </div>
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
 
             {/* 添加/编辑表单 */}
@@ -479,11 +600,62 @@ function Settings(): ReactElement {
                         {editingServer ? '编辑服务器' : '添加服务器'}
                       </h3>
                       <button
-                        onClick={() => { setShowAddForm(false); setEditingServer(null); setServerForm({ name: '', url: '', token: '' }); setServerTestResult(null) }}
+                        onClick={() => {
+                          setShowAddForm(false)
+                          setEditingServer(null)
+                          setServerForm({ name: '', url: '', token: '', username: '', password: '' })
+                          setServerType('jellyfin')
+                          setServerTestResult(null)
+                          setEmbyLoginResult(null)
+                        }}
                         className="text-[12px] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]"
                       >
                         取消
                       </button>
+                    </div>
+
+                    {/* 服务类型切换 — 编辑模式下锁定（避免类型混淆） */}
+                    <div>
+                      <label className="block text-[13px] text-[var(--text-secondary)] font-medium mb-2">服务类型</label>
+                      <div className="grid grid-cols-2 gap-2 p-1 rounded-[var(--radius-md)] bg-[var(--bg-hover)]">
+                        <button
+                          type="button"
+                          disabled={!!editingServer}
+                          onClick={() => {
+                            setServerType('jellyfin')
+                            setServerTestResult(null)
+                            setEmbyLoginResult(null)
+                          }}
+                          className={`py-2 text-[13px] rounded-[var(--radius-sm)] transition-colors ${
+                            serverType === 'jellyfin'
+                              ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium shadow-sm'
+                              : 'text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]'
+                          } ${editingServer ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
+                        >
+                          <Database size={13} className="inline -mt-0.5 mr-1" strokeWidth={1.5} />
+                          Jellyfin
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!!editingServer}
+                          onClick={() => {
+                            setServerType('emby')
+                            setServerTestResult(null)
+                            setEmbyLoginResult(null)
+                          }}
+                          className={`py-2 text-[13px] rounded-[var(--radius-sm)] transition-colors ${
+                            serverType === 'emby'
+                              ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium shadow-sm'
+                              : 'text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]'
+                          } ${editingServer ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
+                        >
+                          <Server size={13} className="inline -mt-0.5 mr-1" strokeWidth={1.5} />
+                          Emby
+                        </button>
+                      </div>
+                      {editingServer && (
+                        <p className="text-[11px] text-[var(--text-quaternary)] mt-1.5">编辑模式下不可切换服务类型</p>
+                      )}
                     </div>
 
                     <Field label="服务器名称" hint="可选">
@@ -491,7 +663,7 @@ function Settings(): ReactElement {
                         type="text"
                         value={serverForm.name}
                         onChange={(e) => setServerForm({ ...serverForm, name: e.target.value })}
-                        placeholder="我的 Jellyfin"
+                        placeholder={serverType === 'emby' ? '我的 Emby' : '我的 Jellyfin'}
                         className="ios-input"
                       />
                     </Field>
@@ -502,25 +674,76 @@ function Settings(): ReactElement {
                         <input
                           type="text"
                           value={serverForm.url}
-                          onChange={(e) => setServerForm({ ...serverForm, url: e.target.value })}
-                          placeholder="http://192.168.1.100:8096"
+                          onChange={(e) => {
+                            setServerForm({ ...serverForm, url: e.target.value })
+                            // URL 变更后清除测试结果（账号密码可能不匹配新地址）
+                            setServerTestResult(null)
+                            setEmbyLoginResult(null)
+                          }}
+                          placeholder={serverType === 'emby' ? 'http://192.168.1.100:8096' : 'http://192.168.1.100:8096'}
                           className="ios-input !pl-10"
                         />
                       </div>
                     </Field>
 
-                    <Field label="API Token" hint="Jellyfin 控制台 → API 密钥">
-                      <div className="relative">
-                        <Key size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-quaternary)]" strokeWidth={1.5} />
-                        <input
-                          type="password"
-                          value={serverForm.token}
-                          onChange={(e) => setServerForm({ ...serverForm, token: e.target.value })}
-                          placeholder="输入你的 API Token"
-                          className="ios-input !pl-10"
-                        />
-                      </div>
-                    </Field>
+                    {/* Jellyfin: API Token 字段 */}
+                    {serverType === 'jellyfin' && (
+                      <Field label="API Token" hint="Jellyfin 控制台 → API 密钥">
+                        <div className="relative">
+                          <Key size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-quaternary)]" strokeWidth={1.5} />
+                          <input
+                            type="password"
+                            value={serverForm.token}
+                            onChange={(e) => setServerForm({ ...serverForm, token: e.target.value })}
+                            placeholder="输入你的 API Token"
+                            className="ios-input !pl-10"
+                          />
+                        </div>
+                      </Field>
+                    )}
+
+                    {/* Emby: 账号 + 密码字段 */}
+                    {serverType === 'emby' && (
+                      <>
+                        <Field label="账号">
+                          <div className="relative">
+                            <User size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-quaternary)]" strokeWidth={1.5} />
+                            <input
+                              type="text"
+                              value={serverForm.username}
+                              onChange={(e) => {
+                                setServerForm({ ...serverForm, username: e.target.value })
+                                setServerTestResult(null)
+                                setEmbyLoginResult(null)
+                              }}
+                              placeholder="Emby 登录账号"
+                              className="ios-input !pl-10"
+                              autoComplete="off"
+                            />
+                          </div>
+                        </Field>
+                        <Field label="密码">
+                          <div className="relative">
+                            <Lock size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-quaternary)]" strokeWidth={1.5} />
+                            <input
+                              type="password"
+                              value={serverForm.password}
+                              onChange={(e) => {
+                                setServerForm({ ...serverForm, password: e.target.value })
+                                setServerTestResult(null)
+                                setEmbyLoginResult(null)
+                              }}
+                              placeholder="Emby 登录密码"
+                              className="ios-input !pl-10"
+                              autoComplete="off"
+                            />
+                          </div>
+                        </Field>
+                        <p className="text-[11px] text-[var(--text-quaternary)] -mt-2 leading-relaxed">
+                          密码将使用系统密钥链 (safeStorage) 加密保存，登录后获取的 Token 用于后续 API 鉴权。
+                        </p>
+                      </>
+                    )}
 
                     {/* 测试结果 */}
                     {serverTestResult && (
@@ -544,7 +767,11 @@ function Settings(): ReactElement {
                     <div className="flex gap-2">
                       <motion.button
                         onClick={handleTestServer}
-                        disabled={serverTesting || !serverForm.url.trim() || !serverForm.token.trim()}
+                        disabled={
+                          serverTesting ||
+                          !serverForm.url.trim() ||
+                          (serverType === 'jellyfin' ? !serverForm.token.trim() : !serverForm.username.trim() || !serverForm.password)
+                        }
                         className="ios-btn ios-btn-secondary flex-1"
                         whileTap={{ scale: 0.96 }}
                       >
@@ -553,7 +780,12 @@ function Settings(): ReactElement {
                       </motion.button>
                       <motion.button
                         onClick={handleSaveServer}
-                        disabled={!serverForm.url.trim() || !serverForm.token.trim()}
+                        disabled={
+                          !serverForm.url.trim() ||
+                          (serverType === 'jellyfin'
+                            ? !serverForm.token.trim()
+                            : !serverForm.username.trim() || !serverForm.password || !embyLoginResult)
+                        }
                         className="ios-btn ios-btn-primary flex-1"
                         whileTap={{ scale: 0.96 }}
                       >
@@ -561,6 +793,9 @@ function Settings(): ReactElement {
                         {editingServer ? '保存修改' : '添加服务器'}
                       </motion.button>
                     </div>
+                    {serverType === 'emby' && !embyLoginResult && (
+                      <p className="text-[11px] text-[var(--text-quaternary)] text-center -mt-2">Emby 服务器需先「测试连接」获取令牌后才能保存</p>
+                    )}
                   </div>
                 </motion.div>
               )}
@@ -569,7 +804,14 @@ function Settings(): ReactElement {
             {/* 添加按钮 */}
             {!showAddForm && (
               <motion.button
-                onClick={() => { setShowAddForm(true); setEditingServer(null); setServerForm({ name: '', url: '', token: '' }); setServerTestResult(null) }}
+                onClick={() => {
+                  setShowAddForm(true)
+                  setEditingServer(null)
+                  setServerType('jellyfin')
+                  setServerForm({ name: '', url: '', token: '', username: '', password: '' })
+                  setServerTestResult(null)
+                  setEmbyLoginResult(null)
+                }}
                 className="ios-btn ios-btn-secondary w-full"
                 whileTap={{ scale: 0.96 }}
               >

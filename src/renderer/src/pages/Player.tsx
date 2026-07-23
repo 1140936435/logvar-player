@@ -143,6 +143,7 @@ function Player(): ReactElement {
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const blurBgCanvasRef = useRef<HTMLCanvasElement>(null)
   const subtitleCuesRef = useRef<SubtitleCue[][]>([])
   const activeSubIdxRef = useRef(-1)
   const currentSubTextRef = useRef('')
@@ -193,6 +194,8 @@ function Player(): ReactElement {
   // 竖屏视频检测
   const [isPortrait, setIsPortrait] = useState(false)
   const [videoAspectRatio, setVideoAspectRatio] = useState(16 / 9)
+  // 视频显示模式: 'contain'=完整显示(默认), 'cover'=裁切填充
+  const [displayMode, setDisplayMode] = useState<'contain' | 'cover'>('contain')
 
   // P2: 窗口置顶
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
@@ -630,9 +633,20 @@ function Player(): ReactElement {
     timeBusRef.current.attachVideo(video)
 
     // 性能优化：弹幕引擎使用 RAF 订阅，每帧更新不经过 React state，避免 60fps 重渲染
+    let frameCount = 0
     const unsubRAF = timeBusRef.current.subscribeRAF((time, playbackRate) => {
       if (danmakuEnabled && engineRef.current) {
         engineRef.current.update(time, playbackRate)
+      }
+      frameCount++
+      if (frameCount % 8 === 0 && isPortrait && displayMode === 'contain') {
+        const blurCanvas = blurBgCanvasRef.current
+        const blurCtx = blurCanvas?.getContext('2d')
+        if (blurCanvas && blurCtx && video.videoWidth > 0) {
+          blurCanvas.width = video.videoWidth / 4
+          blurCanvas.height = video.videoHeight / 4
+          blurCtx.drawImage(video, 0, 0, blurCanvas.width, blurCanvas.height)
+        }
       }
     })
 
@@ -1053,8 +1067,24 @@ function Player(): ReactElement {
           </div>
         </div>
 
-        <div className="relative bg-black" style={{ maxWidth: isPortrait ? '60vh' : '100%', maxHeight: '100%', aspectRatio: String(videoAspectRatio) }}>
-          <video ref={videoRef} className="w-full h-full object-contain" controls={false} playsInline preload="metadata" crossOrigin="anonymous" />
+        <div className="relative w-full h-full bg-black">
+          {isPortrait && displayMode === 'contain' && (
+            <div className="absolute inset-0 overflow-hidden -z-10">
+              <canvas
+                ref={blurBgCanvasRef}
+                className="w-full h-full object-cover scale-110"
+                style={{ filter: 'blur(20px) brightness(0.5)' }}
+              />
+            </div>
+          )}
+          <video
+            ref={videoRef}
+            className={`w-full h-full ${displayMode === 'cover' ? 'object-cover' : 'object-contain'}`}
+            controls={false}
+            playsInline
+            preload="metadata"
+            crossOrigin="anonymous"
+          />
           <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-10" />
         </div>
 
@@ -1183,43 +1213,44 @@ function Player(): ReactElement {
         onCloseVideoSourceInfo={handleCloseVideoInfo}
       />
       {/* 控制栏 — 悬浮在视频底部，不占据固定高度，修复全屏黑条 */}
-      <div className={`absolute bottom-0 left-0 right-0 z-30 ${isPortrait ? 'flex justify-center' : ''}`}>
-        <div className="relative w-full" style={{ maxWidth: isPortrait ? '60vh' : '100%' }}>
-          <PlayerControls
-            visible={controlsVisible}
-            isPlaying={isPlaying}
-            episodeCount={Math.max(episodeList.length, folderVideos.length)}
-            currentEpisodeIndex={currentEpisodeIndex}
-            currentTime={currentTime}
-            duration={duration}
-            buffered={buffered}
-            playbackRate={playbackRate}
-            volume={volume}
-            subtitleTrackCount={subtitleTracks.length}
-            activeSubtitleIndex={activeSubtitleIndex}
-            danmakuEnabled={danmakuEnabled}
-            danmakuOffset={danmakuOffset}
-            pipActive={pipActive}
-            subtitleSettingsOpen={subtitleSettingsOpen}
-            onMouseMove={handleMouseMove}
-            onPlayPause={handlePlayPause}
-            onPreviousEpisode={() => handleSwitchEpisode(currentEpisodeIndex - 1)}
-            onNextEpisode={() => handleSwitchEpisode(currentEpisodeIndex + 1)}
-            onToggleEpisodePopup={() => setEpisodePopup((open) => !open)}
-            onSeek={handleSeek}
-            onToggleSpeedPopup={() => { if (speedPopup) setSpeedPopup(false); else { closeAllPopups(); setSpeedPopup(true) } }}
-            onToggleVolumePopup={() => { if (volumePopup) setVolumePopup(false); else { closeAllPopups(); setVolumePopup(true) } }}
-            onToggleSubtitlePopup={() => { if (subtitlePopup) setSubtitlePopup(false); else { closeAllPopups(); setSubtitlePopup(true) } }}
-            onToggleSubtitleSettings={() => { if (subtitleSettingsOpen) setSubtitleSettingsOpen(false); else { closeAllPopups(); setSubtitleSettingsOpen(true) } }}
-            onToggleDanmaku={handleDanmakuToggle}
-            onOpenDanmakuSearch={handleOpenDanmakuSearch}
-            onResetDanmakuOffset={() => handleOffsetChange(0)}
-            onToggleDanmakuSettings={() => { if (settingsOpen) setSettingsOpen(false); else { closeAllPopups(); setSettingsOpen(true) } }}
-            onScreenshot={() => { void handleScreenshot() }}
-            onPictureInPicture={() => { void handlePictureInPicture() }}
-            onFullscreen={handleFullscreen}
-          />
-        </div>
+      <div className="absolute bottom-0 left-0 right-0 z-30">
+        <PlayerControls
+          visible={controlsVisible}
+          isPortrait={isPortrait}
+          isPlaying={isPlaying}
+          displayMode={displayMode}
+          episodeCount={Math.max(episodeList.length, folderVideos.length)}
+          currentEpisodeIndex={currentEpisodeIndex}
+          currentTime={currentTime}
+          duration={duration}
+          buffered={buffered}
+          playbackRate={playbackRate}
+          volume={volume}
+          subtitleTrackCount={subtitleTracks.length}
+          activeSubtitleIndex={activeSubtitleIndex}
+          danmakuEnabled={danmakuEnabled}
+          danmakuOffset={danmakuOffset}
+          pipActive={pipActive}
+          subtitleSettingsOpen={subtitleSettingsOpen}
+          onMouseMove={handleMouseMove}
+          onPlayPause={handlePlayPause}
+          onPreviousEpisode={() => handleSwitchEpisode(currentEpisodeIndex - 1)}
+          onNextEpisode={() => handleSwitchEpisode(currentEpisodeIndex + 1)}
+          onToggleEpisodePopup={() => setEpisodePopup((open) => !open)}
+          onSeek={handleSeek}
+          onToggleSpeedPopup={() => { if (speedPopup) setSpeedPopup(false); else { closeAllPopups(); setSpeedPopup(true) } }}
+          onToggleVolumePopup={() => { if (volumePopup) setVolumePopup(false); else { closeAllPopups(); setVolumePopup(true) } }}
+          onToggleSubtitlePopup={() => { if (subtitlePopup) setSubtitlePopup(false); else { closeAllPopups(); setSubtitlePopup(true) } }}
+          onToggleSubtitleSettings={() => { if (subtitleSettingsOpen) setSubtitleSettingsOpen(false); else { closeAllPopups(); setSubtitleSettingsOpen(true) } }}
+          onToggleDanmaku={handleDanmakuToggle}
+          onOpenDanmakuSearch={handleOpenDanmakuSearch}
+          onResetDanmakuOffset={() => handleOffsetChange(0)}
+          onToggleDanmakuSettings={() => { if (settingsOpen) setSettingsOpen(false); else { closeAllPopups(); setSettingsOpen(true) } }}
+          onScreenshot={() => { void handleScreenshot() }}
+          onPictureInPicture={() => { void handlePictureInPicture() }}
+          onFullscreen={handleFullscreen}
+          onToggleDisplayMode={() => setDisplayMode(prev => prev === 'contain' ? 'cover' : 'contain')}
+        />
       </div>
 
       <PlayerPopups

@@ -95,6 +95,11 @@ function Detail(): ReactElement {
   const [baseUrl, setBaseUrl] = useState('http://localhost:8096')
   const [jellyfinToken, setJellyfinToken] = useState('')
   const [localPosters, setLocalPosters] = useState<Record<string, string>>({})
+  const [serverType, setServerType] = useState<'jellyfin' | 'emby'>('jellyfin')
+  const [posterError, setPosterError] = useState(false)
+  const [backdropError, setBackdropError] = useState(false)
+  const [personAvatarErrors, setPersonAvatarErrors] = useState<Record<string, boolean>>({})
+  const [episodeThumbErrors, setEpisodeThumbErrors] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
     window.api.store.get('poster-map').then((saved: unknown) => {
@@ -108,25 +113,33 @@ function Detail(): ReactElement {
     if (!itemId) return
     setLoading(true)
     setError('')
+    setPosterError(false)
+    setBackdropError(false)
+    setPersonAvatarErrors({})
+    setEpisodeThumbErrors({})
     let cancelled = false
 
-    // 先读取服务器地址（优先旧 key，其次多服务器配置）
-    window.api.store.get('jellyfin').then(async (saved: unknown) => {
-      const s = saved as { url?: string; token?: string } | null
+    // 从 server.getActive() 获取当前活跃服务器（包含正确的 type 字段）
+    window.api.server.getActive().then((result: any) => {
       if (cancelled) return
-      if (s?.url) setBaseUrl(s.url.replace(/\/+$/, ''))
-      if (s?.token) {
-        setJellyfinToken(s.token)
+      if (result.success && result.data?.server) {
+        const srv = result.data.server
+        if (srv.url) setBaseUrl(srv.url.replace(/\/+$/, ''))
+        if (srv.token) setJellyfinToken(srv.token)
+        const detectedType = (srv as any).type === 'emby' ? 'emby' : 'jellyfin'
+        setServerType(detectedType)
+        console.log(`[Detail] 从 server.getActive 检测到服务器类型: ${detectedType}`)
       } else {
-        try {
-          const servers = await window.api.store.get('jellyfin:servers') as Array<{ id?: string; url?: string; token?: string }> | null
-          const activeId = await window.api.store.get('jellyfin:activeServerId') as string | null
-          if (servers && servers.length > 0) {
-            const active = activeId ? servers.find(s => s.id === activeId) : servers[0]
-            if (active?.url) setBaseUrl(active.url.replace(/\/+$/, ''))
-            if (active?.token) setJellyfinToken(active.token)
+        // 降级：从旧配置读取
+        window.api.store.get('jellyfin').then((saved: unknown) => {
+          const s = saved as { url?: string; token?: string } | null
+          if (cancelled) return
+          if (s?.url) {
+            setBaseUrl(s.url.replace(/\/+$/, ''))
+            setServerType('jellyfin')
           }
-        } catch { /* ignore */ }
+          if (s?.token) setJellyfinToken(s.token)
+        }).catch(() => {})
       }
     }).catch(() => {})
 
@@ -261,21 +274,37 @@ function Detail(): ReactElement {
   }
 
   const getPosterUrl = (): string | null => {
-    // 优先使用本地刮削封面
     if (itemId && localPosters[itemId]) {
       let urlPath = localPosters[itemId].replace(/\\/g, '/')
       if (urlPath.match(/^[A-Z]:/i)) urlPath = '/' + urlPath
       return `local-file://${urlPath}`
     }
     if (!detail?.ImageTags?.Primary || !itemId) return null
+
+    if (serverType === 'emby') {
+      const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
+      const tokenParam = jellyfinToken ? `&token=${encodeURIComponent(jellyfinToken)}` : ''
+      const url = `${imgBase}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90${tokenParam}`
+      console.log(`[Detail][Emby Poster] ${detail.Name}: ${url.replace(/token=[^&]+/, 'token=***')}`)
+      return url
+    }
+
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
-    // 使用 jellyfin-image:// 协议安全加载跨域图片（替代 webSecurity: false）
     const imgBase = baseUrl.replace(/^https?:\/\//, 'jellyfin-image://')
     return `${imgBase}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90${authParam}`
   }
 
   const getBackdropUrl = (): string | null => {
     if (!detail?.ImageTags?.Backdrop || !itemId) return null
+
+    if (serverType === 'emby') {
+      const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
+      const tokenParam = jellyfinToken ? `&token=${encodeURIComponent(jellyfinToken)}` : ''
+      const url = `${imgBase}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85${tokenParam}`
+      console.log(`[Detail][Emby Backdrop] ${detail.Name}: ${url.replace(/token=[^&]+/, 'token=***')}`)
+      return url
+    }
+
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
     const imgBase = baseUrl.replace(/^https?:\/\//, 'jellyfin-image://')
     return `${imgBase}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85${authParam}`
@@ -283,6 +312,24 @@ function Detail(): ReactElement {
 
   const getPersonAvatar = (person: PersonInfo): string | null => {
     const tag = person.ImageTags?.Primary || person.PrimaryImageTag
+
+    if (serverType === 'emby') {
+      const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
+      const tokenParam = jellyfinToken ? `&token=${encodeURIComponent(jellyfinToken)}` : ''
+      if (person.Id) {
+        const url = tag
+          ? `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100&tag=${tag}${tokenParam}`
+          : `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100${tokenParam}`
+        console.log(`[Detail][Emby PersonAvatar] ${person.Name}: ${url.replace(/token=[^&]+/, 'token=***')}`)
+        return url
+      }
+      const url2 = tag
+        ? `${imgBase}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100&tag=${tag}${tokenParam}`
+        : `${imgBase}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100${tokenParam}`
+      console.log(`[Detail][Emby PersonAvatar] ${person.Name}: ${url2.replace(/token=[^&]+/, 'token=***')}`)
+      return url2
+    }
+
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
     const imgBase = baseUrl.replace(/^https?:\/\//, 'jellyfin-image://')
     if (person.Id) {
@@ -297,6 +344,15 @@ function Detail(): ReactElement {
 
   const getEpisodeThumbUrl = (ep: EpisodeInfo): string | null => {
     if (!ep.ImageTags?.Primary) return null
+
+    if (serverType === 'emby') {
+      const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
+      const tokenParam = jellyfinToken ? `&token=${encodeURIComponent(jellyfinToken)}` : ''
+      const url = `${imgBase}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85${tokenParam}`
+      console.log(`[Detail][Emby EpisodeThumb] ${ep.Name}: ${url.replace(/token=[^&]+/, 'token=***')}`)
+      return url
+    }
+
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
     const imgBase = baseUrl.replace(/^https?:\/\//, 'jellyfin-image://')
     return `${imgBase}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85${authParam}`
@@ -367,12 +423,16 @@ function Detail(): ReactElement {
           <div className="shrink-0 w-full sm:w-auto">
             <div className="w-[200px] sm:w-[200px] lg:w-[220px] mx-auto sm:mx-0">
               <div className="aspect-[2/3] rounded-[var(--radius-xl)] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--separator)] shadow-lg">
-                {posterUrl ? (
+                {posterUrl && !posterError ? (
                   <img
                     src={posterUrl}
                     alt={detail.Name}
                     className="w-full h-full object-cover"
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                    onError={(e) => {
+                      const target = e.target as HTMLImageElement
+                      console.error(`[Detail][Poster Error] 海报加载失败: ${detail.Name}, src=${target.src}`)
+                      setPosterError(true)
+                    }}
                   />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center">
@@ -484,12 +544,16 @@ function Detail(): ReactElement {
               {actors.map((person, idx) => (
                 <div key={idx} className="flex-shrink-0 w-[80px] text-center">
                   <div className="w-[72px] h-[72px] mx-auto rounded-full overflow-hidden bg-[var(--bg-elevated)] border border-[var(--separator)] mb-2">
-                    {getPersonAvatar(person) ? (
+                    {getPersonAvatar(person) && !personAvatarErrors[person.Id || person.Name] ? (
                       <img
                         src={getPersonAvatar(person)!}
                         alt={person.Name}
                         className="w-full h-full object-cover"
-                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                        onError={(e) => {
+                          const target = e.target as HTMLImageElement
+                          console.error(`[Detail][PersonAvatar Error] 人物头像加载失败: ${person.Name}, src=${target.src}`)
+                          setPersonAvatarErrors(prev => ({ ...prev, [person.Id || person.Name]: true }))
+                        }}
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-[var(--text-quaternary)] text-[20px] font-medium">
@@ -585,12 +649,16 @@ function Detail(): ReactElement {
                     <div className="flex items-center gap-3 px-4 py-3">
                       {/* 集数缩略图 */}
                       <div className="shrink-0 w-[80px] h-[48px] rounded-[var(--radius-sm)] overflow-hidden bg-[var(--bg-input)]">
-                        {getEpisodeThumbUrl(ep) ? (
+                        {getEpisodeThumbUrl(ep) && !episodeThumbErrors[ep.Id] ? (
                           <img
                             src={getEpisodeThumbUrl(ep)!}
                             alt={ep.Name}
                             className="w-full h-full object-cover"
-                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                            onError={(e) => {
+                              const target = e.target as HTMLImageElement
+                              console.error(`[Detail][EpisodeThumb Error] 剧集缩略图加载失败: ${ep.Name}, src=${target.src}`)
+                              setEpisodeThumbErrors(prev => ({ ...prev, [ep.Id]: true }))
+                            }}
                           />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-[var(--text-quaternary)]">

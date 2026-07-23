@@ -1,5 +1,5 @@
 // Preload API 类型定义
-import type { DanmakuComment, DanmakuConfig, DanmakuMatchResult, DanmakuSearchResponse, JellyfinItem, JellyfinLibrary, LocalDanmakuCache, MpvTrack, MpvState, PlayerState, RecentlyAddedItem, RecentlyAddedConfig } from './types'
+import type { DanmakuComment, DanmakuConfig, DanmakuMatchResult, DanmakuSearchResponse, JellyfinItem, JellyfinLibrary, LocalDanmakuCache, MpvTrack, MpvState, PlayerState, RecentlyAddedItem, RecentlyAddedConfig, ServerType } from './types'
 
 // ===== 通用响应类型 =====
 export interface ApiResponse<T = unknown> {
@@ -144,6 +144,14 @@ export interface ServerConfig {
   name: string
   url: string
   token: string
+  /** 服务器类型，旧配置无该字段时默认按 'jellyfin' 处理 */
+  type?: ServerType
+  /** Emby 专属：登录账号 */
+  username?: string
+  /** Emby 专属：加密保存的密码（密文，仅在主进程内部可见） */
+  password?: string
+  /** Emby 专属：登录后获得 userId（Jellyfin 由 /Users 自动推断） */
+  userId?: string
 }
 
 export interface ServerListResponse {
@@ -159,6 +167,47 @@ export interface ServerActiveResponse {
     server: ServerConfig | null
   }
   error?: string
+}
+
+// ===== Emby 相关类型 =====
+
+/** Emby 账号密码登录返回结果 */
+export interface EmbyLoginResult {
+  token: string
+  userId: string
+  serverName?: string
+  version?: string
+  username?: string
+}
+
+export interface EmbyLoginResponse {
+  success: boolean
+  data?: EmbyLoginResult
+  error?: string
+}
+
+/** 新增 Emby 服务器参数（含登录后获取的 token/userId） */
+export interface EmbyAddServerParams {
+  name: string
+  url: string
+  username: string
+  password: string
+  token: string
+  userId: string
+}
+
+/** 测试 Emby 连接参数 */
+export interface EmbyTestParams {
+  url: string
+  username: string
+  password: string
+}
+
+export interface EmbyTestResponse {
+  success: boolean
+  data?: { ServerName?: string; Version?: string; username?: string }
+  error?: string
+  elapsed?: number
 }
 
 // ===== MPV 事件类型 =====
@@ -246,6 +295,7 @@ export interface Api {
     getEpisodes: (seriesId: string, seasonId?: string) => Promise<JellyfinItemsResponse>
     getGenres: () => Promise<ApiResponse<Array<{ Id: string; Name: string }>>>
     getGenreItems: (genre: string, startIndex?: number) => Promise<JellyfinItemsResponse>
+    getLatestMedia: (limit?: number) => Promise<ApiResponse<unknown[]>>
     scrape: {
       search: (params: { query: string; year?: number; type?: string }) => Promise<ApiResponse<Array<{ id: string; title: string; year: string; poster: string; overview: string }>>>
       fetch: (params: { doubanId: string; posterUrl: string }) => Promise<ApiResponse<{ localPath: string }>>
@@ -286,6 +336,15 @@ export interface Api {
     remove: (id: string) => Promise<ApiResponse<void>>
     switch: (id: string) => Promise<ApiResponse<void>>
     test: (url: string, token: string) => Promise<ApiResponse<void>>
+    /** 新增 Emby 服务器（已通过 testEmby 拿到 token/userId） */
+    addEmby: (params: EmbyAddServerParams) => Promise<ApiResponse<ServerConfig>>
+    /** 测试 Emby 连接：账号密码登录 + 校验 */
+    testEmby: (params: EmbyTestParams) => Promise<EmbyTestResponse>
+  }
+
+  emby: {
+    /** 账号密码登录 Emby，返回 token + userId */
+    login: (url: string, username: string, password: string) => Promise<EmbyLoginResponse>
   }
 
   recentlyAdded: {

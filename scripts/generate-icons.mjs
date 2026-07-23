@@ -20,10 +20,10 @@ if (!existsSync(BUILD_DIR)) mkdirSync(BUILD_DIR, { recursive: true })
 const API_BASE = 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image'
 
 const prompts = [
-  'APP icon, square rounded corners, iOS 17 liquid frosted glass style, video player theme, centered minimalist white play triangle symbol, translucent frosted glass texture, soft gradient light blue to purple background, subtle gaussian blur, delicate highlight edges, faint ambient reflection, low saturation fresh colors, floating soft glow shadow, minimalist flat design, clean premium aesthetic, no text, no watermark, no placeholder, 8K ultra HD, icon composition, centered composition, pure color background, suitable for Windows and macOS software icons, refined lighting, soft diffuse reflection, transparent glass translucency',
-  'APP icon, square rounded corners, iOS 17 liquid glass morph style, video player, centered play button triangle, semi-transparent white glass, gradient sky blue to lavender background, glass refraction effect, thin white border with shine, soft glow, minimal clean design, no text, no watermark, premium quality, 8K, icon format, centered, pure background, Windows macOS compatible',
-  'APP icon, square with rounded corners, iOS 17 glassmorphism style, video player icon, centered play triangle symbol, frosted glass overlay, gradient light blue purple, subtle reflections, smooth edges, soft shadow, minimalist modern design, no text, no words, no watermark, high resolution, professional icon, centered composition, pure background',
-  'APP icon, rounded square, iOS 17 liquid crystal glass style, video player, centered white play triangle, transparent glass material, gradient pale blue to violet, delicate highlight on top, soft ambient glow, clean simple design, no text elements, no watermark, 8K quality, icon design, centered, solid background, cross-platform icon'
+  'APP icon, square rounded corners, iOS 17 liquid frosted glass style, video player theme, centered minimalist white play triangle symbol, translucent frosted glass texture, subtle gaussian blur, delicate highlight edges, faint ambient reflection, low saturation fresh colors, floating soft glow shadow, minimalist flat design, clean premium aesthetic, no text, no watermark, no placeholder, 8K ultra HD, centered composition, isolated icon body, transparent background with alpha channel, suitable for Windows and macOS software icons, refined lighting, soft diffuse reflection',
+  'APP icon, square rounded corners, iOS 17 liquid glass morph style, video player, centered play button triangle, semi-transparent white glass, gradient sky blue to lavender inside the icon body, glass refraction effect, thin highlight edge, soft glow, minimal clean design, no text, no watermark, premium quality, 8K, centered, isolated icon body, transparent background with alpha channel, Windows macOS compatible',
+  'APP icon, square with rounded corners, iOS 17 glassmorphism style, video player icon, centered play triangle symbol, frosted glass body, gradient light blue purple inside the icon, subtle reflections, smooth edges, soft shadow, minimalist modern design, no text, no words, no watermark, high resolution, professional icon, centered composition, transparent background with alpha channel',
+  'APP icon, rounded square, iOS 17 liquid crystal glass style, video player, centered white play triangle, transparent glass material, gradient pale blue to violet inside the icon body, delicate highlight on top, soft ambient glow, clean simple design, no text elements, no watermark, 8K quality, isolated icon body, transparent background with alpha channel, cross-platform icon'
 ]
 
 async function fetchJSON(url) {
@@ -43,14 +43,17 @@ async function validateImage(path) {
     const metadata = await sharp(path).metadata()
     const isValid = metadata.width > 0 && metadata.height > 0 && metadata.width === metadata.height
     if (!isValid) throw new Error(`Invalid image: ${JSON.stringify(metadata)}`)
+    if (!metadata.hasAlpha) throw new Error('Image has no alpha channel')
     
-    const buffer = await sharp(path).resize(100, 100).raw().toBuffer()
+    const buffer = await sharp(path).resize(100, 100).ensureAlpha().raw().toBuffer()
     const pixelCount = buffer.length / 4
     const whitePixelRatio = buffer.filter((_, i) => i % 4 === 0 && buffer[i] > 240 && buffer[i+1] > 240 && buffer[i+2] > 240).length / pixelCount
     const textIndicatorRatio = buffer.filter((_, i) => i % 4 === 0 && buffer[i] < 50 && buffer[i+1] < 50 && buffer[i+2] < 50).length / pixelCount
+    const transparentPixelRatio = buffer.filter((_, i) => i % 4 === 3 && buffer[i] < 250).length / pixelCount
     
     if (whitePixelRatio > 0.8) throw new Error('Image is mostly white - likely placeholder')
     if (textIndicatorRatio > 0.4) throw new Error('High dark pixel ratio - likely contains text')
+    if (transparentPixelRatio < 0.05) throw new Error('Image background is not transparent')
     
     return true
   } catch (err) {
@@ -154,6 +157,7 @@ async function generateSizes(masterPath) {
     const dest = resolve(ICON_DIR, `icon-${size}.png`)
     await sharp(masterPath)
       .resize(size, size, { kernel: sharp.kernel.lanczos3 })
+      .ensureAlpha()
       .png({ compressionLevel: 9 })
       .toFile(dest)
     console.log(`  Generated ${size}x${size}`)
@@ -161,26 +165,31 @@ async function generateSizes(masterPath) {
   
   await sharp(masterPath)
     .resize(256, 256, { kernel: sharp.kernel.lanczos3 })
+    .ensureAlpha()
     .png({ compressionLevel: 9 })
     .toFile(resolve(ICON_DIR, 'icon.png'))
   
   await sharp(masterPath)
     .resize(256, 256, { kernel: sharp.kernel.lanczos3 })
+    .ensureAlpha()
     .png({ compressionLevel: 9 })
     .toFile(resolve(BUILD_DIR, 'icon.png'))
   
   await sharp(masterPath)
     .resize(512, 512, { kernel: sharp.kernel.lanczos3 })
+    .ensureAlpha()
     .png({ compressionLevel: 9 })
     .toFile(resolve(BUILD_DIR, 'icon-512.png'))
   
   await sharp(masterPath)
     .resize(32, 32, { kernel: sharp.kernel.lanczos3 })
+    .ensureAlpha()
     .png({ compressionLevel: 9 })
     .toFile(resolve(BUILD_DIR, 'icon-32.png'))
   
   await sharp(masterPath)
     .resize(16, 16, { kernel: sharp.kernel.lanczos3 })
+    .ensureAlpha()
     .png({ compressionLevel: 9 })
     .toFile(resolve(BUILD_DIR, 'icon-16.png'))
   

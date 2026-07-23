@@ -64,6 +64,8 @@ const api: Api = {
     getGenres: () => ipcRenderer.invoke('jellyfin:get-genres'),
     getGenreItems: (genre: string, startIndex?: number) =>
       ipcRenderer.invoke('jellyfin:get-genre-items', genre, startIndex),
+    getLatestMedia: (limit?: number) =>
+      ipcRenderer.invoke('jellyfin:get-latest-media', limit),
     scrape: {
       search: (params: { query: string; year?: number; type?: string }) =>
         ipcRenderer.invoke('media:search-douban', params),
@@ -121,7 +123,17 @@ const api: Api = {
     update: (params: { id: string; name?: string; url?: string; token?: string }) => ipcRenderer.invoke('server:update', params),
     remove: (id: string) => ipcRenderer.invoke('server:remove', id),
     switch: (id: string) => ipcRenderer.invoke('server:switch', id),
-    test: (url: string, token: string) => ipcRenderer.invoke('server:test', url, token)
+    test: (url: string, token: string) => ipcRenderer.invoke('server:test', url, token),
+    addEmby: (params: import('../shared/preload-types').EmbyAddServerParams) =>
+      ipcRenderer.invoke('server:add-emby', params),
+    testEmby: (params: import('../shared/preload-types').EmbyTestParams) =>
+      ipcRenderer.invoke('server:test-emby', params)
+  },
+
+  // Emby API
+  emby: {
+    login: (url: string, username: string, password: string) =>
+      ipcRenderer.invoke('emby:login', url, username, password)
   },
 
   // 最近入库
