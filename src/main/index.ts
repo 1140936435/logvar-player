@@ -2005,56 +2005,30 @@ ipcMain.handle('file:get-url', async (_event, filePath: string) => {
 
 // ==================== 弹幕 API（DandanPlay） ====================
 
-function getDanmakuApiConfig(): { primary: string; mirrors: string[]; appId: string; appSecret: string } {
+function getDanmakuApiConfig(): { primary: string; mirrors: string[] } {
   const storePrimary = configData['danmaku:api-primary'] as string | undefined
   const storeMirrors = configData['danmaku:api-mirrors'] as string[] | undefined
-  const appId = (configData['dandanplay:appid'] as string) || ''
-  const appSecret = (configData['dandanplay:appsecret'] as string) || ''
 
   return {
     primary: storePrimary || 'https://api.dandanplay.net',
-    mirrors: (storeMirrors && storeMirrors.length > 0) ? storeMirrors : [],
-    appId,
-    appSecret
-  }
-}
-
-/** 生成 DandanPlay 签名验证头 */
-function generateDandanHeaders(path: string, appId: string, appSecret: string): Record<string, string> {
-  const timestamp = Math.floor(Date.now() / 1000)
-  const apiPath = path.split('?')[0]  // 只取路径部分，不含查询参数
-  const data = `${appId}${timestamp}${apiPath}${appSecret}`
-  const signature = crypto.createHash('sha256').update(data).digest('base64')
-  return {
-    'X-AppId': appId,
-    'X-Timestamp': String(timestamp),
-    'X-Signature': signature
+    mirrors: (storeMirrors && storeMirrors.length > 0) ? storeMirrors : []
   }
 }
 
 ipcMain.handle('danmaku:get-config', async () => {
   const config = getDanmakuApiConfig()
-  // 返回给前端时脱敏：不暴露完整 appSecret
   return {
     primary: config.primary,
-    mirrors: config.mirrors,
-    appId: config.appId,
-    appSecretHint: config.appSecret ? '••••' + config.appSecret.slice(-4) : ''
+    mirrors: config.mirrors
   }
 })
 
-ipcMain.handle('danmaku:set-config', async (_event, config: { primary?: string; mirrors?: string[]; appId?: string; appSecret?: string }) => {
+ipcMain.handle('danmaku:set-config', async (_event, config: { primary?: string; mirrors?: string[] }) => {
   if (config.primary !== undefined) {
     configData['danmaku:api-primary'] = config.primary
   }
   if (config.mirrors !== undefined) {
     configData['danmaku:api-mirrors'] = config.mirrors
-  }
-  if (config.appId !== undefined) {
-    configData['dandanplay:appid'] = config.appId
-  }
-  if (config.appSecret !== undefined) {
-    configData['dandanplay:appsecret'] = config.appSecret
   }
   saveConfigFile()
   return { success: true }
@@ -2062,20 +2036,15 @@ ipcMain.handle('danmaku:set-config', async (_event, config: { primary?: string; 
 
 ipcMain.handle('danmaku:test-api', async (_event, url: string) => {
   const startTime = Date.now()
-  const config = getDanmakuApiConfig()
   try {
     const testPath = '/api/v2/search/episodes'
-    const authHeaders: Record<string, string> = config.appId && config.appSecret
-      ? generateDandanHeaders(testPath, config.appId, config.appSecret)
-      : {}
 
     const response = await nodeFetch(
       `${url}${testPath}?anime=${encodeURIComponent('测试')}`,
       {
         headers: {
           'Accept': 'application/json',
-          'User-Agent': 'mplay/1.0 (Electron)',
-          ...authHeaders
+          'User-Agent': 'mplay/1.0 (Electron)'
         }
       }
     )
@@ -2202,15 +2171,10 @@ async function dandanRequest<T>(path: string, retries = 2): Promise<T> {
         const url = `${baseUrl}${path}`
         console.log(`[danmaku] GET ${url}`)
 
-        const authHeaders: Record<string, string> = config.appId && config.appSecret
-          ? generateDandanHeaders(path, config.appId, config.appSecret)
-          : {}
-
         const response = await nodeFetch(url, {
           headers: {
             'Accept': 'application/json',
-            'User-Agent': 'mplay/1.0 (Electron)',
-            ...authHeaders
+            'User-Agent': 'mplay/1.0 (Electron)'
           },
           timeoutMs: 10000
         })

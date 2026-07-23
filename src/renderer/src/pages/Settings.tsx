@@ -6,9 +6,9 @@ import type { ServerConfig as ApiServerConfig, EmbyTestResponse } from '../../..
 import type { JellyfinServerInfo, ServerType } from '../../../shared/types'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Database, Plug, WifiOff, Save, Loader2, CheckCircle,
+  Database, Plug, WifiOff, Save, Loader2, CheckCircle, AlertCircle,
   MessageCircleMore, Radar, MonitorPlay, Info,
-  ChevronDown, Key, Link as LinkIcon, CirclePlus, Trash2, Settings as SettingsIcon,
+  ChevronDown, Link as LinkIcon, CirclePlus, Trash2, Settings as SettingsIcon,
   CircleDot, Sparkles, User, Lock, Server
 } from 'lucide-react'
 
@@ -150,8 +150,6 @@ function Settings(): ReactElement {
   // 弹幕 API
   const [danmakuPrimary, setDanmakuPrimary] = useState('')
   const [danmakuMirrors, setDanmakuMirrors] = useState('')
-  const [danmakuAppId, setDanmakuAppId] = useState('')
-  const [danmakuAppSecret, setDanmakuAppSecret] = useState('')
   const [danmakuTestResult, setDanmakuTestResult] = useState<DanmakuTestResult | null>(null)
   const [danmakuTesting, setDanmakuTesting] = useState(false)
   const [danmakuSaveMsg, setDanmakuSaveMsg] = useState('')
@@ -382,8 +380,6 @@ function Settings(): ReactElement {
     window.api.danmaku.getConfig().then((cfg) => {
       setDanmakuPrimary(cfg.primary)
       setDanmakuMirrors(cfg.mirrors.join('\n'))
-      if (cfg.appId) setDanmakuAppId(cfg.appId)
-      if (cfg.appSecretHint) setDanmakuInfo(`已保存密钥: ${cfg.appSecretHint}`)
     }).catch(() => {})
 
     // 加载播放器设置
@@ -427,12 +423,10 @@ function Settings(): ReactElement {
 
   const handleDanmakuSave = async (): Promise<void> => {
     const mirrors = danmakuMirrors.split('\n').map((s) => s.trim()).filter((s) => s.length > 0)
-    const updates: { primary: string; mirrors: string[]; appId?: string; appSecret?: string } = {
+    const updates: { primary: string; mirrors: string[] } = {
       primary: danmakuPrimary.trim(),
       mirrors
     }
-    if (danmakuAppId.trim()) updates.appId = danmakuAppId.trim()
-    if (danmakuAppSecret.trim() && danmakuAppSecret.trim() !== '••••') updates.appSecret = danmakuAppSecret.trim()
     await window.api.danmaku.setConfig(updates)
     setDanmakuSaveMsg('已保存')
     setTimeout(() => setDanmakuSaveMsg(''), 2000)
@@ -871,35 +865,44 @@ function Settings(): ReactElement {
                   />
                 </Field>
 
-                <div className="h-px bg-[var(--separator)]" />
+                {danmakuTestResult && (
+                  <motion.div
+                    className={`rounded-[var(--radius-md)] p-4 ${danmakuTestResult.success ? 'bg-[var(--success-bg)]' : 'bg-[var(--error-bg)]'}`}
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -4 }}
+                  >
+                    <div className="flex items-center gap-2 mb-2">
+                      {danmakuTestResult.success ? (
+                        <CheckCircle size={16} className="text-[var(--success)]" strokeWidth={1.5} />
+                      ) : (
+                        <AlertCircle size={16} className="text-[var(--error)]" strokeWidth={1.5} />
+                      )}
+                      <span className={`font-medium text-sm ${danmakuTestResult.success ? 'text-[var(--success)]' : 'text-[var(--error)]'}`}>
+                        {danmakuTestResult.success ? '测试成功' : '测试失败'}
+                      </span>
+                      {danmakuTestResult.elapsed > 0 && (
+                        <span className="text-[12px] text-[var(--text-tertiary)] ml-auto">耗时 {danmakuTestResult.elapsed}ms</span>
+                      )}
+                    </div>
+                    {danmakuTestResult.success ? (
+                      <p className="text-[12px] text-[var(--text-secondary)]">
+                        API 响应正常，搜索关键词返回 <span className="text-[var(--success)] font-medium">{danmakuTestResult.animeCount ?? 0}</span> 部动漫，共 <span className="text-[var(--success)] font-medium">{danmakuTestResult.epCount ?? 0}</span> 集。
+                      </p>
+                    ) : (
+                      <>
+                        {danmakuTestResult.error && (
+                          <p className="text-[12px] text-[var(--error)] font-mono break-all">{danmakuTestResult.error}</p>
+                        )}
+                        {danmakuTestResult.detail && (
+                          <p className="text-[11px] text-[var(--text-tertiary)] mt-2 break-all">{danmakuTestResult.detail}</p>
+                        )}
+                      </>
+                    )}
+                  </motion.div>
+                )}
 
-                <div className="flex items-center gap-2 mb-1">
-                  <Key size={14} className="text-[var(--text-tertiary)]" strokeWidth={1.5} />
-                  <span className="text-[13px] font-medium text-[var(--text-secondary)]">DandanPlay 认证（可选）</span>
-                </div>
-                <p className="text-[11px] text-[var(--text-tertiary)] -mt-3 mb-1">
-                  API 需要 AppId/AppSecret 认证。前往 <a href="https://dev.dandanplay.com/" target="_blank" rel="noreferrer" className="text-[var(--accent)] underline">开发者中心</a> 申请
-                </p>
-                <Field label="AppId">
-                  <input
-                    type="text"
-                    value={danmakuAppId}
-                    onChange={(e) => setDanmakuAppId(e.target.value)}
-                    placeholder="在开发者中心申请"
-                    className="ios-input"
-                  />
-                </Field>
-                <Field label="AppSecret">
-                  <input
-                    type="password"
-                    value={danmakuAppSecret}
-                    onChange={(e) => setDanmakuAppSecret(e.target.value)}
-                    placeholder={danmakuInfo.includes('••••') ? '已保存（留空保持不变）' : '在开发者中心申请'}
-                    className="ios-input"
-                  />
-                </Field>
-
-                <div className="flex items-center gap-3 mt-1">
+                <div className="flex items-center gap-3">
                   <motion.button
                     onClick={handleDanmakuSave}
                     disabled={!danmakuPrimary.trim()}
@@ -919,12 +922,6 @@ function Settings(): ReactElement {
                     </motion.span>
                   )}
                 </div>
-
-                {danmakuInfo && (
-                  <div className="px-4 py-3 rounded-[var(--radius-md)] bg-[var(--bg-input)]">
-                    <p className="text-[12px] text-[var(--text-tertiary)] leading-relaxed">{danmakuInfo}</p>
-                  </div>
-                )}
               </div>
             </GlassCard>
 
