@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.1.0] - 2026-07-23
+## [1.2.0] - 2026-07-23
 
 ### Major Changes
 
@@ -37,8 +37,17 @@ All notable changes to this project will be documented in this file.
 - 统一海报 URL 构建逻辑，消除代码重复
 - 缓存 key 包含 imageTag 参数，天然支持缓存失效
 - 并发请求限流控制在 6 个以内
+- 项目清理：移除废弃文件、旧版图标生成脚本、过时文档
 
-## [1.0.0] - 2026-07-xx
+## [1.1.0] - 2026-07-23
+
+- 弹幕引擎重构 + 性能优化 + 全屏黑条修复
+- 最近入库海报栏 + 统一图标 + 顶部导航栏按钮迁移 + 首页板块顺序调整
+- 集成海报缓存到图片协议
+- 添加 HomeStoreProvider 用于首页数据持久化
+- 安全加固 + 字幕持久化 + ErrorBoundary + 清理无用依赖
+
+## [1.0.0] - 2026-07-21
 
 ### Initial Release
 
