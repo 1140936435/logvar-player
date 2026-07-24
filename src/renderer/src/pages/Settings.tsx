@@ -8,7 +8,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Database, Plug, WifiOff, Save, Loader2, CheckCircle, AlertCircle,
   MessageCircleMore, Radar, MonitorPlay, Info,
-  ChevronDown, Link as LinkIcon, CirclePlus, Trash2, Settings as SettingsIcon,
+  ChevronDown, Key, Link as LinkIcon, CirclePlus, Trash2, Settings as SettingsIcon,
   CircleDot, Sparkles, User, Lock, Server
 } from 'lucide-react'
 

@@ -1273,7 +1273,7 @@ if (!safeStorageWorking) {
 
 /** 机器相关的 XOR 混淆密钥（基于机器名+用户名+固定盐） */
 function xorKey(): Buffer {
-  const seed = `${process.env.COMPUTERNAME ?? 'unknown'}|${process.env.USERNAME ?? 'unknown'}|huanying-v1`
+  const seed = `${process.env.COMPUTERNAME ?? 'unknown'}|${process.env.USERNAME ?? 'unknown'}|mplay-v1`
   return crypto.createHash('sha256').update(seed).digest()
 }
 
