@@ -1,6 +1,6 @@
 {
   "name": "huanying",
-  "version": "1.2.0",
+  "version": "13.0.0",
   "description": "环影 - Jellyfin + 本地文件 + 弹幕",
   "main": "./out/main/main.js",
   "author": "环影",
