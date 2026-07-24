@@ -13,8 +13,8 @@ async function main() {
   try {
     const result = await build({
       config: {
-        appId: 'com.mplay.player',
-        productName: 'mplay',
+        appId: 'com.huanying.player',
+        productName: '环影',
         directories: {
           buildResources: 'build',
           output: 'C:\\Temp\\logvar-output'
@@ -46,7 +46,7 @@ async function main() {
           }
         ],
         win: {
-          executableName: 'mplay',
+          executableName: '环影',
           icon: 'build/icon.ico',
           target: [{ target: 'nsis', arch: ['x64'] }]
         },

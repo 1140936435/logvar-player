@@ -1,9 +1,9 @@
 {
-  "name": "mplay",
+  "name": "huanying",
   "version": "1.2.0",
-  "description": "mplay - Jellyfin + 本地文件 + 弹幕",
+  "description": "环影 - Jellyfin + 本地文件 + 弹幕",
   "main": "./out/main/main.js",
-  "author": "mplay",
+  "author": "环影",
   "license": "MIT",
   "scripts": {
     "prepare:icons": "node scripts/make-transparent-icons.mjs",

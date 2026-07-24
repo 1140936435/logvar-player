@@ -202,7 +202,7 @@ function getLogWindow(): BrowserWindow {
     height: 600,
     minWidth: 500,
     minHeight: 300,
-    title: 'mplay - 日志',
+    title: '环影 - 日志',
     backgroundColor: '#0d0d0d',
     show: false,
     webPreferences: {
@@ -1261,7 +1261,7 @@ const ENCRYPTED_KEYS = new Set([
 let safeStorageWorking = false
 try {
   if (safeStorage.isEncryptionAvailable()) {
-    const testPlain = '__mplay_safestorage_test__'
+    const testPlain = '__huanying_safestorage_test__'
     const encrypted = safeStorage.encryptString(testPlain)
     const decrypted = safeStorage.decryptString(encrypted)
     safeStorageWorking = decrypted === testPlain
@@ -1273,7 +1273,7 @@ if (!safeStorageWorking) {
 
 /** 机器相关的 XOR 混淆密钥（基于机器名+用户名+固定盐） */
 function xorKey(): Buffer {
-  const seed = `${process.env.COMPUTERNAME ?? 'unknown'}|${process.env.USERNAME ?? 'unknown'}|mplay-v1`
+  const seed = `${process.env.COMPUTERNAME ?? 'unknown'}|${process.env.USERNAME ?? 'unknown'}|huanying-v1`
   return crypto.createHash('sha256').update(seed).digest()
 }
 
@@ -2044,7 +2044,7 @@ ipcMain.handle('danmaku:test-api', async (_event, url: string) => {
       {
         headers: {
           'Accept': 'application/json',
-          'User-Agent': 'mplay/1.0 (Electron)'
+          'User-Agent': 'huanying/1.0 (Electron)'
         }
       }
     )
@@ -2183,7 +2183,7 @@ async function dandanRequest<T>(path: string, retries = 2): Promise<T> {
         const response = await nodeFetch(url, {
           headers: {
             'Accept': 'application/json',
-            'User-Agent': 'mplay/1.0 (Electron)'
+            'User-Agent': 'huanying/1.0 (Electron)'
           },
           timeoutMs: 10000
         })
@@ -2287,7 +2287,7 @@ async function bilibiliAutoMatch(title: string): Promise<{
     `https://api.bilibili.com/x/web-interface/wbi/search/type?search_type=media_bangumi&keyword=${encodeURIComponent(searchKey)}`,
     {
       headers: {
-        'User-Agent': 'mplay/1.0',
+        'User-Agent': 'huanying/1.0',
         'Referer': 'https://www.bilibili.com/',
         'Accept': 'application/json'
       }
@@ -2314,7 +2314,7 @@ async function bilibiliAutoMatch(title: string): Promise<{
     `https://api.bilibili.com/pgc/web/season/section?season_id=${seasonId}`,
     {
       headers: {
-        'User-Agent': 'mplay/1.0',
+        'User-Agent': 'huanying/1.0',
         'Referer': 'https://www.bilibili.com/'
       }
     }
@@ -2392,7 +2392,7 @@ ipcMain.handle('danmaku:bilibili-comments', async (_event, cid: number) => {
 
     const response = await nodeFetch(`https://comment.bilibili.com/${cid}.xml`, {
       headers: {
-        'User-Agent': 'mplay/1.0',
+        'User-Agent': 'huanying/1.0',
         'Referer': 'https://www.bilibili.com/'
       }
     })
@@ -2644,7 +2644,7 @@ ipcMain.handle('danmaku:get-comments', async (_event, episodeId: string, source?
       }
       const response = await nodeFetch(`https://comment.bilibili.com/${cid}.xml`, {
         headers: {
-          'User-Agent': 'mplay/1.0',
+          'User-Agent': 'huanying/1.0',
           'Referer': 'https://www.bilibili.com/'
         }
       })
@@ -3101,7 +3101,7 @@ function createTray(): void {
     }
   ])
 
-  tray.setToolTip('mplay')
+  tray.setToolTip('环影')
   tray.setContextMenu(contextMenu)
 
   tray.on('double-click', () => {
@@ -3121,7 +3121,7 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 app.whenReady().then(() => {
-  electronApp.setAppUserModelId('com.mplay.player')
+  electronApp.setAppUserModelId('com.huanying.player')
 
   // 注册自定义协议
   registerJellyfinImageProtocol()

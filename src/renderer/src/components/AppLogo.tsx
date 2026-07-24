@@ -13,7 +13,7 @@ function AppLogo(): ReactElement {
       >
         <motion.img
           src={iconUrl}
-          alt="mplay"
+          alt="环影"
           className="w-7 h-7 sm:w-8 sm:h-8 object-contain"
           draggable={false}
           whileHover={{
@@ -64,7 +64,7 @@ function AppLogo(): ReactElement {
           backgroundClip: 'text',
         }}
       >
-        mplay
+        环影
       </motion.span>
     </div>
   )

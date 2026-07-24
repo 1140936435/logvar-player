@@ -15,7 +15,7 @@ function run(cmd, options = {}) {
 }
 
 function main() {
-  console.log('=== mplay Windows 构建脚本 ===')
+  console.log('=== 环影 Windows 构建脚本 ===')
   console.log(`项目目录: ${ROOT}`)
   console.log(`临时构建目录: ${TEMP_DIR}\n`)
 
