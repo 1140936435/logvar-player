@@ -1,6 +1,6 @@
 /**
  * 最近入库横向海报滚动栏组件
- * 支持鼠标拖拽、滚轮横向滚动、左右箭头翻页、海报懒加载
+ * 支持鼠标拖拽、左右箭头翻页、海报懒加载
  */
 
 import { useRef, useState, useEffect, useCallback, memo, type ReactElement } from 'react'
@@ -127,9 +127,6 @@ export function RecentlyAddedRow({
   const lastTime = useRef(0)
   const animationFrame = useRef<number | null>(null)
 
-  // 鼠标悬浮状态追踪（用于滚轮事件隔离）
-  const isHovering = useRef(false)
-
   const getPosterUrl = useCallback((item: RecentlyAddedItem): string | null => {
     return buildPosterUrl({
       baseUrl,
@@ -230,63 +227,8 @@ export function RecentlyAddedRow({
     }
   }, [])
 
-  // 滚轮横向滚动 - 分层拦截，防止页面上下滚动冲突
-  // 使用原生 DOM 事件 + passive:false 确保 preventDefault 真正生效
-  const nativeWheelHandler = useCallback((e: WheelEvent) => {
-    const container = scrollContainerRef.current
-    if (!container) return
-
-    // 仅处理竖向滚轮（ deltaY ），将其转换为横向滚动
-    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-      const delta = e.deltaY * scrollSpeed * 0.5
-      const maxScroll = container.scrollWidth - container.clientWidth
-
-      // 边界检测：滚动到尽头时允许页面竖向滚动
-      const atLeftEdge = container.scrollLeft <= 0 && delta < 0
-      const atRightEdge = container.scrollLeft >= maxScroll && delta > 0
-
-      if (atLeftEdge || atRightEdge) {
-        // 已到达边界，释放滚轮，允许页面滚动
-        console.log(`[RecentlyAddedRow] 滚轮边界释放: ${atLeftEdge ? '左侧尽头' : '右侧尽头'}`)
-        return
-      }
-
-      // 【关键代码】阻止事件冒泡 + 阻止默认行为
-      // stopPropagation: 阻止事件向上传播到父容器（页面滚动容器）
-      // preventDefault: 阻止浏览器默认的页面滚动行为
-      e.stopPropagation()
-      e.preventDefault()
-
-      console.log(`[RecentlyAddedRow] 滚轮拦截: 鼠标在海报区域, 横向滑动 ${delta.toFixed(1)}px, 当前位置 ${container.scrollLeft.toFixed(0)}`)
-
-      container.scrollLeft += delta
-    }
-  }, [scrollSpeed])
-
-  // 注册/注销原生滚轮事件监听（使用 useEffect 确保 passive:false）
-  useEffect(() => {
-    const container = scrollContainerRef.current
-    if (!container) return
-
-    // 添加原生事件监听，passive:false 是 preventDefault 生效的必要条件
-    container.addEventListener('wheel', nativeWheelHandler, { passive: false, capture: false })
-
-    return () => {
-      container.removeEventListener('wheel', nativeWheelHandler)
-    }
-  }, [nativeWheelHandler])
-
-  // 鼠标进入海报区域 - 记录悬浮状态
-  const handleMouseEnter = useCallback(() => {
-    isHovering.current = true
-    console.log('[RecentlyAddedRow] 鼠标进入海报区域，启用滚轮拦截')
-  }, [])
-
-  // 鼠标离开海报区域 - 释放悬浮状态
+  // 鼠标离开海报区域 - 如果正在拖拽，结束拖拽
   const handleMouseLeaveArea = useCallback(() => {
-    isHovering.current = false
-    console.log('[RecentlyAddedRow] 鼠标离开海报区域，释放滚轮拦截')
-    // 如果正在拖拽，也要结束拖拽
     if (isDragging.current) {
       handleMouseUp()
     }
@@ -398,7 +340,6 @@ export function RecentlyAddedRow({
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
-          onMouseEnter={handleMouseEnter}
           onMouseLeave={handleMouseLeaveArea}
         >
           {items.map((item, index) => (
