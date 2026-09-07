@@ -11,18 +11,32 @@ import {
   protocol,
   net,
   safeStorage,
+  screen,
+  session,
   type NativeImage
 } from 'electron'
 import * as crypto from 'crypto'
-import { join, dirname, basename } from 'path'
+import { join, dirname, basename, resolve as pathResolve, sep as pathSep } from 'path'
 import { pathToFileURL } from 'url'
 
-import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'fs'
-import type { DanmakuComment, DanmakuCommentRaw, DanmakuCommentsResponse, DanmakuSearchResponse, JellyfinServerInfo, ServerType } from '../shared/types'
+import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, renameSync, copyFileSync } from 'fs'
+import { stat as fsStat, open as fsOpen, type FileHandle } from 'fs/promises'
+import type { DanmakuComment, DanmakuCommentRaw, DanmakuCommentsResponse, DanmakuSearchResponse, JellyfinServerInfo, ServerType, DanmakuMatchMeta, DanmakuMatchResultV2, DanmakuMatchCandidate, DanmakuBindEntry, DanmakuMatchLevel } from '../shared/types'
 import * as http from 'http'
 import * as https from 'https'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { posterCache } from './services/poster-cache'
+import { MpvController } from './mpv-controller'
+
+// ==================== 清除代理环境变量（必须在任何子进程/原生库启动前） ====================
+// mpv / libmpv（ffmpeg）会读取 http_proxy 等环境变量并把媒体流请求发给代理。
+// 当系统开着代理软件（env 模式）时，Jellyfin/Tailscale（100.x.x.x）等内网地址会被代理劫持，
+// 导致 mpv 打开网络流 "loading failed" → 播放黑屏（本地文件不受影响，难以排查）。
+// 媒体服务器均在局域网/Tailscale，直连才是正确行为。
+// Chromium 自身走 Windows 系统代理设置，不受 env 删除影响；Node 侧 http/fetch 也不会自动使用这些变量。
+for (const key of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
+  delete process.env[key]
+}
 
 // ==================== 并发请求控制 ====================
 
@@ -206,8 +220,9 @@ function getLogWindow(): BrowserWindow {
     backgroundColor: '#0d0d0d',
     show: false,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      preload: join(__dirname, '../preload/preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true,
       sandbox: false
     }
   })
@@ -302,7 +317,8 @@ async function jellyfinRequest<T>(
 
   const response = await fetch(url, {
     ...options,
-    headers
+    headers,
+    signal: AbortSignal.timeout(15000)
   })
 
   console.log(`[jellyfinRequest] response status=${response.status}, statusText=${response.statusText}`)
@@ -1250,39 +1266,43 @@ ipcMain.handle('jellyfin:get-latest-media', async (_event, limit: number = 16) =
 /** 需要加密存储的 key 列表 */
 const ENCRYPTED_KEYS = new Set([
   'jellyfin.token',
-  'jellyfin.url',
   'danmaku:api-primary',
   'danmaku:api-mirrors',
-  'dandanplay:appid',
-  'dandanplay:appsecret',
+  'danmaku:app-id',
+  'danmaku:app-secret',
 ])
+// 注意：jellyfin.url / servers[].url 故意不加密——服务器地址不是秘密（出现在播放/图片
+// URL 与日志中），加密零安全收益；反而 safeStorage 不可用时 url 被清空会导致整条服务器
+// 记录被启动清理逻辑删除（表现为"每次重启都要重新输入服务器"）。url 明文持久化。
 
-/** safeStorage 跨会话可用性检测（启动时运行一次） */
+/** safeStorage 跨会话可用性检测。
+ * 关键：必须在 app ready 之后调用——Windows 上 safeStorage.isEncryptionAvailable()
+ * 依赖 DPAPI，在 app 就绪前调用恒返回 false，会导致 safeStorageWorking 被永久误判，
+ * 进而所有敏感字段（token/url）加密时写成空串、重启后服务器信息全部丢失。 */
 let safeStorageWorking = false
-try {
-  if (safeStorage.isEncryptionAvailable()) {
-    const testPlain = '__huanying_safestorage_test__'
-    const encrypted = safeStorage.encryptString(testPlain)
-    const decrypted = safeStorage.decryptString(encrypted)
-    safeStorageWorking = decrypted === testPlain
+let safeStorageChecked = false
+function initSafeStorage(): void {
+  if (safeStorageChecked) return
+  safeStorageChecked = true
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      const testPlain = '__huanying_safestorage_test__'
+      const encrypted = safeStorage.encryptString(testPlain)
+      const decrypted = safeStorage.decryptString(encrypted)
+      safeStorageWorking = decrypted === testPlain
+    }
+  } catch { safeStorageWorking = false }
+  if (safeStorageWorking) {
+    console.log('[Config] safeStorage encryption available')
+  } else {
+    console.warn('[Config] safeStorage encryption unavailable — sensitive fields will NOT be persisted (no insecure fallback)')
   }
-} catch { safeStorageWorking = false }
-if (!safeStorageWorking) {
-  console.warn('[Config] safeStorage encryption unavailable or broken across sessions — using XOR obfuscation as fallback')
 }
 
-/** 机器相关的 XOR 混淆密钥（基于机器名+用户名+固定盐） */
+/** 机器相关的 XOR 混淆密钥（基于机器名+用户名+固定盐，仅用于读取历史遗留 xor: 值） */
 function xorKey(): Buffer {
   const seed = `${process.env.COMPUTERNAME ?? 'unknown'}|${process.env.USERNAME ?? 'unknown'}|mplay-v1`
   return crypto.createHash('sha256').update(seed).digest()
-}
-
-/** XOR 字符串混淆 */
-function xorObfuscate(plain: string): string {
-  const key = xorKey()
-  const buf = Buffer.from(plain, 'utf-8')
-  for (let i = 0; i < buf.length; i++) buf[i] ^= key[i % key.length]
-  return 'xor:' + buf.toString('base64')
 }
 
 /** XOR 字符串反混淆 */
@@ -1317,18 +1337,23 @@ function sanitizeLog(msg: string): string {
 
 function encryptValue(plain: string): string {
   if (!needsEncryption(plain)) return plain
+  initSafeStorage() // 懒兜底：确保 app ready 后已正确检测
   if (safeStorageWorking) {
     try {
       const buf = safeStorage.encryptString(plain)
       return 'enc:' + buf.toString('base64')
-    } catch { /* fallthrough to XOR */ }
+    } catch { /* fallthrough */ }
   }
-  return xorObfuscate(plain)
+  // M3: safeStorage 不可用时拒绝降级为 XOR 混淆（密钥仅由 COMPUTERNAME/USERNAME
+  // 派生，同机任意进程可还原）。返回空串放弃持久化该敏感字段，重启后需重新配置
+  console.warn('[Config] safeStorage 不可用，拒绝持久化敏感字段（该值本轮不落盘，重启后需重新配置）')
+  return ''
 }
 
 function decryptValue(stored: string): string {
   if (!needsDecryption(stored)) return stored
   if (stored.startsWith('enc:')) {
+    initSafeStorage() // 懒兜底：确保 app ready 后已正确检测
     if (safeStorageWorking) {
       try {
         const buf = Buffer.from(stored.slice(4), 'base64')
@@ -1367,21 +1392,20 @@ function encryptConfig(data: Record<string, unknown>): Record<string, unknown> {
       out[key] = val.map(v => typeof v === 'string' && needsEncryption(v) ? encryptValue(v) : v)
     }
   }
-  // 对象形式（如 jellyfin: { url, token }）
+  // 对象形式（如 jellyfin: { url, token }）——url 明文，只加密 token
   if (out.jellyfin && typeof out.jellyfin === 'object') {
     const jf = { ...(out.jellyfin as Record<string, unknown>) }
-    for (const k of ['token', 'url']) {
+    for (const k of ['token']) {
       if (typeof jf[k] === 'string' && needsEncryption(jf[k] as string)) {
         jf[k] = encryptValue(jf[k] as string)
       }
     }
     out.jellyfin = jf
   }
-  // 加密 jellyfin:servers 数组中每个服务器的 url 和 token
+  // jellyfin:servers 数组：url 明文（非秘密），只加密凭证 token/password
   if (Array.isArray(out['jellyfin:servers'])) {
     out['jellyfin:servers'] = (out['jellyfin:servers'] as Record<string, unknown>[]).map(s => {
       const sv = { ...s }
-      if (typeof sv.url === 'string' && needsEncryption(sv.url)) sv.url = encryptValue(sv.url)
       if (typeof sv.token === 'string' && needsEncryption(sv.token)) sv.token = encryptValue(sv.token)
       // Emby 专属：加密 password
       if (typeof sv.password === 'string' && needsEncryption(sv.password)) sv.password = encryptValue(sv.password)
@@ -1424,6 +1448,8 @@ function decryptConfig(data: Record<string, unknown>): Record<string, unknown> {
   return out
 }
 
+let configLoadOk = false
+
 function loadConfigFile(): void {
   try {
     if (!configPath) {
@@ -1453,8 +1479,16 @@ function loadConfigFile(): void {
     } else {
       console.log('[Config] Config file does not exist')
     }
+    configLoadOk = true
   } catch (err) {
     console.error('[Config] Failed to load:', err)
+    if (configPath && existsSync(configPath)) {
+      // 配置文件损坏：保留原文件用于排查，备份后不覆盖为空白配置
+      try {
+        copyFileSync(configPath, `${configPath}.corrupted-${Date.now()}`)
+        console.error('[Config] Corrupted config backed up; keeping previous in-memory state')
+      } catch (e) { console.error('[Config] Backup failed:', e) }
+    }
     configData = {}
   }
 }
@@ -1465,17 +1499,29 @@ function saveConfigFile(): void {
       configPath = join(app.getPath('userData'), 'config.json')
     }
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, JSON.stringify(encryptConfig(configData), null, 2), 'utf-8')
+    // 原子写入：先写临时文件再重命名，避免写盘中途崩溃产生半截配置
+    const tmpPath = `${configPath}.tmp`
+    writeFileSync(tmpPath, JSON.stringify(encryptConfig(configData), null, 2), 'utf-8')
+    renameSync(tmpPath, configPath)
   } catch (err) {
     console.error('Failed to save config:', err)
   }
 }
 
-// 初始化：加载已有配置
-loadConfigFile()
-migrateLegacyConfig()
-// 保存清洗后的配置（移除因解密失败而损坏的 server 条目）
-saveConfigFile()
+/**
+ * 配置初始化：必须在 app ready 之后执行。
+ * 原因：loadConfigFile → decryptConfig 依赖 safeStorage（Windows DPAPI），
+ * 而 safeStorage 只有在 app ready 后才可用；ready 前加载会把 enc: 凭据误判为不可解密。
+ */
+function initConfig(): void {
+  initSafeStorage()
+  loadConfigFile()
+  migrateLegacyConfig()
+  // 仅当配置成功加载后再落盘清洗结果，避免用空白配置覆盖损坏的原文件
+  if (configLoadOk) {
+    saveConfigFile()
+  }
+}
 
 /** 递归清理值中的 enc:/xor: 前缀密文，防止解密失败时泄露加密 blob */
 function sanitizeEncryptedBlobs(value: unknown): unknown {
@@ -1502,15 +1548,209 @@ ipcMain.handle('store:get', async (_event, key: string) => {
 })
 
 ipcMain.handle('store:set', async (_event, key: string, value: unknown) => {
+  // 防止原型污染与非法键写入（__proto__/constructor/prototype）
+  if (typeof key !== 'string' || key === '__proto__' || key === 'constructor' || key === 'prototype') {
+    console.warn('[store:set] rejected invalid key:', key)
+    return false
+  }
+  // M2: 敏感键（jellyfin.token/url 等）由专用登录 handler 管理，拒绝渲染端直接
+  // 覆写 —— 对象/嵌套值可绕过 encryptConfig 的字符串加密路径落盘明文
+  if (ENCRYPTED_KEYS.has(key)) {
+    console.warn('[store:set] rejected sensitive key:', key)
+    return false
+  }
   configData[key] = value
   saveConfigFile()
   return true
 })
 
 ipcMain.handle('store:delete', async (_event, key: string) => {
+  // 与 store:set 同理，敏感键的清除也走专用 handler（登出流程）
+  if (typeof key === 'string' && ENCRYPTED_KEYS.has(key)) {
+    console.warn('[store:delete] rejected sensitive key:', key)
+    return false
+  }
   delete configData[key]
   saveConfigFile()
   return true
+})
+
+// ==================== 数据导入导出 ====================
+
+// 导出配置数据
+ipcMain.handle('data:export', async (_event, options?: { format?: 'json' | 'csv'; includeKeys?: string[] }) => {
+  if (!mainWindow) return { success: false, error: '主窗口未创建' }
+  
+  try {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '导出数据',
+      defaultPath: `huanying_config_${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [
+        { name: 'JSON 文件', extensions: ['json'] },
+        { name: 'CSV 文件', extensions: ['csv'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    })
+    
+    if (result.canceled || !result.filePath) {
+      return { success: false, error: '用户取消导出' }
+    }
+    
+    const exportData: { version: string; exportedAt: string; data: Record<string, unknown> } = {
+      version: '13.0.0',
+      exportedAt: new Date().toISOString(),
+      data: {}
+    }
+    
+    const keysToExport = options?.includeKeys || Object.keys(configData)
+    
+    for (const key of keysToExport) {
+      if (configData[key] !== undefined) {
+        exportData.data[key] = sanitizeEncryptedBlobs(configData[key])
+      }
+    }
+    
+    let content: string
+    const ext = result.filePath.split('.').pop()?.toLowerCase()
+    
+    if (ext === 'csv' && options?.format === 'csv') {
+      const rows: string[][] = [['Key', 'Value']]
+      for (const [key, value] of Object.entries(exportData.data)) {
+        const valueStr = typeof value === 'object' ? JSON.stringify(value).replace(/"/g, '""') : String(value ?? '')
+        rows.push([key, valueStr])
+      }
+      content = rows.map(row => row.map(cell => `"${cell}"`).join(',')).join('\n')
+    } else {
+      content = JSON.stringify(exportData, null, 2)
+    }
+    
+    writeFileSync(result.filePath, content, 'utf-8')
+    
+    return { 
+      success: true, 
+      data: { 
+        filePath: result.filePath,
+        keyCount: Object.keys(exportData.data).length,
+        size: Buffer.byteLength(content, 'utf-8')
+      }
+    }
+  } catch (err) {
+    return { success: false, error: `导出失败: ${String(err)}` }
+  }
+})
+
+// 导入配置数据
+ipcMain.handle('data:import', async (_event, options?: { merge?: boolean; selectedKeys?: string[] }) => {
+  if (!mainWindow) return { success: false, error: '主窗口未创建' }
+  
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '导入数据',
+      filters: [
+        { name: 'JSON 文件', extensions: ['json'] },
+        { name: 'CSV 文件', extensions: ['csv'] },
+        { name: '所有文件', extensions: ['*'] }
+      ],
+      properties: ['openFile']
+    })
+    
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, error: '用户取消导入' }
+    }
+    
+    const filePath = result.filePaths[0]
+    const content = readFileSync(filePath, 'utf-8')
+    
+    let importedData: Record<string, unknown>
+    let warnings: string[] = []
+    
+    const ext = filePath.split('.').pop()?.toLowerCase()
+    
+    if (ext === 'csv') {
+      const rows = content.split('\n').filter(row => row.trim())
+      const headers = rows[0].split(',').map(h => h.replace(/^"|"$/g, ''))
+      if (headers.length < 2 || headers[0] !== 'Key' || headers[1] !== 'Value') {
+        return { success: false, error: 'CSV 格式错误：需要 "Key,Value" 表头' }
+      }
+      importedData = {}
+      for (let i = 1; i < rows.length; i++) {
+        const match = rows[i].match(/^"([^"]*)",(.*)$/)
+        if (match) {
+          const key = match[1]
+          let value: unknown = match[2].replace(/^"|"$/g, '').replace(/""/g, '"')
+          try {
+            value = JSON.parse(value as string)
+          } catch {
+            // 保持为字符串
+          }
+          importedData[key] = value
+        }
+      }
+    } else {
+      try {
+        const parsed = JSON.parse(content)
+        if (parsed.version && parsed.data) {
+          importedData = parsed.data
+        } else {
+          importedData = parsed
+        }
+      } catch {
+        return { success: false, error: 'JSON 格式错误' }
+      }
+    }
+    
+    const selectedKeys = options?.selectedKeys || Object.keys(importedData)
+    const merge = options?.merge ?? true
+    const skippedKeys: string[] = []
+    const importedKeys: string[] = []
+    
+    for (const key of selectedKeys) {
+      if (importedData[key] === undefined) {
+        skippedKeys.push(key)
+        continue
+      }
+      
+      // 安全检查：防止注入危险的配置
+      if (key.startsWith('__') || key.startsWith('system:')) {
+        warnings.push(`跳过系统保护的键: ${key}`)
+        skippedKeys.push(key)
+        continue
+      }
+      
+      if (merge) {
+        configData[key] = importedData[key]
+      } else {
+        configData[key] = importedData[key]
+      }
+      importedKeys.push(key)
+    }
+    
+    saveConfigFile()
+    
+    return { 
+      success: true, 
+      data: { 
+        importedCount: importedKeys.length,
+        skippedCount: skippedKeys.length,
+        warnings,
+        importedKeys,
+        skippedKeys
+      }
+    }
+  } catch (err) {
+    return { success: false, error: `导入失败: ${String(err)}` }
+  }
+})
+
+// 获取可导出的配置键列表
+ipcMain.handle('data:list-keys', async () => {
+  const sensitiveKeys = ['jellyfin', 'emby', 'jellyfin:servers']
+  const keys = Object.keys(configData).filter(k => !k.startsWith('__') && !k.startsWith('system:'))
+  const keyInfo = keys.map(k => ({
+    key: k,
+    hasSensitive: sensitiveKeys.some(sk => k.includes(sk))
+  }))
+  return { success: true, data: keyInfo }
 })
 
 // ==================== 窗口控制 ====================
@@ -1540,9 +1780,182 @@ ipcMain.handle('window:always-on-top', async (_event, enabled?: boolean) => {
   return { success: true, data: isAlwaysOnTop }
 })
 
-// ==================== MPV 截图（带文件保存对话框） ====================
+// ==================== 播放页窗口级全屏（透明窗口模拟全屏） ====================
+// Electron 33 Windows：透明窗口被强制去掉 WS_THICKFRAME，setFullScreen 走
+// SetBounds 模拟路径（进入时保存 bounds 并铺满显示器、退出时恢复），且
+// widget 的原生全屏状态从未被置位 —— isFullScreen() 恒为 false。
+// 因此不能用 isFullScreen() 判断当前状态：否则 toggle 永远算出 target=true，
+// 第二次点击仍执行 setFullScreen(true)，还会把 restore_bounds 覆盖成全屏尺寸，
+// 表现为"无法退出全屏"。状态由本模块布尔量维护，enter/leave 事件兜底同步。
+let windowFullscreenState = false
 
-// 截图保存 — 通过 dialog 选择路径后保存
+function toggleWindowFullscreen(): boolean {
+  if (!mainWindow) return false
+  windowFullscreenState = !windowFullscreenState
+  mainWindow.setFullScreen(windowFullscreenState)
+  return windowFullscreenState
+}
+
+ipcMain.handle('window:toggle-fullscreen', () => ({ success: true, data: toggleWindowFullscreen() }))
+
+// ==================== MPV 播放引擎 ====================
+// 与 HTML5 <video> 并存的第二条播放链路：主进程 spawn mpv.exe，
+// 通过命名管道 JSON IPC 控制；Windows 下用 koffi 创建子窗口（--wid）嵌入主窗口。
+// 渲染端传入的坐标均为 CSS 像素（视口左上角原点），主进程按显示器 DPI 换算物理像素。
+
+let mpvController: MpvController | null = null
+
+/** 需要转发到渲染进程的 mpv 事件 */
+const MPV_FORWARD_EVENTS = [
+  'ready', 'quit', 'error',
+  'time', 'duration', 'pause', 'volume', 'speed',
+  'track-list', 'fullscreen',
+  'file-loaded', 'start', 'stop', 'seek', 'idle'
+]
+
+function getMpvPlayerSettings(): { hardwareDecode: boolean; hdrToneMapping: boolean; debugLog: boolean } {
+  const saved = configData['player'] as { hardwareDecode?: boolean; hdrToneMapping?: boolean; debugLog?: boolean } | undefined
+  return {
+    hardwareDecode: saved?.hardwareDecode !== false,
+    hdrToneMapping: saved?.hdrToneMapping === true,
+    debugLog: saved?.debugLog === true
+  }
+}
+
+/** 获取（惰性创建）mpv 控制器单例，并转发事件到渲染进程 */
+function getMpvController(): MpvController {
+  if (!mpvController) {
+    const controller = new MpvController(getMpvPlayerSettings())
+    for (const ev of MPV_FORWARD_EVENTS) {
+      controller.on(ev, (data: unknown) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('mpv:event', { event: ev, data })
+        }
+      })
+    }
+    mpvController = controller
+  }
+  return mpvController
+}
+
+/** 统一执行 mpv 操作，未运行/异常时返回标准失败响应 */
+async function runMpv<T>(fn: (c: MpvController) => Promise<T> | T): Promise<{ success: boolean; data?: T; error?: string }> {
+  try {
+    if (!mpvController || !mpvController.isMpvRunning()) {
+      return { success: false, error: 'mpv 未运行' }
+    }
+    const data = await fn(mpvController)
+    return { success: true, data }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+// mpv 是否可用（二进制存在性检查）
+ipcMain.handle('mpv:is-available', async () => {
+  try {
+    return { success: true, data: getMpvController().isAvailable() }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// 嵌入：创建 mpv 渲染窗口（主窗口身后打孔架构）并启动 mpv（--wid 只能在启动时传入）；
+// 已运行时仅更新渲染窗口位置。坐标为渲染端视口 DIP（主进程换算屏幕物理像素）
+ipcMain.handle('mpv:embed', async (_event, x: number, y: number, width: number, height: number) => {
+  try {
+    if (!mainWindow) return { success: false, error: '主窗口未创建' }
+    const controller = getMpvController()
+    if (!controller.isAvailable()) return { success: false, error: '未找到 mpv 可执行文件' }
+
+    if (!controller.isMpvRunning()) {
+      // 复用已有渲染窗口：渲染端在挂载 effect 与起播流程会各调用一次 embed，
+      // 若第二次重建窗口，mpv --wid 仍指向已销毁的旧句柄 → 音频正常但画面黑屏
+      if (!controller.hasChildWindow()) {
+        const ok = controller.createChildWindow(mainWindow, x, y, width, height)
+        if (!ok) return { success: false, error: '创建 mpv 嵌入窗口失败' }
+      } else {
+        controller.updateChildWindowPosition(x, y, width, height)
+      }
+      await controller.start()
+    } else {
+      controller.updateChildWindowPosition(x, y, width, height)
+    }
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// 更新嵌入窗口位置/大小（窗口缩放、全屏、布局变化；DIP 视口坐标）
+ipcMain.handle('mpv:update-embed', async (_event, x: number, y: number, width: number, height: number) => {
+  if (mpvController && mpvController.isMpvRunning()) {
+    mpvController.updateChildWindowPosition(x, y, width, height)
+  }
+  return { success: true }
+})
+
+// 加载并播放（URL 或本地路径；未嵌入时以独立窗口模式启动）
+ipcMain.handle('mpv:play', async (_event, url: string) => {
+  try {
+    // L1: scheme 白名单 —— 防止渲染端被控时借 mpv 进程访问任意协议/内网
+    const s = String(url)
+    const lower = s.toLowerCase()
+    const isHttp = lower.startsWith('http://') || lower.startsWith('https://')
+    const isFileUrl = lower.startsWith('file://')
+    const isLocalPath = /^[a-z]:[\\/]/.test(lower) || lower.startsWith('\\\\')
+    if (!isHttp && !isFileUrl && !isLocalPath) {
+      return { success: false, error: 'mpv:play 仅支持 http/https/file 或本地磁盘路径' }
+    }
+    const controller = getMpvController()
+    if (!controller.isAvailable()) return { success: false, error: '未找到 mpv 可执行文件' }
+    if (!controller.isMpvRunning()) {
+      await controller.start()
+    }
+    await controller.loadFile(url)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// 离开播放页：销毁子窗口与 mpv 进程（原生子窗口会覆盖其他页面，必须回收）
+ipcMain.handle('mpv:hide', async () => {
+  if (mpvController) {
+    const controller = mpvController
+    mpvController = null
+    try { await controller.destroy() } catch { /* ignore */ }
+  }
+  return { success: true }
+})
+
+ipcMain.handle('mpv:stop', () => runMpv((c) => c.stop()))
+ipcMain.handle('mpv:pause', () => runMpv((c) => c.pause_()))
+ipcMain.handle('mpv:resume', () => runMpv((c) => c.play()))
+ipcMain.handle('mpv:seek', (_event, position: number) => runMpv((c) => c.seek(position)))
+ipcMain.handle('mpv:set-volume', (_event, volume: number) => runMpv((c) => c.setVolume(volume)))
+ipcMain.handle('mpv:set-speed', (_event, speed: number) => runMpv((c) => c.setSpeed(speed)))
+
+// 嵌入模式下全屏由 Electron 页面控制（子窗口跟随几何更新）；
+// 独立窗口模式才切换 mpv 自身全屏
+ipcMain.handle('mpv:toggle-fullscreen', () => {
+  // 打孔架构下不能 cycle mpv 自身 fullscreen（--wid 下 mpv 会调整渲染窗口尺寸导致错位），
+  // 嵌入与否都统一切换 Electron 主窗口的窗口级全屏
+  return { success: true, data: toggleWindowFullscreen() }
+})
+
+ipcMain.handle('mpv:get-state', () => runMpv((c) => c.getState()))
+ipcMain.handle('mpv:get-tracks', () => runMpv((c) => c.getTrackList()))
+ipcMain.handle('mpv:select-track', (_event, trackId: number) => runMpv((c) => c.selectTrack(trackId)))
+ipcMain.handle('mpv:select-subtitle', (_event, trackId: number) => runMpv((c) => c.selectSubtitle(trackId)))
+ipcMain.handle('mpv:disable-subtitle', () => runMpv((c) => c.disableSubtitle()))
+ipcMain.handle('mpv:load-subtitle', (_event, subtitlePath: string) => runMpv((c) => c.loadExternalSubtitle(subtitlePath)))
+ipcMain.handle('mpv:get-property', (_event, name: string) => runMpv((c) => c.getProperty(name)))
+ipcMain.handle('mpv:set-property', (_event, name: string, value: unknown) => runMpv((c) => c.setProperty(name, value)))
+ipcMain.handle('mpv:screenshot', (_event, filePath: string) => runMpv((c) => c.screenshot(filePath)))
+
+// 截图保存 — 弹保存对话框；mpv 运行中由 mpv 原生截图，
+// 否则返回 use-canvas-fallback 让渲染端走 Canvas 截图
 ipcMain.handle('mpv:screenshot-save', async () => {
   if (!mainWindow) return { success: false, error: '主窗口未创建' }
   try {
@@ -1556,8 +1969,34 @@ ipcMain.handle('mpv:screenshot-save', async () => {
       ]
     })
     if (result.canceled || !result.filePath) return { success: false, error: '用户取消' }
-    // 返回用户选择的保存路径，让渲染进程用 Canvas 截图后写入
+    if (mpvController && mpvController.isMpvRunning()) {
+      await mpvController.screenshot(result.filePath)
+      return { success: true, data: result.filePath }
+    }
+    // mpv 未运行：渲染端用 Canvas 截图后写入该路径
     return { success: false, filePath: result.filePath, error: 'use-canvas-fallback' }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// 画布引擎（方案 C）截图保存：preload 取当前帧（已转 BGRA）→ nativeImage 存 PNG
+ipcMain.handle('mpv:save-frame-png', async (_event, payload: { width: number; height: number; pixels: Uint8Array }) => {
+  if (!mainWindow) return { success: false, error: '主窗口未创建' }
+  try {
+    const { width, height, pixels } = payload
+    if (!width || !height || !pixels || pixels.length < width * height * 4) {
+      return { success: false, error: '帧数据无效' }
+    }
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '保存截图',
+      defaultPath: `screenshot_${Date.now()}.png`,
+      filters: [{ name: 'PNG 图片', extensions: ['png'] }]
+    })
+    if (result.canceled || !result.filePath) return { success: false, error: '用户取消' }
+    const image = nativeImage.createFromBitmap(Buffer.from(pixels), { width, height })
+    writeFileSync(result.filePath, image.toPNG())
+    return { success: true, data: result.filePath }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -1592,12 +2031,34 @@ function saveHistory(items: PlayHistoryItem[]): void {
   saveConfigFile()
 }
 
+// M10: 历史记录写入字段白名单 + 长度校验，watchedAt 由主进程强制覆盖，
+// 防止渲染端伪造任意字段或时间戳置顶刷屏
+function sanitizeHistoryItem(item: unknown): PlayHistoryItem | null {
+  if (!item || typeof item !== 'object') return null
+  const it = item as Record<string, unknown>
+  if (typeof it.itemId !== 'string' || !it.itemId || typeof it.name !== 'string' || !it.name) return null
+  const num = (v: unknown): number => (typeof v === 'number' && isFinite(v) && v >= 0 ? v : 0)
+  const str = (v: unknown, max: number): string | undefined => (typeof v === 'string' ? v.slice(0, max) : undefined)
+  return {
+    itemId: it.itemId.slice(0, 128),
+    name: it.name.slice(0, 256),
+    duration: num(it.duration),
+    position: num(it.position),
+    posterUrl: str(it.posterUrl, 512) ?? '',
+    watchedAt: Date.now(),
+    localFile: str(it.localFile, 1024),
+    baseUrl: str(it.baseUrl, 256),
+    seriesName: str(it.seriesName, 256)
+  }
+}
+
 ipcMain.handle('history:save', async (_event, item: PlayHistoryItem) => {
+  const sanitized = sanitizeHistoryItem(item)
+  if (!sanitized) return { success: false, error: 'invalid history item' }
   const items = loadHistory()
   // 去重：同名同 itemId 覆盖更新
-  const idx = items.findIndex((h) => h.itemId === item.itemId)
-  const now = Date.now()
-  const entry: PlayHistoryItem = { ...item, watchedAt: now }
+  const idx = items.findIndex((h) => h.itemId === sanitized.itemId)
+  const entry: PlayHistoryItem = sanitized
   if (idx >= 0) {
     items.splice(idx, 1)
   }
@@ -1726,11 +2187,34 @@ ipcMain.handle('recentlyAdded:list', async (_event, limit?: number) => {
   }
 })
 
+// M10: 最近入库写入字段白名单 + addedAt 主进程强制覆盖，防伪造置顶刷屏
+function sanitizeRecentlyAddedItem(item: unknown, forcedAt: number): RecentlyAddedItem | null {
+  if (!item || typeof item !== 'object') return null
+  const it = item as Record<string, unknown>
+  if (typeof it.itemId !== 'string' || !it.itemId || typeof it.name !== 'string' || !it.name) return null
+  const str = (v: unknown, max: number): string | undefined => (typeof v === 'string' ? v.slice(0, max) : undefined)
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && isFinite(v) ? v : undefined)
+  return {
+    itemId: it.itemId.slice(0, 128),
+    name: it.name.slice(0, 256),
+    type: it.type === 'Episode' ? 'Episode' : it.type === 'Series' ? 'Series' : 'Movie',
+    productionYear: num(it.productionYear),
+    imageTag: str(it.imageTag, 128),
+    seriesName: str(it.seriesName, 256),
+    seriesId: str(it.seriesId, 128),
+    seasonId: str(it.seasonId, 128),
+    indexNumber: num(it.indexNumber),
+    parentIndexNumber: num(it.parentIndexNumber),
+    addedAt: forcedAt
+  }
+}
+
 ipcMain.handle('recentlyAdded:add', async (_event, item: RecentlyAddedItem) => {
   try {
+    const entry = sanitizeRecentlyAddedItem(item, Date.now())
+    if (!entry) return { success: false, error: 'invalid recentlyAdded item' }
     const items = loadRecentlyAdded()
-    const idx = items.findIndex((i) => i.itemId === item.itemId)
-    const entry: RecentlyAddedItem = { ...item, addedAt: item.addedAt || Date.now() }
+    const idx = items.findIndex((i) => i.itemId === entry.itemId)
     if (idx >= 0) {
       items.splice(idx, 1)
     }
@@ -1754,18 +2238,16 @@ ipcMain.handle('recentlyAdded:addBatch', async (_event, newItems: RecentlyAddedI
     console.log(`[RecentlyAdded] 批量添加 - 待添加: ${newItems.length} 条`)
 
     for (let i = 0; i < newItems.length; i++) {
-      const item = newItems[i]
-      const idx = items.findIndex((i) => i.itemId === item.itemId)
-      const entry: RecentlyAddedItem = {
-        ...item,
-        addedAt: item.addedAt > 0 ? item.addedAt : now + i
-      }
+      // addedAt 由主进程按批次顺序生成，不接受渲染端传入值
+      const entry = sanitizeRecentlyAddedItem(newItems[i], now + i)
+      if (!entry) continue
+      const idx = items.findIndex((it) => it.itemId === entry.itemId)
       if (idx >= 0) {
         items.splice(idx, 1)
-        console.log(`[RecentlyAdded] 批量添加 - 更新已有记录: "${item.name}"`)
+        console.log(`[RecentlyAdded] 批量添加 - 更新已有记录: "${entry.name}"`)
       }
       items.unshift(entry)
-      console.log(`[RecentlyAdded] 批量添加 - 新增记录: "${item.name}" | 时间戳: ${entry.addedAt}`)
+      console.log(`[RecentlyAdded] 批量添加 - 新增记录: "${entry.name}" | 时间戳: ${entry.addedAt}`)
     }
 
     if (items.length > MAX_RECENTLY_ADDED) {
@@ -1952,12 +2434,63 @@ async function getLocalVideoInfo(filePath: string): Promise<{
   }
 }
 
+// ==================== 本地路径访问控制（M1 纵深防御） ====================
+// 渲染进程若被 XSS 攻陷，路径类 IPC（file:get-url / video:get-info /
+// danmaku:parse-local-xml 等）可被当作任意文件读取原语。这里维护一个持久化的
+// "允许目录根"清单：仅用户通过系统对话框明确打开过的目录（及 userData）
+// 放行，路径类 IPC 一律校验归属前缀
+
+const LOCAL_ALLOWED_ROOTS_KEY = 'local:allowed-roots'
+const allowedPathRoots = new Set<string>(
+  Array.isArray(configData[LOCAL_ALLOWED_ROOTS_KEY])
+    ? (configData[LOCAL_ALLOWED_ROOTS_KEY] as string[])
+    : []
+)
+
+function normPathForCompare(p: string): string {
+  const resolved = pathResolve(p)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+function addAllowedRoot(p: string): void {
+  try {
+    const norm = normPathForCompare(p)
+    if (!allowedPathRoots.has(norm)) {
+      allowedPathRoots.add(norm)
+      configData[LOCAL_ALLOWED_ROOTS_KEY] = Array.from(allowedPathRoots)
+      saveConfigFile()
+    }
+  } catch { /* ignore invalid path */ }
+}
+
+function isPathAllowed(p: string): boolean {
+  try {
+    const norm = normPathForCompare(p)
+    // userData 下的文件（弹幕缓存/XML 等）始终允许
+    const udNorm = normPathForCompare(app.getPath('userData'))
+    if (norm === udNorm || norm.startsWith(udNorm + pathSep)) return true
+    for (const root of allowedPathRoots) {
+      if (norm === root || norm.startsWith(root + pathSep)) return true
+    }
+    return false
+  } catch { return false }
+}
+
+function denyPath(reason = '路径不在允许目录内（请通过"打开文件/文件夹"重新授权访问）'): { success: false; error: string } {
+  return { success: false, error: reason }
+}
+
 ipcMain.handle('video:get-info', async (_event, filePath: string) => {
+  if (!isPathAllowed(filePath)) {
+    console.warn('[video:get-info] rejected path:', filePath)
+    return denyPath()
+  }
   return await getLocalVideoInfo(filePath)
 })
 
 ipcMain.handle('file:open-file', async () => {
-  const result = await dialog.showOpenDialog(mainWindow!, {
+  if (!mainWindow) return { success: false, error: '主窗口未创建' }
+  const result = await dialog.showOpenDialog(mainWindow, {
     title: '打开视频文件',
     filters: [
       { name: '视频文件', extensions: ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm', 'm4v', 'ts'] },
@@ -1970,11 +2503,13 @@ ipcMain.handle('file:open-file', async () => {
   }
   const filePath = result.filePaths[0]
   console.log('file:open-file selected:', filePath)
+  addAllowedRoot(dirname(filePath))
   return { success: true, data: { filePath } }
 })
 
 ipcMain.handle('file:open-folder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow!, {
+  if (!mainWindow) return { success: false, error: '主窗口未创建' }
+  const result = await dialog.showOpenDialog(mainWindow, {
     title: '打开文件夹',
     properties: ['openDirectory']
   })
@@ -1983,17 +2518,26 @@ ipcMain.handle('file:open-folder', async () => {
   }
   const folderPath = result.filePaths[0]
   console.log('file:open-folder selected:', folderPath)
+  addAllowedRoot(folderPath)
   const scanResult = await scanVideoFolder(folderPath)
   return scanResult
 })
 
 ipcMain.handle('file:scan-folder', async (_event, folderPath: string) => {
   console.log('file:scan-folder', folderPath)
+  if (!isPathAllowed(folderPath)) {
+    console.warn('[file:scan-folder] rejected path:', folderPath)
+    return denyPath()
+  }
   return await scanVideoFolder(folderPath)
 })
 
 ipcMain.handle('file:get-url', async (_event, filePath: string) => {
   try {
+    if (!isPathAllowed(filePath)) {
+      console.warn('[file:get-url] rejected path:', filePath)
+      return denyPath()
+    }
     const url = pathToFileURL(filePath).toString()
     return { success: true, data: { url } }
   } catch (err) {
@@ -2005,13 +2549,17 @@ ipcMain.handle('file:get-url', async (_event, filePath: string) => {
 
 // ==================== 弹幕 API（DandanPlay） ====================
 
-function getDanmakuApiConfig(): { primary: string; mirrors: string[] } {
+function getDanmakuApiConfig(): { primary: string; mirrors: string[]; appId: string; appSecret: string } {
   const storePrimary = configData['danmaku:api-primary'] as string | undefined
   const storeMirrors = configData['danmaku:api-mirrors'] as string[] | undefined
+  const storeAppId = configData['danmaku:app-id'] as string | undefined
+  const storeAppSecret = configData['danmaku:app-secret'] as string | undefined
 
   return {
     primary: storePrimary || 'https://api.dandanplay.net',
-    mirrors: (storeMirrors && storeMirrors.length > 0) ? storeMirrors : []
+    mirrors: (storeMirrors && storeMirrors.length > 0) ? storeMirrors : [],
+    appId: storeAppId || '',
+    appSecret: storeAppSecret || ''
   }
 }
 
@@ -2019,16 +2567,24 @@ ipcMain.handle('danmaku:get-config', async () => {
   const config = getDanmakuApiConfig()
   return {
     primary: config.primary,
-    mirrors: config.mirrors
+    mirrors: config.mirrors,
+    appId: config.appId,
+    appSecret: config.appSecret
   }
 })
 
-ipcMain.handle('danmaku:set-config', async (_event, config: { primary?: string; mirrors?: string[] }) => {
+ipcMain.handle('danmaku:set-config', async (_event, config: { primary?: string; mirrors?: string[]; appId?: string; appSecret?: string }) => {
   if (config.primary !== undefined) {
     configData['danmaku:api-primary'] = config.primary
   }
   if (config.mirrors !== undefined) {
     configData['danmaku:api-mirrors'] = config.mirrors
+  }
+  if (config.appId !== undefined) {
+    configData['danmaku:app-id'] = config.appId
+  }
+  if (config.appSecret !== undefined) {
+    configData['danmaku:app-secret'] = config.appSecret
   }
   saveConfigFile()
   return { success: true }
@@ -2038,14 +2594,19 @@ ipcMain.handle('danmaku:test-api', async (_event, url: string) => {
   const startTime = Date.now()
   try {
     const testPath = '/api/v2/search/episodes'
+    const config = getDanmakuApiConfig()
+
+    const testHeaders: Record<string, string> = {
+      'Accept': 'application/json',
+      'User-Agent': 'huanying/1.0 (Electron)'
+    }
+    if (config.appId) testHeaders['App-ID'] = config.appId
+    if (config.appSecret) testHeaders['App-Secret'] = config.appSecret
 
     const response = await nodeFetch(
       `${url}${testPath}?anime=${encodeURIComponent('测试')}`,
       {
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'huanying/1.0 (Electron)'
-        }
+        headers: testHeaders
       }
     )
     const elapsed = Date.now() - startTime
@@ -2088,6 +2649,10 @@ ipcMain.handle('danmaku:test-api', async (_event, url: string) => {
 
 // 本地 XML 弹幕解析（B站格式）
 ipcMain.handle('danmaku:parse-local-xml', async (_event, xmlPath: string) => {
+  if (!isPathAllowed(xmlPath)) {
+    console.warn('[danmaku:parse-local-xml] rejected path:', xmlPath)
+    return denyPath()
+  }
   if (!existsSync(xmlPath)) {
     return { success: false, error: `文件不存在: ${xmlPath}` }
   }
@@ -2106,6 +2671,11 @@ ipcMain.handle('danmaku:parse-local-xml', async (_event, xmlPath: string) => {
 })
 
 ipcMain.handle('danmaku:find-local-xml', async (_event, videoPath: string) => {
+  // 只在视频同目录找同名 XML，videoPath 本身必须归属允许目录
+  if (!isPathAllowed(videoPath)) {
+    console.warn('[danmaku:find-local-xml] rejected path:', videoPath)
+    return denyPath()
+  }
   // 兼容 Windows \ 和 Unix / 路径分隔符
   const lastSep = Math.max(videoPath.lastIndexOf('/'), videoPath.lastIndexOf('\\'))
   const dir = videoPath.substring(0, lastSep)
@@ -2131,69 +2701,104 @@ ipcMain.handle('danmaku:find-local-xml', async (_event, videoPath: string) => {
   return { success: false, error: '未找到本地弹幕 XML 文件' }
 })
 
-function nodeFetch(url: string, options?: { headers?: Record<string, string>; timeoutMs?: number }): Promise<{ ok: boolean; status: number; headers: { get(name: string): string | null }; text(): Promise<string>; json<T>(): Promise<T> }> {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url)
-    const mod = parsed.protocol === 'https:' ? https : http
-    const timeout = options?.timeoutMs ?? 15000
-    const req = mod.get(parsed, { headers: options?.headers, timeout }, (res) => {
-      const chunks: Buffer[] = []
-      res.on('data', (chunk: Buffer) => chunks.push(chunk))
-      res.on('end', () => {
-        const buffer = Buffer.concat(chunks)
-        const body = buffer.toString('utf-8')
-        resolve({
-          ok: res.statusCode! >= 200 && res.statusCode! < 300,
-          status: res.statusCode!,
-          headers: { get(name: string): string | null { const v = res.headers[name.toLowerCase()]; return Array.isArray(v) ? v[0] : (v ?? null) } },
-          text: async () => body,
-          json: async () => JSON.parse(body)
-        })
-      })
-      res.on('error', reject)
-    })
-    req.on('timeout', () => {
-      req.destroy(new Error(`Request timeout after ${timeout}ms`))
-    })
-    req.on('error', reject)
+// 弹幕 HTTP 请求：使用全局 fetch。
+// 关键修复：用 Promise.race 实现超时，而非 AbortController。
+// 原因：Electron 主进程中 fetch 的 AbortSignal 对 Tailscale IP (100.66.x.x) 无法真正中断连接，
+// 导致 fetch 挂起至 OS TCP 超时 (30-60s)。Promise.race 可立即返回超时错误。
+async function nodeFetch(url: string, options?: { headers?: Record<string, string>; timeoutMs?: number; method?: string; body?: string }): Promise<{ ok: boolean; status: number; headers: { get(name: string): string | null }; text(): Promise<string>; json<T>(): Promise<T> }> {
+  const timeout = options?.timeoutMs ?? 10000
+  let fetchResult: { ok: boolean; status: number; headers: { get(name: string): string | null }; text(): Promise<string>; json: <T>() => Promise<T> } | null = null
+  let fetchError: Error | null = null
+
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const fetchPromise = fetch(url, {
+    method: options?.method || 'GET',
+    headers: options?.headers || {},
+    body: options?.body
+  }).then((response) => {
+    if (timer) clearTimeout(timer)
+    fetchResult = {
+      ok: response.ok,
+      status: response.status,
+      headers: { get: (name: string): string | null => response.headers.get(name) },
+      text: () => response.text(),
+      json: <T>() => response.json() as Promise<T>
+    }
+  }).catch((err: unknown) => {
+    if (timer) clearTimeout(timer)
+    fetchError = err instanceof Error ? err : new Error(String(err))
   })
+
+  const timeoutPromise = new Promise<void>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`Request timeout after ${timeout}ms`)), timeout)
+  })
+
+  try {
+    await Promise.race([fetchPromise, timeoutPromise])
+  } catch (err) {
+    // 超时或 fetch 错误
+    if (timer) clearTimeout(timer)
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(msg)
+  }
+
+  // fetch 完成但可能已超时被忽略（不影响我们，因 race 已返回）
+  if (fetchError) throw fetchError
+  if (!fetchResult) throw new Error(`Request failed: no result`)
+  return fetchResult
 }
 
 async function readResponseBody(response: { text(): Promise<string> }): Promise<string> {
   return response.text()
 }
 
-async function dandanRequest<T>(path: string, retries = 2): Promise<T> {
+async function dandanRequest<T>(path: string, retries = 1, body?: unknown, timeoutMs = 5000): Promise<T> {
   let lastError: Error | null = null
   const config = getDanmakuApiConfig()
   const allUrls = [config.primary, ...config.mirrors]
 
-  console.log(`[danmaku] Using primary=${config.primary}, mirrors=${config.mirrors.join(',')}`)
+  const isPost = body !== undefined
+  console.log(`[danmaku] Using primary=${config.primary}, mirrors=${config.mirrors.join(',')}, appId=${config.appId ? 'configured' : 'missing'}, method=${isPost ? 'POST' : 'GET'}, timeoutMs=${timeoutMs}`)
+
+  const authHeaders: Record<string, string> = {
+    'Accept': 'application/json',
+    'User-Agent': 'huanying/1.0 (Electron)'
+  }
+  if (config.appId) authHeaders['App-ID'] = config.appId
+  if (config.appSecret) authHeaders['App-Secret'] = config.appSecret
+  if (isPost) authHeaders['Content-Type'] = 'application/json'
 
   for (const baseUrl of allUrls) {
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         if (attempt > 0) {
           console.log(`[danmaku] 重试 ${baseUrl} (第${attempt}次)`)
-          await new Promise(r => setTimeout(r, 500 * attempt))
+          await new Promise(r => setTimeout(r, 300 * attempt))
         }
         const url = `${baseUrl}${path}`
-        console.log(`[danmaku] GET ${url}`)
+        console.log(`[danmaku] ${isPost ? 'POST' : 'GET'} ${url}`)
 
-        const response = await nodeFetch(url, {
-          headers: {
-            'Accept': 'application/json',
-            'User-Agent': 'huanying/1.0 (Electron)'
-          },
-          timeoutMs: 10000
-        })
+        const fetchOpts: { headers: Record<string, string>; timeoutMs: number; method?: string; body?: string } = {
+          headers: authHeaders,
+          timeoutMs
+        }
+        if (isPost) {
+          fetchOpts.method = 'POST'
+          fetchOpts.body = JSON.stringify(body)
+        }
+
+        const response = await nodeFetch(url, fetchOpts)
 
         console.log(`[danmaku] ${baseUrl} → HTTP ${response.status}, content-type=${response.headers.get('content-type')}`)
 
         if (!response.ok) {
           const bodyText = await readResponseBody(response).catch(() => '')
-          const detail = bodyText.slice(0, 500) || '(empty body)'
-          const msg = `DandanPlay ${baseUrl} 返回 HTTP ${response.status}: ${detail}`
+          const errMsg = response.headers.get('x-error-message') || ''
+          const detail = bodyText.slice(0, 500) || errMsg || '(empty body)'
+          let msg = `DandanPlay ${baseUrl} 返回 HTTP ${response.status}: ${detail}`
+          if (response.status === 403 && !config.appId) {
+            msg = `DandanPlay API 需要认证 (HTTP 403)。请在设置中配置 App-ID 和 App-Secret（在 https://api.dandanplay.net/registerApp 免费注册）`
+          }
           console.error(`[danmaku] ${msg}`)
           lastError = new Error(msg)
           continue
@@ -2334,12 +2939,16 @@ async function bilibiliAutoMatch(title: string): Promise<{
 
   const episodes = epData.result.main_section.episodes
 
-  // Step 4: Match episode by number
-  let matchedEp: BilibiliEpisode
+  // Step 4: Match episode by number（不强制回退第1集）
+  let matchedEp: BilibiliEpisode | null = null
   if (epNum > 0 && epNum <= episodes.length) {
     matchedEp = episodes[epNum - 1]
-  } else {
-    matchedEp = episodes[0]
+  }
+
+  if (!matchedEp) {
+    console.warn(`[bilibili] 未匹配到集号 epNum=${epNum}（共 ${episodes.length} 集），不强制回退第1集`)
+    bilibiliMatchCache.set(title, null)
+    return null
   }
 
   const result = {
@@ -2411,12 +3020,41 @@ ipcMain.handle('danmaku:bilibili-comments', async (_event, cid: number) => {
 
 ipcMain.handle('danmaku:search', async (_event, keyword: string) => {
   try {
+    // 预加载系列弹幕期间自建 API 繁忙（每集 comment ~10s），search 默认 5s 会
+    // 超时落入 Bilibili fallback（其结果 episodes 全空，导致 UI 显示"搜不到"），
+    // 放宽到 10s 优先拿到真实搜索结果
     const result = await dandanRequest<DanmakuSearchResponse>(
-      `/api/v2/search/episodes?anime=${encodeURIComponent(keyword)}`
+      `/api/v2/search/episodes?anime=${encodeURIComponent(keyword)}`,
+      1,
+      undefined,
+      10000
     )
     return { success: true, data: result }
   } catch (err) {
     console.error('danmaku:search failed:', err)
+    // 回退到 Bilibili 搜索
+    try {
+      const searchResp = await nodeFetch(
+        `https://api.bilibili.com/x/web-interface/wbi/search/type?search_type=media_bangumi&keyword=${encodeURIComponent(keyword)}`,
+        {
+          headers: {
+            'User-Agent': 'huanying/1.0',
+            'Referer': 'https://www.bilibili.com/',
+            'Accept': 'application/json'
+          }
+        }
+      )
+      if (searchResp.ok) {
+        const searchData = await searchResp.json() as { code: number; data: { result: Array<{ season_id: number; title: string }> } }
+        if (searchData.code === 0 && searchData.data?.result?.length) {
+          // Bilibili fallback 拿不到集列表（episodes 全空），渲染端会拼出 0 条结果。
+          // 若当作 success 返回，UI 显示"未找到匹配弹幕"误导用户；改为明确失败
+          return { success: false, error: '弹幕 API 搜索超时（Bilibili 备用源无集列表）' }
+        }
+      }
+    } catch (blErr) {
+      console.error('danmaku:search bilibili fallback failed:', blErr)
+    }
     return { success: false, error: String(err) }
   }
 })
@@ -2433,22 +3071,31 @@ function extractEpisodeInfo(title: string): { animeKeyword: string; epNum: strin
     .trim()
 
   let epNum = ''
-  const epMatch = clean.match(/E(?:P(?:isode)?)?\s*(\d{1,3})/i)
+  // 匹配集号模式，同时记录匹配位置以截取动漫名称
+  // 注意：S\d+E\d+ 必须在 E\d+ 之前，否则 "S01E02" 会被 "E02" 部分匹配
+  const epMatch = clean.match(/S\d+E(\d{1,3})/i)
+    || clean.match(/E(?:P(?:isode)?)?\s*(\d{1,3})/i)
     || clean.match(/第\s*(\d{1,3})\s*[话集]/)
-    || clean.match(/S\d+E(\d{1,3})/i)
     || clean.match(/\s(\d{1,3})\s*[话集]?$/)
     || clean.match(/^(.+?)(\d{1,3})$/);
   if (epMatch) {
     epNum = epMatch[epMatch.length === 3 ? 2 : 1].padStart(2, '0')
   }
 
+  // 只取集号模式之前的文本作为动漫名称，丢弃集号后的描述（如 "- 门派夺密宝江湖风波起"）
   let animeKeyword = clean
-    .replace(/E(?:P(?:isode)?)?\s*\d{1,3}/gi, '')
-    .replace(/第\s*\d{1,3}\s*[话集]/g, '')
-    .replace(/S\d+E\d{1,3}/gi, '')
-    .replace(/\s(\d{1,3})\s*[话集]?$/, '')
-    .replace(/^(.+?)(\d{1,3})$/, '$1')
-    .trim()
+  if (epMatch && epMatch.index !== undefined) {
+    animeKeyword = clean.slice(0, epMatch.index)
+  } else {
+    animeKeyword = clean
+      .replace(/E(?:P(?:isode)?)?\s*\d{1,3}/gi, '')
+      .replace(/第\s*\d{1,3}\s*[话集]/g, '')
+      .replace(/S\d+E\d{1,3}/gi, '')
+      .replace(/\s(\d{1,3})\s*[话集]?$/, '')
+      .replace(/^(.+?)(\d{1,3})$/, '$1')
+  }
+  // 清理尾部标点和空格
+  animeKeyword = animeKeyword.replace(/[\s\-—_·:：]+$/, '').trim()
 
   if (!animeKeyword) {
     animeKeyword = title
@@ -2673,7 +3320,10 @@ ipcMain.handle('danmaku:get-comments', async (_event, episodeId: string, source?
       return { success: true, data: cached }
     }
     const result = await dandanRequest<{ count: number; comments: DanmakuCommentRaw[] }>(
-      `/api/v2/comment/${episodeId}?withRelated=true`
+      `/api/v2/comment/${episodeId}`,
+      1,
+      undefined,
+      25000
     )
     // 解析 p 字段为结构化数据
     const parsed = (result.comments || []).map((c: DanmakuCommentRaw) => {
@@ -2704,7 +3354,10 @@ ipcMain.handle('danmaku:get-segment-comments', async (_event, params: { episodeI
   }
   try {
     const result = await dandanRequest<{ count: number; comments: DanmakuCommentRaw[] }>(
-      `/api/v2/comment/${episodeId}?withRelated=true`
+      `/api/v2/comment/${episodeId}`,
+      1,
+      undefined,
+      25000
     )
     const parsed = (result.comments || []).map((c: DanmakuCommentRaw) => {
       const parts = c.p.split(',')
@@ -2732,8 +3385,8 @@ interface BangumiEpisode {
   episodeTitle: string
 }
 
-ipcMain.handle('danmaku:prefetch-series', async (_event, animeId: number) => {
-  console.log(`[danmaku:prefetch] 开始预下载 animeId=${animeId}`)
+ipcMain.handle('danmaku:prefetch-series', async (_event, animeId: number, currentEpisodeId?: number) => {
+  console.log(`[danmaku:prefetch] 开始预下载 animeId=${animeId}, 跳过当前集=${currentEpisodeId ?? 'none'}`)
   try {
     // 获取全季剧集列表
     const bangumiResult = await dandanRequest<{ bangumi?: { episodes?: BangumiEpisode[] } }>(
@@ -2744,7 +3397,13 @@ ipcMain.handle('danmaku:prefetch-series', async (_event, animeId: number) => {
 
     let cachedCount = 0
     let fetchedCount = 0
+    let skippedCount = 0
     for (const ep of episodes) {
+      // 跳过当前正在播放的集，避免预下载与当前集请求竞争导致超时
+      if (currentEpisodeId != null && ep.episodeId === currentEpisodeId) {
+        skippedCount++
+        continue
+      }
       // 检查缓存中是否已有
       if (getCachedComments(ep.episodeId)) {
         cachedCount++
@@ -2752,7 +3411,10 @@ ipcMain.handle('danmaku:prefetch-series', async (_event, animeId: number) => {
       }
       try {
         const result = await dandanRequest<{ count: number; comments: DanmakuCommentRaw[] }>(
-          `/api/v2/comment/${ep.episodeId}?withRelated=true`
+          `/api/v2/comment/${ep.episodeId}`,
+          1,
+          undefined,
+          25000
         )
         const parsed = (result.comments || []).map((c: DanmakuCommentRaw) => {
           const parts = c.p.split(',')
@@ -2765,11 +3427,19 @@ ipcMain.handle('danmaku:prefetch-series', async (_event, animeId: number) => {
         })
         writeCachedComments(ep.episodeId, { count: result.count, comments: parsed as DanmakuComment[] })
         fetchedCount++
+        // 限流：每集间延迟 2 秒，避免轰炸 API 触发 429
+        await new Promise(r => setTimeout(r, 2000))
       } catch (err) {
         console.warn(`[danmaku:prefetch] 下载失败 ep=${ep.episodeId}:`, err)
+        // 遇到 429 限流时延长等待
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes('429')) {
+          console.log(`[danmaku:prefetch] 检测到 429 限流，等待 10 秒后继续`)
+          await new Promise(r => setTimeout(r, 10000))
+        }
       }
     }
-    console.log(`[danmaku:prefetch] animeId=${animeId} 完成: 缓存命中 ${cachedCount}, 新下载 ${fetchedCount}`)
+    console.log(`[danmaku:prefetch] animeId=${animeId} 完成: 缓存命中 ${cachedCount}, 新下载 ${fetchedCount}, 跳过 ${skippedCount}`)
     return { success: true, data: { cached: cachedCount, fetched: fetchedCount, total: episodes.length } }
   } catch (err) {
     console.error('[danmaku:prefetch] 失败:', err)
@@ -2786,11 +3456,523 @@ ipcMain.handle('danmaku:get-cached-comments', async (_event, episodeId: string) 
   return { success: false, error: '缓存未命中' }
 })
 
+// ====================================================================
+// 弹幕剧集匹配引擎 V2（多级优先级架构，对标弹弹play / Animeko / Jellyfin 弹幕插件）
+//
+// 匹配优先级（命中即停止降级）：
+//   ① manual     手动绑定缓存（用户曾手动指定，最高优先级，精准不复用错集）
+//   ② id         媒体源外部ID精准匹配（providerIds: imdb/tvdb，弹弹play暂不支持直查，预留）
+//   ③ hash       视频文件特征值匹配（弹弹play /api/v2/match，需文件hash，预留）
+//   ④ metadata   结构化元数据严格配对（seriesName + year + season + episode）
+//   ⑤ regex      文件名正则解析（独立 season/episode 字段）补充元数据缺失后走 ④
+//   ⑥ candidates 以上全部低置信度 → 返回候选列表，UI 手动选择 → 持久化为 ①
+//
+// 核心 BUG 修复（解决"切第2集仍显示第1集弹幕"）：
+//   - 缓存 Key = mediaSourceId + seriesId + season + episode（一集一条独立缓存）
+//   - season / episode 独立数值强校验，禁止只匹配剧名忽略集号
+//   - 切集时渲染层强制 cancel + 清状态，主进程按结构化 Key 隔离
+// ====================================================================
+
+// ---------- 中文数字转阿拉伯 ----------
+function cn2num(s: string): number {
+  const map: Record<string, number> = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 }
+  if (/^\d+$/.test(s)) return parseInt(s, 10)
+  if (s === '十') return 10
+  if (s.startsWith('十')) return 10 + (map[s[1]] || 0)
+  if (s.endsWith('十')) return (map[s[0]] || 0) * 10
+  if (s.includes('十')) { const parts = s.split('十'); return (map[parts[0]] || 0) * 10 + (map[parts[1]] || 0) }
+  return map[s] || 0
+}
+
+// ---------- 文件名/标题 清洗 ----------
+function cleanName(s: string): string {
+  return (s || '')
+    .replace(/[._]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/[\s\-—_·:：]+$/, '')
+    .replace(/^[\s\-—_·:：]+/, '')
+    .trim()
+}
+
+// ---------- 文件名正则解析器（独立 season / episode 字段，覆盖业界通用命名） ----------
+// 覆盖：S01E02, 1x02, EP02, 第2集/第二话, [02], -02-, 末尾独立数字 02
+// 必须区分季、集两个独立字段，不能混为一谈
+function parseSeasonEpisode(input: string): { season: number | null; episode: number | null; animeName: string } {
+  if (!input) return { season: null, episode: null, animeName: '' }
+  // 去扩展名 + 去封装标记
+  let s = input.replace(/\.[A-Za-z0-9]{2,4}$/, '')
+  s = s.replace(/\[[^\]]*\]/g, ' ').replace(/【[^】]*】/g, ' ').replace(/\([^)]*\)/g, ' ')
+  // 去分辨率/编码噪音
+  s = s.replace(/\b(1080[Pp]|720[Pp]|4K|BD|HD|WEB|DL|BluRay|x264|x265|H264|HEVC|AVC|AAC|FLAC|AUTO)\b/gi, ' ')
+
+  let season: number | null = null
+  let episode: number | null = null
+  let matchIdx = -1
+  let m: RegExpMatchArray | null
+
+  // S01E02 / s01e02（季+集成对，最高优先级，必须先于 E02 匹配）
+  m = s.match(/S(\d{1,2})\s*E(\d{1,3})/i)
+  if (m) { season = +m[1]; episode = +m[2]; matchIdx = m.index! }
+  // 1x02（季x集）
+  if (episode == null) { m = s.match(/(\d{1,2})[xX](\d{1,3})/); if (m) { season = +m[1]; episode = +m[2]; matchIdx = m.index! } }
+  // EP02 / Episode 02 / E02
+  if (episode == null) { m = s.match(/E(?:P(?:isode)?)?\s*(\d{1,3})/i); if (m) { episode = +m[1]; matchIdx = m.index! } }
+  // 第2集 / 第02话 / 第二集（中文）
+  if (episode == null) { m = s.match(/第\s*([0-9一二三四五六七八九十]+)\s*[话集篇章]/); if (m) { episode = cn2num(m[1]); matchIdx = m.index! } }
+  // [02] 单独方括号集号
+  if (episode == null) { m = s.match(/\[(\d{1,3})\]/); if (m) { episode = +m[1]; matchIdx = m.index! } }
+  // -02- / _02_ 短横线/下划线集号
+  if (episode == null) { m = s.match(/[-_]\s*(\d{1,3})\s*[-_]/); if (m) { episode = +m[1]; matchIdx = m.index! } }
+  // 末尾独立数字  Name 02
+  if (episode == null) { m = s.match(/[\s._](\d{1,3})\s*$/); if (m) { episode = +m[1]; matchIdx = m.index! } }
+
+  const animeName = matchIdx >= 0 ? cleanName(s.slice(0, matchIdx)) : cleanName(s)
+  return { season, episode, animeName }
+}
+
+// ---------- 从 animeTitle 推断季号（如 "庆余年 第二季" → 2, "Xxx Season 3" → 3） ----------
+function inferSeasonFromTitle(title: string): number | null {
+  if (!title) return null
+  let m = title.match(/第\s*([0-9一二三四五六七八九十]+)\s*季/)
+  if (m) return cn2num(m[1])
+  m = title.match(/Season\s*(\d{1,2})/i)
+  if (m) return +m[1]
+  return null
+}
+
+// ---------- 标题归一化（去"第X季/Season X"后比较） ----------
+function normalizeTitle(t: string): string {
+  return (t || '')
+    .replace(/第\s*[0-9一二三四五六七八九十]+\s*季/g, '')
+    .replace(/Season\s*\d{1,2}/gi, '')
+    .replace(/[\s\-_·:：]+/g, '')
+    .toLowerCase()
+    .trim()
+}
+
+// ---------- 标题相似度打分（0-1） ----------
+function scoreTitleSimilarity(a: string, b: string): number {
+  const na = normalizeTitle(a), nb = normalizeTitle(b)
+  if (!na || !nb) return 0
+  if (na === nb) return 1
+  if (na.includes(nb) || nb.includes(na)) return 0.85
+  // 字符重叠率（兜底模糊）
+  let common = 0
+  for (const ch of na) if (nb.includes(ch)) common++
+  return Math.min(0.6, common / Math.max(na.length, nb.length))
+}
+
+// ---------- anime 候选打分（标题 + 季号严格配对 + 年份） ----------
+function scoreAnimeCandidate(
+  meta: DanmakuMatchMeta,
+  anime: { animeId: number; animeTitle: string }
+): { score: number; seasonHint: number | null } {
+  const titleScore = scoreTitleSimilarity(meta.seriesName || meta.title || '', anime.animeTitle)
+  const seasonHint = inferSeasonFromTitle(anime.animeTitle)
+  let score = titleScore
+  // 季号严格配对：元数据有 parentIndexNumber 且能从 animeTitle 推断季号
+  if (meta.parentIndexNumber != null && seasonHint != null) {
+    if (seasonHint === meta.parentIndexNumber) score += 0.15   // 季号吻合，加分
+    else score -= 0.3                                          // 季号不符，重罚（防止跨季串弹幕）
+  }
+  // 元数据是第1季且 animeTitle 无季号标记（默认第1季），轻微加分
+  if (meta.parentIndexNumber === 1 && seasonHint == null) score += 0.05
+  return { score: Math.max(0, Math.min(1, score)), seasonHint }
+}
+
+// ---------- 结构化匹配缓存 V2 ----------
+// Key = mediaSourceId + seriesId + season + episode（一集一条独立缓存，杜绝按剧名单键串集）
+interface MatchCacheV2Entry {
+  episodeId: number
+  animeId?: number
+  animeTitle?: string
+  episodeTitle?: string
+  source: string
+  matchLevel: DanmakuMatchLevel
+  confidence: number
+  cachedAt: number
+}
+
+function getMatchCacheDirV2(): string {
+  const dir = join(app.getPath('userData'), 'danmaku_match_cache_v2')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function matchCacheKeyV2(meta: DanmakuMatchMeta): string {
+  const safe = (s: string): string => s.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')
+  const season = meta.parentIndexNumber ?? 0
+  const episode = meta.indexNumber ?? 0
+  const series = meta.seriesId || meta.seriesName || 'unknown'
+  return `${safe(meta.mediaSourceId)}__${safe(series)}__S${season}__E${episode}`
+}
+
+function getCachedMatchV2(meta: DanmakuMatchMeta): MatchCacheV2Entry | null {
+  // 修复串集：season/episode 缺失时不读缓存，避免 S0E0 错误缓存导致所有集都命中第1集
+  if (meta.indexNumber == null || meta.parentIndexNumber == null) return null
+  try {
+    const file = join(getMatchCacheDirV2(), `${matchCacheKeyV2(meta)}.json`)
+    if (!existsSync(file)) return null
+    const data = JSON.parse(readFileSync(file, 'utf-8')) as MatchCacheV2Entry
+    if (!data || !data.episodeId) return null
+    if (Date.now() - data.cachedAt > 7 * 24 * 60 * 60 * 1000) return null
+    return data
+  } catch { return null }
+}
+
+function writeCachedMatchV2(meta: DanmakuMatchMeta, data: Omit<MatchCacheV2Entry, 'cachedAt'>): void {
+  // 修复串集：season/episode 缺失时不写缓存，避免 S0E0 错误缓存污染
+  if (meta.indexNumber == null || meta.parentIndexNumber == null) return
+  try {
+    const file = join(getMatchCacheDirV2(), `${matchCacheKeyV2(meta)}.json`)
+    writeFileSync(file, JSON.stringify({ ...data, cachedAt: Date.now() }), 'utf-8')
+  } catch (err) {
+    console.warn(`[danmaku:match-cache-v2] 写入失败:`, err)
+  }
+}
+
+// ---------- 手动绑定缓存（Key = mediaSourceId:itemId，每集唯一） ----------
+function getBindCacheDir(): string {
+  const dir = join(app.getPath('userData'), 'danmaku_bind_cache')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function bindCacheKey(mediaSourceId: string, itemId: string): string {
+  const safe = (s: string): string => s.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')
+  return `${safe(mediaSourceId)}__${safe(itemId)}`
+}
+
+function getBoundEpisode(mediaSourceId: string, itemId: string): DanmakuBindEntry | null {
+  try {
+    const file = join(getBindCacheDir(), `${bindCacheKey(mediaSourceId, itemId)}.json`)
+    if (!existsSync(file)) return null
+    const data = JSON.parse(readFileSync(file, 'utf-8')) as DanmakuBindEntry
+    if (!data || !data.episodeId) return null
+    return data
+  } catch { return null }
+}
+
+function setBoundEpisode(entry: DanmakuBindEntry): void {
+  try {
+    const file = join(getBindCacheDir(), `${bindCacheKey(entry.mediaSourceId, entry.itemId)}.json`)
+    writeFileSync(file, JSON.stringify({ ...entry, boundAt: Date.now() }), 'utf-8')
+  } catch (err) {
+    console.warn(`[danmaku:bind-cache] 写入失败:`, err)
+  }
+}
+
+function clearBoundEpisode(mediaSourceId: string, itemId: string): void {
+  try {
+    const file = join(getBindCacheDir(), `${bindCacheKey(mediaSourceId, itemId)}.json`)
+    if (existsSync(file)) unlinkSync(file)
+  } catch { /* ignore */ }
+}
+
+// ---------- 文件 hash 计算（dandanplay 算法：≤16MB 全量 SHA1，>16MB 取首尾各 16MB） ----------
+// 异步 I/O：避免主进程同步阻塞 32MB 读取导致播放启动卡顿
+async function computeFileHash(filePath: string): Promise<{ hash: string; size: number } | null> {
+  let fh: FileHandle | null = null
+  try {
+    const fileStat = await fsStat(filePath)
+    const fileSize = fileStat.size
+    const CHUNK = 16 * 1024 * 1024 // 16MB
+    const hash = crypto.createHash('sha1')
+    fh = await fsOpen(filePath, 'r')
+    if (fileSize <= CHUNK) {
+      const buf = Buffer.alloc(fileSize)
+      await fh.read(buf, 0, fileSize, 0)
+      hash.update(buf)
+    } else {
+      const head = Buffer.alloc(CHUNK)
+      await fh.read(head, 0, CHUNK, 0)
+      hash.update(head)
+      const tail = Buffer.alloc(CHUNK)
+      await fh.read(tail, 0, CHUNK, fileSize - CHUNK)
+      hash.update(tail)
+    }
+    return { hash: hash.digest('hex'), size: fileSize }
+  } catch (err) {
+    console.error('[danmaku:hash] Failed to compute hash:', err)
+    return null
+  } finally {
+    if (fh) await fh.close().catch(() => { /* ignore close error */ })
+  }
+}
+
+// ---------- 多级匹配引擎主逻辑 ----------
+async function matchEpisodeEngine(meta: DanmakuMatchMeta): Promise<DanmakuMatchResultV2> {
+  const logs: string[] = []
+  const pushLog = (m: string): void => { console.log(`[danmaku:match-episode] ${m}`); logs.push(m) }
+  pushLog(`=== 开始多级匹配 ===`)
+  pushLog(`元数据: series="${meta.seriesName ?? ''}", season=${meta.parentIndexNumber ?? '?'}, ep=${meta.indexNumber ?? '?'}, year=${meta.productionYear ?? '?'}, itemId=${meta.itemId}`)
+
+  // ① manual：手动绑定缓存（最高优先级）
+  const bound = getBoundEpisode(meta.mediaSourceId, meta.itemId)
+  if (bound) {
+    pushLog(`① manual 命中: episodeId=${bound.episodeId}, source=${bound.source}`)
+    return {
+      success: true,
+      data: { episodeId: bound.episodeId, animeId: bound.animeId, animeTitle: bound.animeTitle, episodeTitle: bound.episodeTitle, source: bound.source, matchLevel: 'manual', confidence: 1 },
+      log: logs
+    }
+  }
+  pushLog(`① manual 未命中`)
+
+  // ② id：外部ID精准匹配（弹弹play API 暂不支持 tvdb/imdb 直查，预留降级）
+  if (meta.providerIds && Object.keys(meta.providerIds).length) {
+    pushLog(`② id: 检测到 providerIds=${Object.keys(meta.providerIds).join(',')}，弹弹play不支持外部ID直查，降级到元数据层`)
+  } else {
+    pushLog(`② id: 无 providerIds，跳过`)
+  }
+
+  // ③ hash：视频文件特征值匹配（本地文件计算 SHA1 → POST /api/v2/match）
+  if (meta.filePath) {
+    pushLog(`③ hash: 计算文件 hash "${meta.filePath}"`)
+    const hashResult = await computeFileHash(meta.filePath)
+    if (hashResult) {
+      pushLog(`③ hash: ${hashResult.hash}, size=${hashResult.size}`)
+      try {
+        const matchResp = await dandanRequest<{
+          isMatched: boolean
+          matches: Array<{ animeId: number; episodeId: number; animeTitle: string; episodeTitle: string; type: string }>
+        }>('/api/v2/match', 1, {
+          fileName: meta.fileName || meta.title || '',
+          fileHash: hashResult.hash,
+          fileSize: String(hashResult.size)
+        })
+        if (matchResp.isMatched && matchResp.matches && matchResp.matches.length > 0) {
+          const m = matchResp.matches[0]
+          pushLog(`③ hash 命中: animeId=${m.animeId}, episodeId=${m.episodeId}, title="${m.animeTitle} - ${m.episodeTitle}"`)
+          const entry = {
+            episodeId: m.episodeId, animeId: m.animeId, animeTitle: m.animeTitle,
+            episodeTitle: m.episodeTitle, source: 'dandanplay',
+            matchLevel: 'hash' as DanmakuMatchLevel, confidence: 1
+          }
+          writeCachedMatchV2(meta, entry)
+          return { success: true, data: { ...entry }, log: logs }
+        }
+        pushLog(`③ hash 未命中（API 返回 isMatched=false 或无 matches）`)
+      } catch (err) {
+        pushLog(`③ hash 请求失败: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    } else {
+      pushLog(`③ hash 计算失败，跳过`)
+    }
+  } else {
+    pushLog(`③ hash: 无本地文件路径，跳过`)
+  }
+
+  // 计算有效 season / episode（④元数据优先，缺失则⑤正则补充）
+  let season: number | null = meta.parentIndexNumber ?? null
+  let episode: number | null = meta.indexNumber ?? null
+  let searchName = meta.seriesName || ''
+
+  // ⑤ regex：元数据缺失时用文件名正则补充独立 season/episode
+  if ((episode == null || season == null || !searchName) && (meta.fileName || meta.title)) {
+    const parsed = parseSeasonEpisode(meta.fileName || meta.title || '')
+    pushLog(`⑤ regex 解析 "${meta.fileName || meta.title}": season=${parsed.season}, ep=${parsed.episode}, name="${parsed.animeName}"`)
+    if (season == null && parsed.season != null) season = parsed.season
+    if (episode == null && parsed.episode != null) episode = parsed.episode
+    if (!searchName && parsed.animeName) searchName = parsed.animeName
+  }
+
+  if (!searchName) {
+    pushLog(`❌ 无可用搜索名（seriesName/正则均未提取到）`)
+    return { success: false, error: '无可用搜索名', log: logs }
+  }
+
+  // ④ metadata：结构化元数据匹配（主力层）
+  pushLog(`④ metadata 搜索: anime="${searchName}", season=${season ?? '?'}, ep=${episode ?? '?'}`)
+  let searchResult: DanmakuSearchResponse
+  try {
+    searchResult = await dandanRequest<DanmakuSearchResponse>(
+      `/api/v2/search/episodes?anime=${encodeURIComponent(searchName)}`
+    )
+  } catch (err) {
+    pushLog(`❌ 搜索请求失败: ${err instanceof Error ? err.message : String(err)}`)
+    return { success: false, error: String(err), log: logs }
+  }
+
+  const animes = searchResult.animes || []
+  pushLog(`搜索返回 ${animes.length} 个番剧候选`)
+  if (animes.length === 0) {
+    // B站回退
+    pushLog(`未找到动漫，尝试 B站回退`)
+    const bl = await bilibiliAutoMatch(meta.title || searchName)
+    if (bl) {
+      pushLog(`B站回退命中: cid=${bl.cid}, title="${bl.animeTitle}"`)
+      const entry = { episodeId: bl.cid, animeTitle: bl.animeTitle, episodeTitle: bl.episodeTitle, source: 'bilibili', matchLevel: 'metadata' as DanmakuMatchLevel, confidence: 0.5 }
+      writeCachedMatchV2(meta, entry)
+      return { success: true, data: { ...entry }, log: logs }
+    }
+    return { success: false, error: '未找到匹配弹幕', log: logs }
+  }
+
+  // 对每个 anime 候选打分排序
+  const scored = animes.map((a) => {
+    const { score, seasonHint } = scoreAnimeCandidate(meta, a)
+    return { anime: a, score, seasonHint }
+  }).sort((x, y) => y.score - x.score)
+
+  for (const s of scored.slice(0, 8)) {
+    pushLog(`候选: animeId=${s.anime.animeId}, title="${s.anime.animeTitle}", score=${s.score.toFixed(2)}, seasonHint=${s.seasonHint ?? '?'}`)
+  }
+
+  const best = scored[0]
+  // 最高分过低 → 返回候选列表供手动选择（⑥ candidates）
+  if (!best || best.score < 0.4) {
+    pushLog(`⚠️ 最高分 ${best?.score.toFixed(2) ?? 'N/A'} < 0.4，返回候选列表供手动选择`)
+    const candidates: DanmakuMatchCandidate[] = []
+    for (const s of scored.slice(0, 10)) {
+      for (const ep of (s.anime.episodes || [])) {
+        candidates.push({
+          episodeId: ep.episodeId, animeId: s.anime.animeId, animeTitle: s.anime.animeTitle,
+          episodeTitle: ep.episodeTitle, source: ep.source || 'dandanplay', score: s.score, seasonHint: s.seasonHint ?? undefined
+        })
+      }
+    }
+    return { success: false, error: '低置信度，需手动选择', candidates: candidates.slice(0, 30), log: logs }
+  }
+
+  // 在最优 anime 的 episodes 中用集号定位（集号强校验，不强制回退第1集）
+  const episodes = best.anime.episodes || []
+  pushLog(`最优番剧: "${best.anime.animeTitle}" (${episodes.length} 集)，用 ep=${episode ?? '?'} 定位`)
+  let matchedEp: typeof episodes[0] | null = null
+  let confidence = best.score
+  if (episode != null && episodes.length > 0) {
+    const epIndex = episode - 1
+    if (epIndex >= 0 && epIndex < episodes.length) {
+      matchedEp = episodes[epIndex]
+      pushLog(`集号定位: ep#${episode} → "${matchedEp.episodeTitle}"`)
+    } else {
+      // 集号超出范围：按 episodeTitle 中的数字兜底匹配
+      pushLog(`⚠️ 集号 #${episode} 超出范围 (1-${episodes.length})，按 episodeTitle 数字匹配`)
+      const byTitle = episodes.find((e) => {
+        const m = e.episodeTitle.match(/(\d{1,3})/)
+        return m && +m[1] === episode
+      })
+      if (byTitle) {
+        matchedEp = byTitle
+        confidence = best.score * 0.9
+        pushLog(`按标题匹配: "${byTitle.episodeTitle}"`)
+      }
+    }
+  }
+
+  // 无集号或集号未命中 → 不强制回退第1集，返回候选列表供手动选择
+  if (!matchedEp) {
+    pushLog(`⚠️ 未能定位到具体集（episode=${episode ?? 'null'}），返回候选列表（不强制回退第1集）`)
+    const candidates: DanmakuMatchCandidate[] = []
+    for (const s of scored.slice(0, 10)) {
+      for (const ep of (s.anime.episodes || [])) {
+        candidates.push({
+          episodeId: ep.episodeId, animeId: s.anime.animeId, animeTitle: s.anime.animeTitle,
+          episodeTitle: ep.episodeTitle, source: ep.source || 'dandanplay', score: s.score, seasonHint: s.seasonHint ?? undefined
+        })
+      }
+    }
+    return { success: false, error: '未定位到集号，需手动选择', candidates: candidates.slice(0, 30), log: logs }
+  }
+
+  // 季号严格校验：元数据有 parentIndexNumber 且 best 推断季号不符 → 置信度减半
+  if (meta.parentIndexNumber != null && best.seasonHint != null && best.seasonHint !== meta.parentIndexNumber) {
+    confidence *= 0.5
+    pushLog(`⚠️ 季号不符 (meta=${meta.parentIndexNumber}, anime=${best.seasonHint})，置信度减半`)
+  }
+
+  const level: DanmakuMatchLevel = (meta.indexNumber == null && episode != null) ? 'regex' : 'metadata'
+  pushLog(`✅ 匹配完成: episodeId=${matchedEp.episodeId}, level=${level}, confidence=${confidence.toFixed(2)}`)
+
+  // 写结构化缓存（一集一条，Key 含 season+episode，杜绝串集）
+  writeCachedMatchV2(meta, {
+    episodeId: matchedEp.episodeId, animeId: best.anime.animeId, animeTitle: best.anime.animeTitle,
+    episodeTitle: matchedEp.episodeTitle, source: matchedEp.source || 'dandanplay',
+    matchLevel: level, confidence
+  })
+
+  const result: DanmakuMatchResultV2 = {
+    success: true,
+    data: {
+      episodeId: matchedEp.episodeId, animeId: best.anime.animeId, animeTitle: best.anime.animeTitle,
+      episodeTitle: matchedEp.episodeTitle, source: matchedEp.source || 'dandanplay',
+      matchLevel: level, confidence
+    },
+    log: logs
+  }
+
+  // 低置信度同时返回候选（UI 手动确认兜底）
+  if (confidence < 0.6) {
+    const candidates: DanmakuMatchCandidate[] = []
+    for (const s of scored.slice(0, 5)) {
+      for (const ep of (s.anime.episodes || [])) {
+        candidates.push({
+          episodeId: ep.episodeId, animeId: s.anime.animeId, animeTitle: s.anime.animeTitle,
+          episodeTitle: ep.episodeTitle, source: ep.source || 'dandanplay', score: s.score, seasonHint: s.seasonHint ?? undefined
+        })
+      }
+    }
+    result.candidates = candidates.slice(0, 20)
+    pushLog(`置信度 < 0.6，附带 ${result.candidates.length} 个候选供手动确认`)
+  }
+  return result
+}
+
+// ---------- IPC: 多级匹配 ----------
+ipcMain.handle('danmaku:match-episode', async (_event, meta: DanmakuMatchMeta): Promise<DanmakuMatchResultV2> => {
+  try {
+    // 查结构化匹配缓存（按 season+episode 隔离）
+    // 关键：有本地文件路径（hash-eligible）时，仅信任 hash/manual 级缓存；
+    // 弱结果（metadata/regex）缓存必须跳过，让 hash 分支有机会执行更精准匹配
+    const cached = getCachedMatchV2(meta)
+    if (cached) {
+      const isHashEligible = !!meta.filePath
+      const isHighConfidence = cached.matchLevel === 'hash' || cached.matchLevel === 'manual'
+      if (!isHashEligible || isHighConfidence) {
+        console.log(`[danmaku:match-episode] 命中结构化缓存: episodeId=${cached.episodeId}, level=${cached.matchLevel}`)
+        return {
+          success: true,
+          data: {
+            episodeId: cached.episodeId, animeId: cached.animeId, animeTitle: cached.animeTitle,
+            episodeTitle: cached.episodeTitle, source: cached.source, matchLevel: cached.matchLevel, confidence: cached.confidence
+          },
+          log: [`命中结构化匹配缓存 (episodeId=${cached.episodeId})`]
+        }
+      }
+      console.log(`[danmaku:match-episode] 跳过弱缓存(level=${cached.matchLevel})，有本地文件路径，优先尝试 hash 匹配`)
+    }
+    return await matchEpisodeEngine(meta)
+  } catch (err) {
+    console.error('[danmaku:match-episode] 致命错误:', err)
+    return { success: false, error: String(err) }
+  }
+})
+
+// ---------- IPC: 手动绑定弹幕源（持久化，下次直接复用精准ID） ----------
+ipcMain.handle('danmaku:bind-episode', async (_event, entry: DanmakuBindEntry) => {
+  setBoundEpisode(entry)
+  console.log(`[danmaku:bind-episode] 已绑定 ${entry.mediaSourceId}:${entry.itemId} → episodeId=${entry.episodeId} (${entry.source})`)
+  return { success: true }
+})
+
+// ---------- IPC: 清除手动绑定 ----------
+ipcMain.handle('danmaku:clear-bind', async (_event, mediaSourceId: string, itemId: string) => {
+  clearBoundEpisode(mediaSourceId, itemId)
+  console.log(`[danmaku:clear-bind] 已清除绑定 ${mediaSourceId}:${itemId}`)
+  return { success: true }
+})
+
+// ---------- IPC: 获取候选列表（强制重新匹配，不读缓存） ----------
+ipcMain.handle('danmaku:get-candidates', async (_event, meta: DanmakuMatchMeta): Promise<DanmakuMatchResultV2> => {
+  return await matchEpisodeEngine(meta)
+})
+
 // ==================== 文件操作 ====================
 
 // ==================== 自定义协议: douban-img (豆瓣图片反盗链) ====================
 
 const DOUBAN_IMG_CACHE = new Map<string, { buffer: Buffer; mime: string }>()
+const DOUBAN_IMG_CACHE_MAX = 50
 
 function registerDoubanImageProtocol(): void {
   protocol.handle('douban-img', (request) => {
@@ -2817,6 +3999,11 @@ function registerDoubanImageProtocol(): void {
         if (!res.ok) throw new Error('fetch failed')
         const buffer = Buffer.from(await res.arrayBuffer())
         const mime = res.headers.get('content-type') || 'image/jpeg'
+        // 写入前若已达上限，淘汰最旧条目，防止内存无限增长
+        if (DOUBAN_IMG_CACHE.size >= DOUBAN_IMG_CACHE_MAX && !DOUBAN_IMG_CACHE.has(url)) {
+          const oldestKey = DOUBAN_IMG_CACHE.keys().next().value
+          if (oldestKey !== undefined) DOUBAN_IMG_CACHE.delete(oldestKey)
+        }
         DOUBAN_IMG_CACHE.set(url, { buffer, mime })
         resolve(new Response(buffer, {
           status: 200,
@@ -2833,14 +4020,63 @@ function registerDoubanImageProtocol(): void {
 
 // ==================== 自定义协议: jellyfin-image ====================
 
+// 图片协议专用 fetch：手动处理重定向。net.fetch 自动跟随重定向时会把自定义请求头
+// （X-Emby-Token）原样带到重定向目标域，被控服务器可 302 到第三方域窃取令牌。
+// 策略：仅允许同源重定向一次，跨域 3xx 一律拒绝
+async function fetchImageWithToken(realUrl: string, headers: Record<string, string>): Promise<Response> {
+  const fetchOnce = (target: string): Promise<Response> =>
+    net.fetch(target, {
+      signal: AbortSignal.timeout(15000),
+      bypassCustomProtocolHandlers: true,
+      headers,
+      redirect: 'manual'
+    })
+
+  const first = await fetchOnce(realUrl)
+  if (first.status >= 300 && first.status < 400) {
+    const loc = first.headers.get('location')
+    if (!loc) throw new Error(`${first.status} redirect without location`)
+    const next = new URL(loc, realUrl)
+    if (next.origin !== new URL(realUrl).origin) {
+      throw new Error(`cross-origin redirect blocked: ${next.origin}`)
+    }
+    return await fetchOnce(next.toString())
+  }
+  return first
+}
+
 
 function registerJellyfinImageProtocol(): void {
   protocol.handle('jellyfin-image', async (request) => {
     try {
-      const url = new URL(request.url);
+      // URL 格式 jellyfin-image://https/host:port/path?api_key=xxx 或 jellyfin-image://http/...
+      // 与 emby-image 一致把真实 scheme 编码进 URL，避免 HTTPS 服务器被降级为明文 http
+      let realUrl = request.url
+        .replace(/^jellyfin-image:\/\/https\//, 'https://')
+        .replace(/^jellyfin-image:\/\/http\//, 'http://')
+        .replace(/^jellyfin-image:\/\//, 'https://');
+
+      const url = new URL(realUrl);
       const token = url.searchParams.get('api_key') || '';
       url.searchParams.delete('api_key');
-      const realUrl = 'http://' + url.host + url.pathname + url.search;
+      realUrl = url.toString();
+
+      // host 白名单：仅允许已配置的 Jellyfin 服务器主机，防止协议被滥用于任意内网探测
+      const allowedHosts = new Set(
+        getServers()
+          .map((s) => {
+            try {
+              return new URL(normalizeUrl(s.url)).host
+            } catch {
+              return null
+            }
+          })
+          .filter((h): h is string => !!h)
+      );
+      if (!allowedHosts.has(url.host)) {
+        console.warn(`[jellyfin-image] host 不在白名单: ${url.host}`);
+        return new Response('Forbidden', { status: 403 });
+      }
 
       const cacheKey = `jellyfin_${url.pathname}_${url.search}`;
       const cachedData = await posterCache.get(cacheKey);
@@ -2854,29 +4090,34 @@ function registerJellyfinImageProtocol(): void {
         });
       }
 
+      // token 通过请求头传递（X-Emby-Token 对 Jellyfin/Emby 均有效），避免 api_key 明文出现在代理/日志中
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['X-Emby-Token'] = token;
+      }
+
       try {
         await imageFetchLimiter.acquire();
-        const response = await net.fetch(realUrl, {
-          signal: AbortSignal.timeout(15000),
-          bypassCustomProtocolHandlers: true,
-        });
-        imageFetchLimiter.release();
+        try {
+          const response = await fetchImageWithToken(realUrl, headers);
 
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
+          if (!response.ok) {
+            throw new Error(`${response.status} ${response.statusText}`);
+          }
+
+          const buffer = Buffer.from(await response.arrayBuffer());
+          await posterCache.set(cacheKey, buffer, realUrl);
+
+          return new Response(buffer, {
+            headers: {
+              'Content-Type': response.headers.get('content-type') || 'image/png',
+              'Cache-Control': 'public, max-age=604800',
+            },
+          });
+        } finally {
+          imageFetchLimiter.release();
         }
-
-        const buffer = Buffer.from(await response.arrayBuffer());
-        await posterCache.set(cacheKey, buffer, realUrl);
-
-        return new Response(buffer, {
-          headers: {
-            'Content-Type': response.headers.get('content-type') || 'image/png',
-            'Cache-Control': 'public, max-age=604800',
-          },
-        });
       } catch (err) {
-        imageFetchLimiter.release();
         console.error(`[jellyfin-image] 请求失败: ${err}`);
         return new Response('Error loading image', { status: 500 });
       }
@@ -2894,15 +4135,34 @@ function registerJellyfinImageProtocol(): void {
 function registerEmbyImageProtocol(): void {
   protocol.handle('emby-image', async (request) => {
     try {
+      // 默认 scheme 对齐 jellyfin-image 为 https，避免 HTTPS 服务器被降级为明文 http
       let realUrl = request.url
         .replace(/^emby-image:\/\/https\//, 'https://')
         .replace(/^emby-image:\/\/http\//, 'http://')
-        .replace(/^emby-image:\/\//, 'http://');
+        .replace(/^emby-image:\/\//, 'https://');
 
       const urlObj = new URL(realUrl);
       const token = urlObj.searchParams.get('token') || '';
       urlObj.searchParams.delete('token');
       realUrl = urlObj.toString();
+
+      // host 白名单：与 jellyfin-image 一致，仅允许已配置服务器的 host，
+      // 防止协议被滥用于任意内网地址探测/SSRF
+      const allowedHosts = new Set(
+        getServers()
+          .map((s) => {
+            try {
+              return new URL(normalizeUrl(s.url)).host
+            } catch {
+              return null
+            }
+          })
+          .filter((h): h is string => !!h)
+      );
+      if (!allowedHosts.has(urlObj.host)) {
+        console.warn(`[emby-image] host 不在白名单: ${urlObj.host}`);
+        return new Response('Forbidden', { status: 403 });
+      }
 
       const cacheKey = `emby_${urlObj.pathname}_${urlObj.search}`;
       const cachedData = await posterCache.get(cacheKey);
@@ -2923,28 +4183,26 @@ function registerEmbyImageProtocol(): void {
 
       try {
         await imageFetchLimiter.acquire();
-        const response = await net.fetch(realUrl, {
-          signal: AbortSignal.timeout(15000),
-          bypassCustomProtocolHandlers: true,
-          headers,
-        });
-        imageFetchLimiter.release();
+        try {
+          const response = await fetchImageWithToken(realUrl, headers);
 
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
+          if (!response.ok) {
+            throw new Error(`${response.status} ${response.statusText}`);
+          }
+
+          const buffer = Buffer.from(await response.arrayBuffer());
+          await posterCache.set(cacheKey, buffer, realUrl);
+
+          return new Response(buffer, {
+            headers: {
+              'Content-Type': response.headers.get('content-type') || 'image/png',
+              'Cache-Control': 'public, max-age=604800',
+            },
+          });
+        } finally {
+          imageFetchLimiter.release();
         }
-
-        const buffer = Buffer.from(await response.arrayBuffer());
-        await posterCache.set(cacheKey, buffer, realUrl);
-
-        return new Response(buffer, {
-          headers: {
-            'Content-Type': response.headers.get('content-type') || 'image/png',
-            'Cache-Control': 'public, max-age=604800',
-          },
-        });
       } catch (err) {
-        imageFetchLimiter.release();
         console.error(`[emby-image] 请求失败: ${err}`);
         return new Response('Error loading image', { status: 500 });
       }
@@ -2973,6 +4231,9 @@ const MIME_MAP: Record<string, string> = {
 }
 
 function registerLocalFileProtocol(): void {
+  const { existsSync, createReadStream, realpathSync } = require('fs')
+  const path = require('path')
+  const userDataRoot = app.getPath('userData')
   protocol.handle('local-file', (request) => {
     const url = new URL(request.url)
     let filePath = decodeURIComponent(url.pathname)
@@ -2981,17 +4242,26 @@ function registerLocalFileProtocol(): void {
     } else if (process.platform === 'win32' && filePath.length > 1 && filePath[0] === '/') {
       filePath = filePath.slice(1)
     }
-    const ext = require('path').extname(filePath.toLowerCase()).toLowerCase()
+    // 安全限制：仅允许访问应用用户数据目录内的文件，防止任意本地文件读取
+    // L2: realpathSync 解析符号链接后校验，防止 userData 内链接绕过前缀检查
+    let realPath = path.resolve(filePath)
+    try {
+      realPath = realpathSync(realPath)
+    } catch { /* 不存在 → 下方 404 */ }
+    const withinUserData = realPath === userDataRoot || realPath.startsWith(userDataRoot + path.sep)
+    if (!withinUserData) {
+      return new Response('Forbidden', { status: 403 })
+    }
+    const ext = path.extname(realPath.toLowerCase())
     const mimeType = MIME_MAP[ext] || 'application/octet-stream'
 
     return new Promise((resolve) => {
       try {
-        const { existsSync, createReadStream } = require('fs')
-        if (!existsSync(filePath)) {
+        if (!existsSync(realPath)) {
           resolve(new Response('File not found', { status: 404 }))
           return
         }
-        const stream = createReadStream(filePath)
+        const stream = createReadStream(realPath)
         const responseStream = new ReadableStream({
           start(controller) {
             stream.on('data', (chunk: unknown) => controller.enqueue(chunk))
@@ -3043,9 +4313,40 @@ function createWindow(): void {
     mainWindow!.show()
   })
 
+  // 窗口关闭后清除引用，避免后续代码使用已销毁的窗口对象
+  mainWindow.on('closed', () => { mainWindow = null })
+
+  // 原生全屏状态 → 渲染端（UI 隐藏顶栏、ESC 退出等以此为准）；
+  // 透明窗口的 setFullScreen 是 SetBounds 模拟路径，不会隐藏任务栏，
+  // 全屏期间用 screen-saver 级置顶盖住任务栏，退出后还原应用自身置顶设置。
+  mainWindow.on('enter-full-screen', () => {
+    windowFullscreenState = true
+    mainWindow?.setAlwaysOnTop(true, 'screen-saver')
+    mainWindow?.webContents.send('window:fullscreen-changed', true)
+  })
+  mainWindow.on('leave-full-screen', () => {
+    windowFullscreenState = false
+    mainWindow?.setAlwaysOnTop(isAlwaysOnTop, 'screen-saver') // 还原应用自身的置顶设置
+    mainWindow?.webContents.send('window:fullscreen-changed', false)
+  })
+
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    try {
+      const u = new URL(details.url)
+      // 仅允许 http/https 交由系统处理，杜绝 file:/自定义协议等逃逸路径
+      if (u.protocol === 'https:' || u.protocol === 'http:') {
+        shell.openExternal(details.url)
+      }
+    } catch {
+      // 忽略无法解析的 URL
+    }
     return { action: 'deny' }
+  })
+
+  // L3: 显式拒绝所有权限请求（通知/剪贴板/媒体设备/地理位置等），纵深防御
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    console.warn('[permission] denied:', permission)
+    callback(false)
   })
 
   mainWindow.webContents.on('console-message', (_event, level, message) => {
@@ -3121,6 +4422,10 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 app.whenReady().then(() => {
+  // 最先初始化配置：safeStorage 检测 + 加载 config.json 必须在 app ready 后，
+  // 否则 Windows DPAPI 未就绪会导致凭据被误清空（服务器信息存不住）
+  initConfig()
+
   electronApp.setAppUserModelId('com.huanying.player')
 
   // 注册自定义协议
@@ -3164,6 +4469,9 @@ app.whenReady().then(() => {
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+}).catch((err) => {
+  console.error('whenReady failed:', err)
+  writeCrashLog('whenReady', err)
 })
 
 app.on('window-all-closed', () => {
@@ -3172,16 +4480,26 @@ app.on('window-all-closed', () => {
   }
 })
 
-// 全局异常捕获，写入日志文件
+// 全局异常捕获，写入日志文件（双击 start.bat 闪退时用于定位真实错误）
+function writeCrashLog(tag: string, err: unknown): void {
+  try {
+    const content = `[${new Date().toISOString()}] [${tag}]\n${err instanceof Error ? (err.stack || err.message) : String(err)}\n\n`
+    writeFileSync(join(process.cwd(), 'startup-crash.log'), content, { flag: 'a' })
+  } catch { /* ignore */ }
+}
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err)
+  writeCrashLog('uncaughtException', err)
 })
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled Rejection:', reason)
+  writeCrashLog('unhandledRejection', reason)
 })
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  // 同步强杀 mpv 子进程，避免退出后 mpv.exe 残留（--wid 子窗口一起销毁）
+  try { mpvController?.killSync() } catch { /* ignore */ }
 })
 
 

@@ -15,17 +15,20 @@ export function parseVTT(vtt: string): SubtitleCue[] {
     index++
   }
 
-  const timePattern = /^(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})/
+  const timePattern = /^((?:\d{1,2}:)?\d{2}:\d{2}[.,]\d{3})\s*-->\s*((?:\d{1,2}:)?\d{2}:\d{2}[.,]\d{3})/
 
   const parseTimestamp = (value: string): number => {
     const parts = value.split(':')
-    const seconds = parts[2].split(/[.,]/)
-    return (
-      parseInt(parts[0]) * 3600 +
-      parseInt(parts[1]) * 60 +
-      parseInt(seconds[0]) +
-      parseInt(seconds[1]) / 1000
-    )
+    const seconds = parts[parts.length - 1].split(/[.,]/)
+    const secondsNum = parseInt(seconds[0]) + parseInt(seconds[1]) / 1000
+    if (parts.length === 3) {
+      return (
+        parseInt(parts[0]) * 3600 +
+        parseInt(parts[1]) * 60 +
+        secondsNum
+      )
+    }
+    return parseInt(parts[0]) * 60 + secondsNum
   }
 
   while (index < lines.length) {

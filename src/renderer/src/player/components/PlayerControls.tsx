@@ -1,6 +1,8 @@
 import type { MouseEvent, ReactElement } from 'react'
 import { ChevronLeft, ChevronRight, Gauge, List, Volume1, Volume2, VolumeX } from 'lucide-react'
 import { formatTime } from '../utils'
+import type { DanmakuComment } from '../../../../shared/types'
+import { DanmakuHeatmap } from './DanmakuHeatmap'
 
 interface PlayerControlsProps {
   visible: boolean
@@ -18,6 +20,7 @@ interface PlayerControlsProps {
   activeSubtitleIndex: number
   danmakuEnabled: boolean
   danmakuOffset: number
+  danmakuComments: DanmakuComment[]
   pipActive: boolean
   subtitleSettingsOpen: boolean
   onMouseMove: () => void
@@ -56,6 +59,7 @@ export function PlayerControls({
   activeSubtitleIndex,
   danmakuEnabled,
   danmakuOffset,
+  danmakuComments,
   pipActive,
   subtitleSettingsOpen,
   onMouseMove,
@@ -83,6 +87,7 @@ export function PlayerControls({
   /* ==================== 进度条组件（复用） ==================== */
   const progressBar = (
     <div className={`flex items-center cursor-pointer group relative ${isPortrait ? 'w-full h-5' : 'flex-1 h-6'}`} onClick={onSeek}>
+      <DanmakuHeatmap comments={danmakuComments} duration={duration} visible={danmakuEnabled} />
       <div className="absolute left-0 right-0 h-[2px] bg-white/5 rounded-full group-hover:h-[4px] transition-all">
         <div className="h-full bg-white/10 rounded-full" style={{ width: `${bufferedPercent}%` }} />
         <div className="h-full bg-[#8b82f6] rounded-full absolute top-0 left-0" style={{ width: `${progressPercent}%` }} />

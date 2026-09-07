@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react'
 import { X } from 'lucide-react'
-import type { DanmakuSearchResult } from '../../../../../shared/types'
+import type { DanmakuSearchResult } from '../../../../shared/types'
 import type { PlayerContextMenuState } from '../types'
 import { formatTime } from '../utils'
 

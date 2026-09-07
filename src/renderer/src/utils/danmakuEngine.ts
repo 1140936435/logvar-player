@@ -202,8 +202,10 @@ export class DanmakuEngine {
       })
       .sort((a, b) => a.time - b.time)
 
-    this.allComments = engineComments
+    // 修复串集：先 clear（清空旧 allComments + runningList），再赋值新弹幕
+    // 旧顺序是先赋值再 clear，clear 不清 allComments，导致切集后新弹幕加载失败时旧弹幕残留
     this.clear()
+    this.allComments = engineComments
     this.position = 0
   }
 
@@ -217,6 +219,9 @@ export class DanmakuEngine {
     this.trackAllocator.clear()
     this.position = 0
     this.paused = true
+    // 修复串集：清空 allComments，切集时（Player 调 clear）旧弹幕不残留。
+    // loadComments 先 clear 再赋值，不会误清新数据。
+    this.allComments = []
     if (this.ctx) {
       this.ctx.clearRect(0, 0, this.cssWidth, this.cssHeight)
     }
@@ -288,13 +293,16 @@ export class DanmakuEngine {
     const ct = videoTime - this.timeOffset
     const pbr = playbackRate || 1
 
-    // 修复 Task 2: 在 engine 层统一计算 effectiveDuration（除以 playbackRate）
-    // trackAllocator 直接使用此值，不再二次除法，避免重复计算
-    // - 滚动弹幕（ltr/rtl）：scrollDuration / pbr（倍速时滚动更快）
+    // 修复 U-S1: allocate 不再除以 playbackRate。
+    // 渲染层使用 videoTime 时间轴（elapsedVideo = ct - startVideoTime），
+    // videoTime 已随倍速前进，再除以 playbackRate 会双重计算，
+    // 导致轨道过早释放、新弹幕撞上尚未离屏的旧弹幕。
+    // - 滚动弹幕（ltr/rtl）：scrollDuration（与渲染层 scrollDur 一致）
     // - 固定弹幕（top/bottom）：stillDuration（按视频时间计时，不受倍速影响）
+    void pbr
     const effectiveDuration = cmt.mode === 'top' || cmt.mode === 'bottom'
       ? this.stillDuration
-      : this.scrollDuration / pbr
+      : this.scrollDuration
 
     // 性能优化：使用缓存的边界像素值，避免每帧重复计算
     const topBoundary = this.topBoundaryPx
@@ -454,9 +462,13 @@ export class DanmakuEngine {
     resetSpace(this.space)
     this.trackAllocator.clear()
     if (!this.ctx) return
+    // 修复 M4: 与 update() 的 ct = videoTime - timeOffset 保持同一时钟，
+    // 用偏移后的时间做二分定位。否则正偏移时 position 会越过
+    // (ct, time] 区间的弹幕，导致 seek 后该窗口内弹幕丢失。
+    const ct = time - this.timeOffset
     // 修复 BUG-3: seek 后用二分查找重定位 position，避免跳过大量弹幕
-    this.position = binsearch(this.allComments, 'time', time)
-    console.log(`[DanmakuEngine:seek] position 重定位到 ${this.position}, time=${time}`)
+    this.position = binsearch(this.allComments, 'time', ct)
+    console.log(`[DanmakuEngine:seek] position 重定位到 ${this.position}, videoTime=${time}, ct=${ct}`)
   }
 
   play(): void {

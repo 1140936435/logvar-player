@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>mpv canvas e2e v3 - transparent window</title></head>
+<body style="margin:0;background:rgba(0,0,0,0)">
+<canvas id="c" style="position:absolute;left:0;top:0;width:400px;height:280px"></canvas>
+<script>
+// v3: 透明窗口 + rAF 循环（与 MpvCanvasView 逐行对齐）+ capturePage 验证合成
+const params = new URLSearchParams(location.search)
+const VIDEO = params.get('video') || ''
+const log = (m) => console.log('[e2e] ' + m)
+const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+
+async function main() {
+  log('测试文件: ' + VIDEO)
+  window.api.mpvRender.setTargetSize(400, 280)
+  const playRes = await window.api.mpvRender.play(VIDEO, { hardwareDecode: true })
+  log('play=' + JSON.stringify(playRes))
+  if (!playRes.success) { log('play 失败，结束'); console.log('E2E_DONE'); return }
+
+  // ---- WebGL 初始化（与 MpvCanvasView 相同）----
+  const canvas = document.getElementById('c')
+  const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, powerPreference: 'low-power', preserveDrawingBuffer: false })
+  if (!gl) { log('WebGL2 不可用'); console.log('E2E_DONE'); return }
+  const vsSrc = `#version 300 es
+layout(location=0) in vec2 aPos;
+out vec2 vUv;
+void main() { vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`
+  const fsSrc = `#version 300 es
+precision mediump float;
+uniform sampler2D uTex;
+in vec2 vUv;
+out vec4 outColor;
+void main() { outColor = vec4(texture(uTex, vUv).rgb, 1.0); }`
+  const mk = (t, s) => { const sh = gl.createShader(t); gl.shaderSource(sh, s); gl.compileShader(sh); if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) { log('shader err: ' + gl.getShaderInfoLog(sh)); return null } return sh }
+  const vs = mk(gl.VERTEX_SHADER, vsSrc), fs = mk(gl.FRAGMENT_SHADER, fsSrc)
+  const prog = gl.createProgram()
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog)
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { log('link err'); console.log('E2E_DONE'); return }
+  gl.useProgram(prog)
+  const vao = gl.createVertexArray(); gl.bindVertexArray(vao)
+  const vbo = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW)
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
+  const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
+  canvas.width = 400; canvas.height = 280
+  gl.viewport(0, 0, 400, 280)
+  gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT)
+
+  // ---- rAF 拉帧循环（与 MpvCanvasView 相同的节拍）----
+  let disposed = false
+  let raf = 0
+  let lastSeq = -1
+  let texW = 0, texH = 0
+  let frameCount = 0
+  let loopError = null
+  const t0 = Date.now()
+  const loop = async () => {
+    if (disposed) return
+    try {
+      const frame = await window.api.mpvRender.getFrame(lastSeq)
+      if (frame && frame.buffer && frame.width > 0) {
+        lastSeq = frame.seq
+        const pixels = frame.buffer instanceof Uint8Array ? frame.buffer : new Uint8Array(frame.buffer)
+        if (frame.width !== texW || frame.height !== texH) {
+          texW = frame.width; texH = frame.height
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, texW, texH, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+        } else {
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, texW, texH, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+        }
+        gl.drawArrays(gl.TRIANGLES, 0, 3)
+        frameCount++
+      }
+    } catch (e) { if (!loopError) loopError = e.message }
+    raf = requestAnimationFrame(() => { void loop() })
+  }
+  raf = requestAnimationFrame(() => { void loop() })
+
+  // 跑 5 秒后请求主进程截图验证合成
+  await sleep(5000)
+  log(`5s 内绘制帧数=${frameCount}（rAF 循环${frameCount > 0 ? '正常' : '未运行！'}）${loopError ? ' 循环异常: ' + loopError : ''}`)
+  log('请求 capturePage 验证透明窗口合成... CAPTURE_NOW')
+  await sleep(1500)
+  disposed = true
+  cancelAnimationFrame(raf)
+  await window.api.mpvRender.stop().catch(() => {})
+  await window.api.mpvRender.destroy().catch(() => {})
+  console.log('E2E_DONE')
+}
+main().catch(e => { console.log('[e2e] 未捕获异常: ' + e.message); console.log('E2E_DONE') })
+</script>
+</body>
+</html>

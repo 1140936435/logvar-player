@@ -20,6 +20,16 @@ files:
   - "!dist*/**"
   - "!assets/icon/**"
   - "!scripts/**"
+  # M9: 打包卫生 —— 防止开发环境杂项被打进 asar
+  - "!.venv/**"
+  - "!.workbuddy/**"
+  - "!.eb-cache/**"
+  - "!.backup_*"
+  - "!.trae-cn/**"
+  - "!deliverables/**"
+  - "!*.log"
+  - "!*.md"
+  - "!*[0-9]"
 asarUnpack:
   - out/tools/**
 extraResources:
@@ -34,6 +44,17 @@ extraResources:
       - "icon-16.png"
       - "icon.png"
       - "icon.ico"
+  # mpv 播放引擎运行时（主进程 spawn resources/mpv/mpv.exe）
+  - from: resources/mpv
+    to: mpv
+    filter:
+      - "mpv.exe"
+      - "d3dcompiler_43.dll"
+  # libmpv 画布渲染引擎（方案 C：preload 经 koffi 加载 libmpv-2.dll）
+  - from: mpv
+    to: mpv
+    filter:
+      - "libmpv-2.dll"
 win:
   executableName: 环影
   icon: build/icon.ico

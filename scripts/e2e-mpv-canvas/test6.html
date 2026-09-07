@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>mpv canvas e2e v6 - http stream</title></head>
+<body style="margin:0;background:#000">
+<script>
+// v6: libmpv 渲染进程内播放【HTTP 网络流】验证
+const log = (m) => console.log('[e2e] ' + m)
+const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+const URL_ = 'http://127.0.0.1:18923/video.mp4'
+
+async function main() {
+  log('=== v6: HTTP 网络流 ===')
+  window.api.mpvRender.onEvent((event, data) => {
+    log(`[event] ${event}` + (data !== undefined ? ` data=${String(data).slice(0, 200)}` : ''))
+  })
+  window.api.mpvRender.setTargetSize(400, 280)
+  const playRes = await window.api.mpvRender.play(URL_, { hardwareDecode: true })
+  log('play=' + JSON.stringify(playRes))
+  if (!playRes.success) { console.log('E2E_DONE'); return }
+
+  let firstFrame = null
+  let lastSeq = -1
+  let updates = 0
+  const t0 = Date.now()
+  while (Date.now() - t0 < 20000) {
+    try {
+      const f = await window.api.mpvRender.getFrame(lastSeq)
+      if (f && f.seq !== lastSeq) {
+        if (!firstFrame) {
+          firstFrame = f
+          log(`首帧到达 耗时=${Date.now() - t0}ms seq=${f.seq} w=${f.width} h=${f.height}`)
+        }
+        lastSeq = f.seq
+        updates++
+      }
+    } catch (e) { log('getFrame 异常: ' + (e && e.message)); break }
+    await sleep(120)
+  }
+  if (!firstFrame) {
+    log('★ 20s 内没有任何帧（seq 未推进）→ 复现真实应用黑屏！')
+  } else {
+    const px = firstFrame.buffer instanceof Uint8Array ? firstFrame.buffer : new Uint8Array(firstFrame.buffer)
+    let nonZero = 0
+    for (let i = 0; i < px.length; i += 997) if (px[i] !== 0 || px[i + 2] !== 0) nonZero++
+    log(`首帧抽样非零=${nonZero} 20s内更新${updates}次` + (nonZero === 0 ? ' ★ 帧全黑！' : '（帧数据正常）'))
+  }
+  await window.api.mpvRender.stop().catch(() => {})
+  await window.api.mpvRender.destroy().catch(() => {})
+  window.api.mpvRender.offEvent()
+  console.log('E2E_DONE')
+}
+main().catch(e => { console.log('[e2e] 未捕获异常: ' + e.message); console.log('E2E_DONE') })
+</script>
+</body>
+</html>

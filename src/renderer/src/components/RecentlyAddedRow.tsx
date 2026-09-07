@@ -6,7 +6,7 @@
 import { useRef, useState, useEffect, useCallback, memo, type ReactElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronLeft, ChevronRight, Sparkles, Film, TvMinimal } from 'lucide-react'
-import type { RecentlyAddedItem } from '../../../../shared/types'
+import type { RecentlyAddedItem } from '../../../shared/types'
 import { formatAddedTimeAgo } from '../utils/recentlyAdded'
 import { LazyImage } from './LazyImage'
 import { getPosterUrl as buildPosterUrl, getOptimalPosterHeight } from '../utils/posterUrl'

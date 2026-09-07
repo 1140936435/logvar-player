@@ -17,5 +17,5 @@
     "types": ["electron-vite/node"]
   },
   // 修复点 1.11: 把 shared 目录加进 include，main/preload 才能正确看到 types.ts/preload-types.ts/typed-values.ts
-  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*", "electron.vite.config.ts"]
+  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*", "electron.vite.config.cts"]
 }

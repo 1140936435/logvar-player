@@ -20,16 +20,16 @@ module.exports = defineConfig({
       {
         name: 'copy-assets',
         closeBundle() {
-          const copy = (src, dest) => {
+          const copy = (src: string, dest: string) => {
             const d = resolve(__dirname, dest)
             const dd = resolve(d, '..')
             if (!existsSync(dd)) mkdirSync(dd, { recursive: true })
             if (existsSync(src)) {
               try {
                 copyFileSync(src, d)
-              } catch (e) {
+              } catch (e: unknown) {
                 // 沙箱/杀软等导致文件无法覆盖时，只要目标位置不是首次创建就跳过
-                console.warn(`[copy-assets] 无法复制 ${src} -> ${dest}: ${e.message}`)
+                console.warn(`[copy-assets] 无法复制 ${src} -> ${dest}: ${(e as Error).message}`)
               }
             }
           }
@@ -64,7 +64,7 @@ module.exports = defineConfig({
       emptyOutDir: false,
       rollupOptions: {
         output: {
-          manualChunks(id) {
+          manualChunks(id: string) {
             if (id.includes('node_modules/framer-motion')) return 'vendor-fm'
             if (id.includes('node_modules/lucide-react')) return 'vendor-icons'
             if (id.includes('node_modules/react-router')) return 'vendor-router'

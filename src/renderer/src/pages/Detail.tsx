@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, type ReactElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   ArrowLeft, Play, Loader2, Star, Clock, Film, Tv,
-  ChevronRight, Users, Info, ExternalLink, Download, Check
+  ChevronRight, Users, Info, ExternalLink, Download
 } from 'lucide-react'
 import { cachedFetch } from '../utils/apiCache'
 import { formatDurationChinese } from '../utils/time'
@@ -89,8 +89,6 @@ function Detail(): ReactElement {
   const [selectedSeason, setSelectedSeason] = useState<string>('')
   const [episodesLoading, setEpisodesLoading] = useState(false)
   const [expandedEpisode, setExpandedEpisode] = useState<string | null>(null)
-  // 弹幕预下载状态: episodeId → 'idle' | 'loading' | 'done' | 'error'
-  const [danmakuDownloading, setDanmakuDownloading] = useState<Record<string, string>>({})
 
   const [baseUrl, setBaseUrl] = useState('http://localhost:8096')
   const [jellyfinToken, setJellyfinToken] = useState('')
@@ -249,30 +247,6 @@ function Detail(): ReactElement {
     navigate(`/player?itemId=${encodeURIComponent(targetId)}&name=${encodeURIComponent(targetName)}&base=${encodeURIComponent(serverUrl)}&seriesName=${encodeURIComponent(seriesName)}&seriesId=${encodeURIComponent(seriesId)}&seasonId=${encodeURIComponent(seasonId)}`)
   }
 
-  // 预下载弹幕
-  const handleDownloadDanmaku = async (ep: EpisodeInfo, e: React.MouseEvent): Promise<void> => {
-    e.stopPropagation()
-    const epId = ep.Id
-    const seriesName = detail?.SeriesName || detail?.Name || ''
-    const epName = ep.Name || ''
-    const epNum = ep.IndexNumber || 0
-    const matchTitle = seriesName
-      ? `${seriesName} EP${String(epNum).padStart(2, '0')} ${epName}`
-      : `EP${String(epNum).padStart(2, '0')} ${epName}`
-
-    setDanmakuDownloading(prev => ({ ...prev, [epId]: 'loading' }))
-    try {
-      const result = await window.api.danmaku.downloadDanmaku(matchTitle)
-      if (result.success) {
-        setDanmakuDownloading(prev => ({ ...prev, [epId]: 'done' }))
-      } else {
-        setDanmakuDownloading(prev => ({ ...prev, [epId]: 'error' }))
-      }
-    } catch {
-      setDanmakuDownloading(prev => ({ ...prev, [epId]: 'error' }))
-    }
-  }
-
   const getPosterUrl = (): string | null => {
     if (itemId && localPosters[itemId]) {
       let urlPath = localPosters[itemId].replace(/\\/g, '/')
@@ -290,7 +264,7 @@ function Detail(): ReactElement {
     }
 
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
-    const imgBase = baseUrl.replace(/^https?:\/\//, 'jellyfin-image://')
+    const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
     return `${imgBase}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90${authParam}`
   }
 
@@ -306,7 +280,7 @@ function Detail(): ReactElement {
     }
 
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
-    const imgBase = baseUrl.replace(/^https?:\/\//, 'jellyfin-image://')
+    const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
     return `${imgBase}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85${authParam}`
   }
 
@@ -331,7 +305,7 @@ function Detail(): ReactElement {
     }
 
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
-    const imgBase = baseUrl.replace(/^https?:\/\//, 'jellyfin-image://')
+    const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
     if (person.Id) {
       return tag
         ? `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100&tag=${tag}${authParam}`
@@ -354,7 +328,7 @@ function Detail(): ReactElement {
     }
 
     const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
-    const imgBase = baseUrl.replace(/^https?:\/\//, 'jellyfin-image://')
+    const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
     return `${imgBase}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85${authParam}`
   }
 
@@ -694,31 +668,6 @@ function Detail(): ReactElement {
                         title="播放"
                       >
                         <Play size={13} fill="white" className="text-white ml-0.5" />
-                      </motion.button>
-
-                      {/* 下载弹幕按钮 */}
-                      <motion.button
-                        onClick={(e) => handleDownloadDanmaku(ep, e)}
-                        disabled={danmakuDownloading[ep.Id] === 'loading'}
-                        className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all ${
-                          danmakuDownloading[ep.Id] === 'done'
-                            ? 'bg-[var(--success)]/20 text-[var(--success)]'
-                            : danmakuDownloading[ep.Id] === 'error'
-                            ? 'bg-[var(--danger)]/20 text-[var(--danger)]'
-                            : danmakuDownloading[ep.Id] === 'loading'
-                            ? 'bg-[var(--accent-bg)]/30 text-[var(--accent)] animate-pulse'
-                            : 'bg-[var(--bg-input)] text-[var(--text-tertiary)] hover:text-[var(--accent)] hover:bg-[var(--accent-bg)]/30'
-                        }`}
-                        whileTap={{ scale: 0.9 }}
-                        title={danmakuDownloading[ep.Id] === 'done' ? '弹幕已下载' : danmakuDownloading[ep.Id] === 'error' ? '下载失败，点击重试' : danmakuDownloading[ep.Id] === 'loading' ? '下载中...' : '预下载弹幕'}
-                      >
-                        {danmakuDownloading[ep.Id] === 'done' ? (
-                          <Check size={13} />
-                        ) : danmakuDownloading[ep.Id] === 'loading' ? (
-                          <Loader2 size={13} className="animate-spin" />
-                        ) : (
-                          <Download size={13} />
-                        )}
                       </motion.button>
                     </div>
 

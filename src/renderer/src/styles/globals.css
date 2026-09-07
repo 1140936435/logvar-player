@@ -138,6 +138,24 @@ html {
 
 }
 
+/* ── 应用外壳（原 App.tsx 内联背景迁移至此，便于 mpv 打孔模式覆盖） ── */
+.app-shell {
+  background: var(--bg-page);
+}
+
+/* ── mpv 打孔模式 ──
+   mpv 渲染到主窗口身后的原生窗口；播放激活时 #root 与 .app-shell 切透明，
+   视频区域透出 mpv 画面，HTML 控件/弹幕 canvas 自然悬浮其上 */
+#root.mpv-hole,
+.app-shell.mpv-hole {
+  background: transparent;
+}
+
+/* ── 播放页窗口级全屏：隐藏顶栏，主内容占满窗口（透明度保持，打孔自动对齐） ── */
+body.app-fullscreen .app-shell > header {
+  display: none;
+}
+
 /* ── 毛玻璃工具类 ── */
 
 @supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {

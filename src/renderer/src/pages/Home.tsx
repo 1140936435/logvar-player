@@ -18,6 +18,9 @@ import {
   saveRecentlyAddedConfig
 } from '../utils/recentlyAdded'
 import type { RecentlyAddedItem } from '../../../shared/types'
+import type { JellyfinItem } from '../../../shared/types'
+import { RecommendedRow } from '../components/RecommendedRow'
+import { useRecommendation } from '../hooks/useRecommendation'
 
 /* ==================== 类型 ==================== */
 
@@ -157,6 +160,70 @@ function Home(): ReactElement {
 
   const [historyItems, setHistoryItems] = useState<PlayHistoryItem[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
+
+  // 推荐模块：获取影片详情（复用现有API）
+  const getItemDetail = useCallback(async (itemId: string): Promise<JellyfinItem | null> => {
+    try {
+      const result = await cachedFetch(
+        'recommendation:getDetail',
+        [itemId],
+        () => window.api.jellyfin.getItemDetails(itemId),
+        30 * 60 * 1000 // 30分钟缓存
+      )
+      return result.data || null
+    } catch {
+      return null
+    }
+  }, [])
+
+  // 推荐模块：获取全部库项目（用于候选集）
+  const getAllLibraryItems = useCallback(async (): Promise<JellyfinItem[]> => {
+    try {
+      const libraries = await window.api.jellyfin.getLibraries()
+      const allItems: JellyfinItem[] = []
+
+      for (const lib of libraries.data?.Items ?? []) {
+        // M8: 按 TotalRecordCount 翻页拉全量，单库 >500 条不再被截断
+        const pageSize = 500
+        let startIndex = 0
+        let total = Infinity
+        while (startIndex < total) {
+          const result = await cachedFetch(
+            'recommendation:getAllItems',
+            [lib.Id, startIndex],
+            () => window.api.jellyfin.getItems(lib.Id, startIndex, pageSize),
+            60 * 60 * 1000 // 1小时缓存
+          )
+          const items = result.data?.Items ?? []
+          allItems.push(...items)
+          total = typeof result.data?.TotalRecordCount === 'number' && result.data.TotalRecordCount > 0
+            ? result.data.TotalRecordCount
+            : startIndex + items.length
+          if (items.length === 0) break // 防御：异常响应避免死循环
+          startIndex += pageSize
+        }
+      }
+
+      return allItems
+    } catch {
+      return []
+    }
+  }, [])
+
+  // 初始化推荐模块
+  const {
+    recommendations,
+    hasMore,
+    isLoading: recommendationLoading,
+    isColdStart,
+    loadMore: loadMoreRecommendations,
+    refresh: refreshRecommendations,
+    addDislike
+  } = useRecommendation(
+    historyItems,
+    getItemDetail,
+    getAllLibraryItems
+  )
 
   // 最近入库
   const [recentlyAddedItems, setRecentlyAddedItems] = useState<RecentlyAddedItem[]>([])
@@ -458,14 +525,14 @@ function Home(): ReactElement {
     }
   }, [connectedServer, navigate])
 
-  // 保存滚动位置
+  // 保存滚动位置（真正的防抖：每次调用先清除上一次的定时器，避免滚动时堆积大量写盘）
+  const scrollSaveTimerRef = useRef<number | undefined>(undefined)
   const handleScrollPositionChange = useCallback((position: number): void => {
     setRecentlyAddedScrollPos(position)
-    // 防抖保存
-    const timer = window.setTimeout(() => {
+    if (scrollSaveTimerRef.current !== undefined) window.clearTimeout(scrollSaveTimerRef.current)
+    scrollSaveTimerRef.current = window.setTimeout(() => {
       saveRecentlyAddedConfig({ scrollPosition: position }).catch(() => {})
     }, 500)
-    return () => window.clearTimeout(timer)
   }, [])
 
   const loadMoreLoadingRef = useRef<Record<string, boolean>>({})
@@ -530,6 +597,8 @@ function Home(): ReactElement {
         // 清除 API 内存缓存
         clearCache('jellyfin.')
         clearCache('emby.')
+        // M7: 推荐缓存按服务器隔离缺失，切服务器后旧条目海报 404，一并清除
+        clearCache('recommendation:')
         // 重置分类和搜索状态
         setActiveLibrary('')
         setIsSearching(false)
@@ -541,6 +610,8 @@ function Home(): ReactElement {
         await loadMediaData()
         await loadHistory()
         await loadRecentlyAdded()
+        // M7: 强制重建推荐（generatedRef 仍为 true 时不会自动重算）
+        await refreshRecommendations()
       } else {
         setErrorMsg(result.error || '切换服务器失败')
         console.error('[Home] 切换服务器失败:', result.error)
@@ -550,7 +621,7 @@ function Home(): ReactElement {
       console.error('[Home] 切换服务器异常:', err)
     }
     setSwitchingServer(false)
-  }, [homeStore, loadServers, loadMediaData, loadHistory, loadRecentlyAdded])
+  }, [homeStore, loadServers, loadMediaData, loadHistory, loadRecentlyAdded, refreshRecommendations])
 
   useEffect(() => {
     loadServers()
@@ -666,6 +737,35 @@ function Home(): ReactElement {
       setHistoryItems([])
     } catch { /* ignore */ }
   }
+
+  // 推荐模块：点击推荐项
+  const handleRecommendationClick = useCallback((item: { itemId: string; name: string; type: string }): void => {
+    if (item.type === 'Series' || item.type === 'Movie') {
+      navigate(`/detail/${item.itemId}`)
+    } else {
+      navigate(`/player?itemId=${encodeURIComponent(item.itemId)}&name=${encodeURIComponent(item.name)}&base=${encodeURIComponent(connectedServer)}`)
+    }
+  }, [navigate, connectedServer])
+
+  // 推荐模块：不感兴趣处理
+  const handleRecommendationDislike = useCallback((
+    item: { itemId: string; genres?: string[] },
+    reason: string
+  ): void => {
+    if (reason.startsWith('genre:') && item.genres) {
+      const genre = reason.split(':')[1]
+      addDislike(item.itemId, 'genre', genre)
+    } else if (reason === '不感兴趣') {
+      // 随机选择一个题材
+      if (item.genres && item.genres.length > 0) {
+        addDislike(item.itemId, 'genre', item.genres[0])
+      } else {
+        addDislike(item.itemId, 'item', item.itemId)
+      }
+    } else {
+      addDislike(item.itemId, 'item', item.itemId)
+    }
+  }, [addDislike])
 
   const handleItemClick = useCallback((item: MediaItem): void => {
     // 电视剧和电影直接进详情页
@@ -1241,6 +1341,23 @@ function Home(): ReactElement {
               doubanPosters={doubanPosters}
             />
           )
+        )}
+
+        {/* 智能推荐 */}
+        {!isSearching && !activeLibrary && drillStack.length === 0 && (
+          <RecommendedRow
+            items={recommendations}
+            hasMore={hasMore}
+            isLoading={recommendationLoading}
+            isColdStart={isColdStart}
+            serverType={serverType}
+            jellyfinToken={jellyfinToken}
+            connectedServer={connectedServer}
+            onItemClick={(item) => handleRecommendationClick(item)}
+            onLoadMore={loadMoreRecommendations}
+            onAddDislike={handleRecommendationDislike}
+            onRefresh={refreshRecommendations}
+          />
         )}
 
         {/* Drill-down 加载中 */}

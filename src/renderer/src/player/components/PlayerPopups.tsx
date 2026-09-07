@@ -1,7 +1,7 @@
 import type { ReactElement } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { X } from 'lucide-react'
-import type { JellyfinItem } from '../../../../../shared/types'
+import type { JellyfinItem } from '../../../../shared/types'
 import type { FolderVideo, SubtitleTrack } from '../types'
 
 interface PlayerPopupsProps {

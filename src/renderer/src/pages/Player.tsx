@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect, useCallback, type ReactElement } from 'react'
 // 修复点 1.15: pages 目录下深一层，从 ../../ → ../../../shared/types
-import type { DanmakuComment, DanmakuSearchResult, DanmakuSearchResponse, JellyfinItem } from '../../../shared/types'
+import type { DanmakuComment, DanmakuSearchResult, DanmakuSearchResponse, JellyfinItem, DanmakuMatchMeta, DanmakuMatchCandidate } from '../../../shared/types'
 import { useSearchParams, useNavigate, Link } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { cachedFetch } from '../utils/apiCache'
@@ -25,7 +25,11 @@ import {
   SubtitleSettingsPanel,
   PlayerPopups,
   PlayerControls
-} from '../features/player'
+} from '../player'
+import MpvCanvasView from '../player/components/MpvCanvasView'
+
+/** 播放引擎：html5=内置 <video>；mpv=打孔嵌入（旧架构）；mpv-canvas=libmpv 画布渲染（方案 C） */
+type EngineMode = 'html5' | 'mpv' | 'mpv-canvas'
 
 // ==================== Player ====================
 
@@ -41,6 +45,14 @@ function Player(): ReactElement {
   const seasonId = searchParams.get('seasonId') || ''
 
   const [jellyfinToken, setJellyfinToken] = useState('')
+  // 修复 R-S4: jellyfinTokenRef 镜像最新 token，供 savePlayHistory 闭包读取，
+  // 避免 callback 依赖捕获初始空 token（deps 未含 jellyfinToken 导致历史永久无 authParam）
+  const jellyfinTokenRef = useRef(jellyfinToken)
+  jellyfinTokenRef.current = jellyfinToken
+  // M4: itemId 镜像 ref —— 手动选择弹幕（ignoreEpoch）在 await 返回后用它判断
+  // 是否已切集，防止旧集选择结果污染新集
+  const itemIdRef = useRef(itemId)
+  itemIdRef.current = itemId
 
   // 修复点 1.13: videoLoadKey 必须在引用它的"视频 src useEffect"（约 L586）之前声明，
   // 避免 const 声明的 TDZ（Temporal Dead Zone）导致 "Block-scoped variable used before its declaration"
@@ -50,9 +62,50 @@ function Player(): ReactElement {
   const [episodeList, setEpisodeList] = useState<JellyfinItem[]>([])
   const [currentEpisodeIndex, setCurrentEpisodeIndex] = useState(-1)
   const [episodePopup, setEpisodePopup] = useState(false)
+  // 修复 R-S3: 标记剧集拉取是否完成（含电影/本地文件无剧集场景），
+  // 否则电影（无 seriesId/episodeList）永远命中 danmaku effect 的早退条件，弹幕无法加载
+  const [episodeFetchDone, setEpisodeFetchDone] = useState(false)
   
   // 本地文件夹视频列表
   const [folderVideos, setFolderVideos] = useState<FolderVideo[]>([])
+
+  // ===== 播放引擎与共享状态（必须在引用它们的 useEffect 之前声明，避免 TDZ）=====
+  const [playerState, playerActions] = usePlayerStore()
+  const { currentTime, duration, playbackRate, isPlaying, volume, buffered, error, loading } = playerState
+
+  // 播放引擎：'html5'（内置 <video>）、'mpv'（打孔嵌入，旧架构）、'mpv-canvas'（libmpv 画布渲染，方案 C）
+  const [engineMode, setEngineMode] = useState<EngineMode>('html5')
+  const engineModeRef = useRef<EngineMode>('html5')
+  const [mpvAvailable, setMpvAvailable] = useState(false)
+  // mpv 已实际出画（file-loaded 后主进程揭示渲染窗口）；此期间视频区域必须切透明
+  const [mpvActive, setMpvActive] = useState(false)
+  // 窗口级全屏（主进程 setBounds 假全屏，替代 HTML Fullscreen API）
+  const [windowFullscreen, setWindowFullscreen] = useState(false)
+  // mpv 视频画面嵌入区域（替代 <video> 的可视位置）
+  const mpvSlotRef = useRef<HTMLDivElement>(null)
+  // 当前播放源是否为本地文件（影响 file-loaded 时是否关闭 mpv 内建字幕）
+  const mpvSourceLocalRef = useRef(false)
+  // mpv 模式静音前的音量（恢复时用，避免硬编码 100）
+  const preMuteVolumeRef = useRef(100)
+
+  // mpv 家族（打孔 embed / 画布 canvas）控制面分发：方法名一致，按当前引擎路由
+  const mpvCtl = (): typeof window.api.mpv | typeof window.api.mpvRender =>
+    engineModeRef.current === 'mpv-canvas' ? window.api.mpvRender : window.api.mpv
+  const isMpvFamily = (): boolean => engineModeRef.current !== 'html5'
+  // libmpv 画布引擎的实例参数（硬解/HDR），initEngine 时从设置读入
+  const mpvRenderOptsRef = useRef({ hardwareDecode: true, hdrToneMapping: false })
+
+  // 续播位置 / 手动时钟总线（mpv 事件同步锚点）
+  const resumePosRef = useRef(parseFloat(searchParams.get('position') || '0'))
+  const hasResumedRef = useRef(false)
+  const timeBusRef = useRef<MediaTimeBus | null>(null)
+
+  // 镜像音量/倍速到 ref：mpv 新进程启动时同步（mpv 默认 100/1.0）。
+  // 不能把 volume/playbackRate 加入 startPlayback 依赖（变化会触发视频源 effect 误重载）
+  const volumeRef = useRef(100)
+  const playbackRateRef = useRef(1)
+  volumeRef.current = volume
+  playbackRateRef.current = playbackRate
 
   useEffect(() => {
     window.api.store.get('jellyfin').then((saved: unknown) => {
@@ -65,7 +118,10 @@ function Player(): ReactElement {
   const episodeFetchedRef = useRef(false)
   useEffect(() => {
     // 本地文件不需要剧集列表
-    if (localFile) return
+    if (localFile) {
+      setEpisodeFetchDone(true)
+      return
+    }
     // 已经获取过则跳过
     if (episodeFetchedRef.current) return
 
@@ -90,7 +146,7 @@ function Player(): ReactElement {
           console.error('[EpisodeList] Error:', err)
         }
       } else if (itemId) {
-        // 条件 2: seriesId 为空，先获取详情
+        // 条件 2: seriesId 为空，先获取详情（电影走此分支，无 SeriesId 时不拉剧集）
         try {
           const detailResult = await cachedFetch(
             'jellyfin.getItemDetails',
@@ -122,6 +178,8 @@ function Player(): ReactElement {
           console.error('[EpisodeList] Error:', err)
         }
       }
+      // 修复 R-S3: 无论是否取到剧集（电影无剧集），拉取流程结束即放行 danmaku effect
+      setEpisodeFetchDone(true)
     }
 
     // 先尝试直接用已有 token，没有则先加载
@@ -135,10 +193,212 @@ function Player(): ReactElement {
           setJellyfinToken(s.token)
           episodeFetchedRef.current = true
           fetchEpisodes(s.token)
+        } else {
+          // 无 token 也算拉取完成，避免 danmaku effect 永久阻塞
+          setEpisodeFetchDone(true)
         }
-      }).catch(() => {})
+      }).catch(() => { setEpisodeFetchDone(true) })
     }
   }, [seriesId, seasonId, itemId, localFile]) // 移除 jellyfinToken 依赖
+
+  // 初始化播放引擎：读取设置偏好 + 探测可用性。
+  // 优先级：显式偏好 > 默认。默认在 libmpv 画布引擎（方案 C）可用时优先选用，
+  // 其次打孔 mpv，最后内置 HTML5；任一环节不可用自动降级。
+  useEffect(() => {
+    let cancelled = false
+    const initEngine = async (): Promise<void> => {
+      try {
+        const [saved, availRes, canvasRes] = await Promise.all([
+          window.api.store.get('player').catch(() => null),
+          window.api.mpv.isAvailable().catch(() => ({ success: false as const })),
+          window.api.mpvRender.isAvailable().catch(() => ({ success: false as const }))
+        ])
+        if (cancelled) return
+        const avail = !!(availRes && availRes.success && availRes.data === true)
+        const canvasAvail = !!(canvasRes && canvasRes.success && canvasRes.data === true)
+        setMpvAvailable(avail || canvasAvail)
+        const savedPlayer = saved as { engine?: string; hardwareDecode?: boolean; hdrToneMapping?: boolean } | null
+        mpvRenderOptsRef.current = {
+          hardwareDecode: savedPlayer?.hardwareDecode !== false,
+          hdrToneMapping: savedPlayer?.hdrToneMapping === true
+        }
+        const pref = savedPlayer?.engine
+        let engine: EngineMode = 'html5'
+        if (pref === 'mpv-canvas') {
+          engine = canvasAvail ? 'mpv-canvas' : avail ? 'mpv' : 'html5'
+        } else if (pref === 'mpv') {
+          engine = avail ? 'mpv' : canvasAvail ? 'mpv-canvas' : 'html5'
+        } else {
+          engine = canvasAvail ? 'mpv-canvas' : avail ? 'mpv' : 'html5'
+        }
+        if ((pref === 'mpv-canvas' && !canvasAvail) || (pref === 'mpv' && !avail)) {
+          console.warn(`[Player] 偏好引擎 ${pref} 不可用，降级为 ${engine}`)
+        }
+        console.log(`[Player] 播放引擎就绪: ${engine}（偏好=${pref ?? '默认'}, mpv可用=${avail}, 画布可用=${canvasAvail}, 硬解=${mpvRenderOptsRef.current.hardwareDecode}）`)
+        engineModeRef.current = engine
+        setEngineMode(engine)
+      } catch { /* 默认 html5 */ }
+    }
+    void initEngine()
+    return () => { cancelled = true }
+  }, [])
+
+  // 离开播放页：回收两种 mpv 引擎（打孔子窗口 / 画布渲染实例）
+  useEffect(() => {
+    return () => {
+      void window.api.mpv.hide()
+      void window.api.mpvRender.destroy()
+    }
+  }, [])
+
+  // mpv 引擎事件 → 手动时钟 / playerStore
+  useEffect(() => {
+    if (!isMpvFamily()) return
+    const engine = mpvCtl()
+    const onMpvEvent = (event: string, data: unknown): void => {
+      const bus = timeBusRef.current
+      switch (event) {
+        case 'time': {
+          const t = Number(data)
+          if (Number.isFinite(t)) {
+            bus?.syncFromEngine({ currentTime: t })
+            playerActions.setCurrentTime(t)
+          }
+          break
+        }
+        case 'duration': {
+          const d = Number(data)
+          if (Number.isFinite(d) && d > 0) {
+            bus?.syncFromEngine({ duration: d })
+            playerActions.setDuration(d)
+          }
+          break
+        }
+        case 'pause': {
+          const paused = data === true
+          playerActions.setIsPlaying(!paused)
+          bus?.syncFromEngine({ isPlaying: !paused })
+          break
+        }
+        case 'volume': {
+          const v = Math.round(Number(data))
+          if (Number.isFinite(v)) playerActions.setVolume(v)
+          break
+        }
+        case 'speed': {
+          const s = Number(data)
+          if (Number.isFinite(s)) {
+            playerActions.setPlaybackRate(s)
+            bus?.syncFromEngine({ playbackRate: s })
+          }
+          break
+        }
+        case 'file-loaded':
+        case 'start':
+          playerActions.setLoading(false)
+          playerActions.setError('')
+          bus?.syncFromEngine({ isPlaying: true })
+          // file-loaded 后主进程揭示 mpv 渲染窗口（打孔），视频区域需切透明
+          if (event === 'file-loaded') setMpvActive(true)
+          // 服务器字幕由本应用 HTML 自绘，关闭 mpv 内建字幕避免双字幕；
+          // 本地文件保留 mpv 默认行为（外挂/内嵌 ASS 由 mpv 渲染）
+          if (!mpvSourceLocalRef.current) {
+            void mpvCtl().disableSubtitle()
+          }
+          // 续播跳转（每次进入播放页仅一次）
+          if (!hasResumedRef.current && resumePosRef.current > 0) {
+            hasResumedRef.current = true
+            void mpvCtl().seek(resumePosRef.current)
+          }
+          break
+        case 'stop':
+        case 'idle':
+          bus?.syncFromEngine({ isPlaying: false })
+          playerActions.setIsPlaying(false)
+          setMpvActive(false)
+          break
+        case 'error': {
+          // 优先展示主进程带过来的具体错误信息（如"视频解码失败"），缺省时用通用提示
+          const detail = data instanceof Error
+            ? data.message
+            : typeof data === 'string'
+              ? data
+              : (data && typeof data === 'object' && typeof (data as { message?: unknown }).message === 'string'
+                  ? (data as { message: string }).message
+                  : '')
+          playerActions.setError(detail || 'mpv 播放错误，请查看日志或在设置中切换回内置播放器')
+          playerActions.setLoading(false)
+          setMpvActive(false)
+          break
+        }
+        case 'quit': {
+          // mpv 进程退出：渲染窗口已销毁，必须立即恢复黑底，防止打孔透出桌面
+          setMpvActive(false)
+          break
+        }
+      }
+    }
+    engine.onEvent(onMpvEvent)
+    return () => { engine.offEvent() }
+  }, [engineMode, playerActions])
+
+  // 窗口级全屏：隐藏顶栏（TopBar），主内容占满窗口；退出全屏时恢复
+  useEffect(() => {
+    if (!windowFullscreen) return
+    document.body.classList.add('app-fullscreen')
+    return () => { document.body.classList.remove('app-fullscreen') }
+  }, [windowFullscreen])
+
+  // 原生全屏状态同步（主进程 setFullScreen 的 enter/leave-full-screen 事件为唯一真源）
+  useEffect(() => {
+    return window.api.window.onFullscreenChanged((fullscreen) => {
+      setWindowFullscreen(fullscreen)
+    })
+  }, [])
+
+  // mpv 打孔模式：#root 与 .app-shell 切透明，让主窗口身后的 mpv 渲染窗口透出；
+  // 离开播放页/播放结束立即恢复，防止透明区域露出桌面
+  useEffect(() => {
+    const root = document.getElementById('root')
+    const shell = document.querySelector('.app-shell')
+    if (engineMode === 'mpv' && mpvActive) {
+      root?.classList.add('mpv-hole')
+      shell?.classList.add('mpv-hole')
+      return () => {
+        root?.classList.remove('mpv-hole')
+        shell?.classList.remove('mpv-hole')
+      }
+    }
+  }, [engineMode, mpvActive])
+
+  // mpv 嵌入几何同步：挂载/窗口缩放/全屏/布局变化时跟随视频区域
+  useEffect(() => {
+    if (engineMode !== 'mpv') return
+    const update = (embed: boolean): void => {
+      const slot = mpvSlotRef.current
+      if (!slot) return
+      const rect = slot.getBoundingClientRect()
+      if (rect.width < 10 || rect.height < 10) return
+      if (embed) {
+        window.api.mpv.embed(rect.left, rect.top, rect.width, rect.height).catch(() => {})
+      } else {
+        void window.api.mpv.updateEmbed(rect.left, rect.top, rect.width, rect.height)
+      }
+    }
+    const onResize = (): void => update(false)
+    const ro = new ResizeObserver(() => update(false))
+    if (mpvSlotRef.current) ro.observe(mpvSlotRef.current)
+    window.addEventListener('resize', onResize)
+    // 首次嵌入（startPlayback 也会 embed，此处兜底确保子窗口先创建）
+    const t1 = window.setTimeout(() => update(true), 60)
+    const t2 = window.setTimeout(() => update(false), 400)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', onResize)
+      window.clearTimeout(t1)
+      window.clearTimeout(t2)
+    }
+  }, [engineMode])
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -148,18 +408,22 @@ function Player(): ReactElement {
   const activeSubIdxRef = useRef(-1)
   const currentSubTextRef = useRef('')
   const engineRef = useRef<DanmakuEngine | null>(null)
-  const resumePosRef = useRef(parseFloat(searchParams.get('position') || '0'))
-  const hasResumedRef = useRef(false)
-  const timeBusRef = useRef<MediaTimeBus | null>(null)
-
-  const [playerState, playerActions] = usePlayerStore()
-  const { currentTime, duration, playbackRate, isPlaying, volume, buffered, error, loading } = playerState
+  // 修复 R-S6: 字幕拉取代号，切集/切源递增，旧 .then() 检测到过期即丢弃，避免覆盖新字幕
+  const subtitleGenRef = useRef(0)
 
   const [danmakuEnabled, setDanmakuEnabled] = useState(true)
+  // R-S2: ref 镜像，时间总线 effect 内读 ref，避免开关弹幕销毁重建整条 timeBus
+  const danmakuEnabledRef = useRef(danmakuEnabled)
+  danmakuEnabledRef.current = danmakuEnabled
   const [danmakuLoading, setDanmakuLoading] = useState(false)
   const [currentDanmakuCount, setCurrentDanmakuCount] = useState(0)
   const [danmakuCountVisible, setDanmakuCountVisible] = useState(false)
   const [danmakuError, setDanmakuError] = useState('')
+  // 弹幕热力图：存储当前集弹幕数据（与 loadComments 同步设置，切集时清空）
+  const [danmakuComments, setDanmakuComments] = useState<DanmakuComment[]>([])
+  // V2 多级匹配：低置信度/失败时展示候选列表供手动绑定
+  const [matchCandidates, setMatchCandidates] = useState<DanmakuMatchCandidate[]>([])
+  const [matchLogs, setMatchLogs] = useState<string[]>([])
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchKeyword, setSearchKeyword] = useState('')
   const [searchResults, setSearchResults] = useState<DanmakuSearchResult[]>([])
@@ -196,6 +460,11 @@ function Player(): ReactElement {
   const [videoAspectRatio, setVideoAspectRatio] = useState(16 / 9)
   // 视频显示模式: 'contain'=完整显示(默认), 'cover'=裁切填充
   const [displayMode, setDisplayMode] = useState<'contain' | 'cover'>('contain')
+  // R-S2: ref 镜像，时间总线 effect 内读 ref，避免切竖屏/显示模式时销毁重建 timeBus
+  const isPortraitRef = useRef(isPortrait)
+  isPortraitRef.current = isPortrait
+  const displayModeRef = useRef(displayMode)
+  displayModeRef.current = displayMode
 
   // P2: 窗口置顶
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
@@ -262,27 +531,35 @@ function Player(): ReactElement {
     setTimeout(() => setStatusMsg(''), 2000)
   }
 
+  // 用 ref 持有最新播放进度，避免 savePlayHistory 随 currentTime 变化而重建，
+  // 否则 30s 周期保存的 interval 会每 ~200ms 被销毁/重建，退化为高频写盘
+  const playHistoryTimeRef = useRef(currentTime)
+  playHistoryTimeRef.current = currentTime
+
   const savePlayHistory = useCallback(async () => {
     if (!itemId && !localFile) return
     if (duration <= 0) return
-    if (currentTime < 5) return
+    const t = playHistoryTimeRef.current
+    if (t < 5) return
     try {
-      const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
+      // 修复 R-S4: 使用 ref 读取最新 token，避免闭包捕获过期空 token
+      const token = jellyfinTokenRef.current
+      const authParam = token ? `&api_key=${token}` : ''
       const posterUrl = localFile ? '' : `${baseUrl}/Items/${itemId}/Images/Primary?maxHeight=300${authParam}`
       const historyName = seriesName && !itemName.startsWith(seriesName)
         ? `${seriesName} - ${itemName}` : itemName
       await window.api.history.save({
         itemId: itemId || `local:${localFile}`,
-        name: historyName, duration, position: currentTime, posterUrl,
+        name: historyName, duration, position: t, posterUrl,
         watchedAt: Date.now(), localFile: localFile || undefined,
         baseUrl: localFile ? undefined : baseUrl,
         seriesName: seriesName || undefined
       })
     } catch (err) { console.error('保存播放历史失败:', err) }
-  }, [itemId, localFile, itemName, duration, currentTime, baseUrl, seriesName])
+  }, [itemId, localFile, itemName, duration, baseUrl, seriesName])
 
   useEffect(() => {
-    if (duration <= 0 || currentTime < 5) return
+    if (duration <= 0) return
     const interval = setInterval(savePlayHistory, 30000)
     return () => {
       clearInterval(interval)
@@ -348,73 +625,103 @@ function Player(): ReactElement {
 
     const handleResize = (): void => engineRef.current?.resize()
     window.addEventListener('resize', handleResize)
-    return () => { window.removeEventListener('resize', handleResize); engineRef.current?.destroy() }
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      engineRef.current?.destroy()
+      // L5: destroy 后置 null，防止 StrictMode 双挂载时旧实例被误用
+      engineRef.current = null
+    }
   // 修复点 1.4: 禁止把 useRef.current 放进 useEffect 依赖数组（mutable，不会触发重渲染，只会造成每次渲染都重新初始化）
   }, [])
 
   useEffect(() => {
     console.log(`[Player:danmakuEffect] ==================== 弹幕加载Effect触发 ====================`)
-    console.log(`[Player:danmakuEffect] 依赖值: itemId="${itemId}", itemName="${itemName}", localFile="${localFile || 'none'}", seriesName="${seriesName || 'none'}"`)
+    console.log(`[Player:danmakuEffect] 依赖值: itemId="${itemId}", currentEpisodeIndex=${currentEpisodeIndex}, localFile="${localFile || 'none'}", seriesName="${seriesName || 'none'}"`)
 
     if (!localFile && !seriesName && (!itemName || itemName === '未知视频')) {
       console.log(`[Player:danmakuEffect] ⚠️ 跳过: 无有效匹配参数`)
       return
     }
 
-    danmakuRequestManager.cancel()
+    // 修复串集：剧集列表未加载完（currentEpisodeIndex=-1）时延迟加载，等元数据就绪
+    // 否则 meta 缺失 IndexNumber/ParentIndexNumber，cacheKey 退化成 S0E0 命中错误缓存
+    // 修复 R-S3/M5: 仅以 episodeFetchDone 为准（fetchEpisodes 中 setEpisodeList/
+    // setCurrentEpisodeIndex/setEpisodeFetchDone 同一同步块批量提交，不存在中间态），
+    // 避免 episodeList 先提交而 fetchDone 未提交时首集双重加载弹幕
+    if (!localFile && !episodeFetchDone) {
+      console.log(`[Player:danmakuEffect] ⚠️ 跳过: 剧集列表未加载完，等元数据就绪后再触发`)
+      return
+    }
 
+    // 切集强制销毁上一集弹幕状态：cancel 挂起请求 + 清空引擎 + 清候选
+    danmakuRequestManager.cancel()
     engineRef.current?.clear()
     setCurrentDanmakuCount(0)
     setDanmakuLoading(true)
     setDanmakuError('')
+    setMatchCandidates([])
+    setMatchLogs([])
+    setDanmakuComments([])
 
-    const matchTitle = (() => {
-      const base = seriesName || (itemName && itemName !== '未知视频' ? itemName : '')
-      const hint = itemName && itemName !== '未知视频' ? itemName : ''
-      if (base && hint && !hint.includes(base)) {
-        return base + ' ' + hint
-      }
-      return base || (localFile ? extractSeriesNameFromFilename(localFile.split(/[/\\]/).pop() || itemName) || itemName : itemName)
-    })()
-
-    console.log(`[Player:danmakuEffect] 构建匹配标题: "${matchTitle}"`)
-
-    // 修复 BUG-2: 调用 cleanTitleForMatch 清洗匹配标题，去除分辨率/编码等干扰信息
-    const cleanedTitle = cleanTitleForMatch(matchTitle)
-    console.log(`[Player:danmakuEffect] 清洗后匹配标题: "${cleanedTitle}"`)
-
-    const isValidTitle = cleanedTitle && cleanedTitle !== '未知视频' && cleanedTitle.trim().length > 0
-    if (!isValidTitle) {
-      console.log(`[Player:danmakuEffect] ⚠️ 跳过: 清洗后匹配标题无效`)
-      setDanmakuLoading(false)  // 修复 BUG-1: 确保 loading 状态重置
-      return
+    // ===== 构建结构化元数据（V2 多级匹配核心） =====
+    // 从 episodeList[currentEpisodeIndex] 提取 Jellyfin 原生 IndexNumber/ParentIndexNumber，
+    // 这是切集不串弹幕的关键：每集的 season+episode 独立数值，缓存 Key 按此隔离
+    const currentEp: JellyfinItem | null = (currentEpisodeIndex >= 0 && episodeList[currentEpisodeIndex]) ? episodeList[currentEpisodeIndex] : null
+    const meta: DanmakuMatchMeta = {
+      mediaSourceId: localFile ? 'local' : (baseUrl || 'jellyfin'),
+      itemId,
+      seriesId: seriesId || (currentEp?.SeriesId as string | undefined) || undefined,
+      seasonId: seasonId || (currentEp?.SeasonId as string | undefined) || undefined,
+      seriesName: seriesName || (currentEp?.SeriesName as string | undefined) || undefined,
+      seasonName: currentEp?.SeasonName,
+      indexNumber: currentEp?.IndexNumber,
+      parentIndexNumber: currentEp?.ParentIndexNumber,
+      productionYear: currentEp?.ProductionYear,
+      fileName: localFile ? (localFile.split(/[/\\]/).pop() || localFile) : (currentEp?.Name || itemName),
+      filePath: localFile || undefined,
+      title: itemName
     }
+    console.log(`[Player:danmakuEffect] 构建元数据: series="${meta.seriesName}", S${meta.parentIndexNumber ?? '?'}E${meta.indexNumber ?? '?'}, itemId=${meta.itemId}, fileName="${meta.fileName}"`)
 
     const loadDanmaku = async (): Promise<void> => {
       const log = (msg: string) => {
         console.log(`[Player:danmakuEffect] ${msg}`)
         window.api.log?.send?.('info', 'renderer', `[Player:danmakuEffect] ${msg}`)
       }
-      log(`开始执行loadDanmaku`)
+      log(`开始执行 loadDanmaku（V2 多级匹配）`)
       try {
-        log(`调用danmakuRequestManager.loadDanmaku("${cleanedTitle}", "${localFile || 'none'}")`)
-        const result = await danmakuRequestManager.loadDanmaku(cleanedTitle, localFile)
-        log(`loadDanmaku返回: ${result ? `成功，数量=${result.count}` : 'null'}`)
-        if (result) {
-          log(`✅ 弹幕加载成功，数量: ${result.count}, 来源: ${result.source || '未知'}`)
-          log(`调用engineRef.current?.loadComments(${result.count}条弹幕)`)
+        const result = await danmakuRequestManager.loadDanmaku(meta, localFile || undefined)
+        log(`loadDanmaku返回: ${result ? `ok=${result.ok}, count=${result.count ?? 0}, candidates=${result.candidates?.length ?? 0}` : 'null(cancelled)'}`)
+        if (result === null) {
+          // 已取消（切集），不更新 UI
+          return
+        }
+        if (result.logs && result.logs.length) setMatchLogs(result.logs)
+        if (result.ok && result.comments) {
+          log(`✅ 弹幕加载成功，数量: ${result.count}, 来源: ${result.source || '未知'}, 层级: ${result.matchLevel || '?'}, 置信度: ${result.confidence ?? '?'}`)
           engineRef.current?.loadComments(result.comments)
-          setCurrentDanmakuCount(result.count)
-          if (result.count > 0) {
+          setDanmakuComments(result.comments)
+          setCurrentDanmakuCount(result.count ?? 0)
+          if ((result.count ?? 0) > 0) {
             setDanmakuCountVisible(true)
             setTimeout(() => setDanmakuCountVisible(false), 3000)
+            // 低置信度但已加载：附带候选供用户确认修正
+            if (result.candidates && result.candidates.length) {
+              setMatchCandidates(result.candidates)
+              setDanmakuError(`已加载弹幕（置信度较低），可点击候选修正`)
+            }
           } else {
-            // 修复点 3.3: 成功但 0 条弹幕也要明确提示用户，不要静默“显示成功但一条都没有”
             setDanmakuError('该集暂无弹幕，可尝试手动搜索')
           }
         } else {
-          log(`⚠️ 弹幕加载返回null (未找到匹配)`)
-          setDanmakuError('未找到匹配弹幕')
+          // 未命中精准资源
+          log(`⚠️ 未命中精准资源${result.candidates?.length ? `，${result.candidates.length} 个候选供手动选择` : ''}`)
+          if (result.candidates && result.candidates.length) {
+            setMatchCandidates(result.candidates)
+            setDanmakuError('自动匹配置信度低，请从候选列表选择正确弹幕')
+          } else {
+            setDanmakuError('未找到匹配弹幕，可尝试手动搜索')
+          }
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
@@ -439,7 +746,7 @@ function Player(): ReactElement {
       clearTimeout(timer)
       danmakuRequestManager.cancel()
     }
-  }, [itemId, itemName, localFile, seriesName])
+  }, [itemId, itemName, localFile, seriesName, currentEpisodeIndex, episodeList, episodeFetchDone])
 
   const handleDanmakuToggle = (): void => {
     const next = !danmakuEnabled; setDanmakuEnabled(next)
@@ -501,16 +808,26 @@ function Player(): ReactElement {
 
   const handleDanmakuSearch = async (keyword?: string): Promise<void> => {
     const kw = (typeof keyword === 'string' ? keyword : searchKeyword).trim()
-    if (!kw) return; setSearchLoading(true); setSearchResults([])
+    if (!kw) return
+    setSearchLoading(true); setSearchResults([])
     try {
-      const result = await window.api.danmaku.search(kw)
+      const result = await danmakuRequestManager.search(kw)
       if (result.success && result.data) {
         const data = result.data as DanmakuSearchResponse
         const eps: DanmakuSearchResult[] = []
         for (const anime of (data.animes || [])) {
-          for (const ep of (anime.episodes || [])) { eps.push({ ...ep, animeTitle: anime.animeTitle }) }
+          for (const ep of (anime.episodes || [])) {
+            eps.push({ ...ep, animeTitle: anime.animeTitle, source: ep.source || 'dandanplay' })
+          }
         }
         setSearchResults(eps)
+        if (eps.length === 0) {
+          setDanmakuError('未找到匹配弹幕，可尝试其他关键词')
+        }
+      } else {
+        const errMsg = result.error || '搜索失败'
+        setDanmakuError(errMsg.includes('App-ID') ? errMsg : '搜索弹幕失败')
+        showStatus(errMsg.includes('App-ID') ? '请在设置中配置弹幕 API 认证' : '搜索弹幕失败')
       }
     } catch { showStatus('搜索弹幕失败') }
     setSearchLoading(false)
@@ -527,12 +844,85 @@ function Player(): ReactElement {
 
   const handleDanmakuSelect = async (ep: DanmakuSearchResult): Promise<void> => {
     closeAllPopups(); setSearchResults([]); setDanmakuLoading(true); setDanmakuError('')
+    // M4: 快照当前 itemId，await 返回后比对 —— 已切集则丢弃，防串集
+    const contextItemId = itemIdRef.current
     try {
-      const result = await danmakuRequestManager.getComments(String(ep.episodeId), ep.source)
+      // ignoreEpoch: 用户手动选择的结果不允许被无关 cancel() 静默丢弃
+      const result = await danmakuRequestManager.getComments(String(ep.episodeId), ep.source, false, undefined, true)
+      if (itemIdRef.current !== contextItemId) {
+        console.log(`[Player:handleDanmakuSelect] 已切换视频，丢弃过期选择结果`)
+        return
+      }
       if (result) {
-        engineRef.current?.loadComments(result.comments); setCurrentDanmakuCount(result.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000)
+        engineRef.current?.loadComments(result.comments); setDanmakuComments(result.comments); setCurrentDanmakuCount(result.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000)
+        // 手动搜索选择 → 持久化绑定，下次播放该集直接复用精准ID（走 manual 层）
+        await danmakuRequestManager.bindEpisode({
+          mediaSourceId: localFile ? 'local' : (baseUrl || 'jellyfin'),
+          itemId,
+          episodeId: ep.episodeId,
+          animeTitle: ep.animeTitle,
+          episodeTitle: ep.episodeTitle,
+          source: ep.source || 'dandanplay'
+        }, {
+          mediaSourceId: localFile ? 'local' : (baseUrl || 'jellyfin'),
+          itemId,
+          seriesName,
+          indexNumber: episodeList[currentEpisodeIndex]?.IndexNumber,
+          parentIndexNumber: episodeList[currentEpisodeIndex]?.ParentIndexNumber,
+          filePath: localFile
+        }).catch(() => {})
       } else { setDanmakuError('获取弹幕失败') }
     } catch { setDanmakuError('获取弹幕失败') }
+    finally { setDanmakuLoading(false) }
+  }
+
+  // V2: 从候选列表手动选择弹幕源 → 持久化绑定 + 立即加载（下次该集走 manual 层精准命中）
+  const handleSelectCandidate = async (c: DanmakuMatchCandidate): Promise<void> => {
+    setDanmakuLoading(true); setDanmakuError(''); setMatchCandidates([])
+    try {
+      console.log(`[Player:handleSelectCandidate] 手动绑定: episodeId=${c.episodeId}, source=${c.source}, title="${c.animeTitle} - ${c.episodeTitle}"`)
+      // 1. 持久化绑定（manual 层，下次直接复用）+ 清除该集匹配缓存
+      await danmakuRequestManager.bindEpisode({
+        mediaSourceId: localFile ? 'local' : (baseUrl || 'jellyfin'),
+        itemId,
+        episodeId: c.episodeId,
+        animeId: c.animeId,
+        animeTitle: c.animeTitle,
+        episodeTitle: c.episodeTitle,
+        source: c.source
+      }, {
+        mediaSourceId: localFile ? 'local' : (baseUrl || 'jellyfin'),
+        itemId,
+        seriesName,
+        indexNumber: episodeList[currentEpisodeIndex]?.IndexNumber,
+        parentIndexNumber: episodeList[currentEpisodeIndex]?.ParentIndexNumber,
+        filePath: localFile
+      })
+      // 2. 立即加载该弹幕源
+      const result = await danmakuRequestManager.loadByBind(
+        {
+          mediaSourceId: localFile ? 'local' : (baseUrl || 'jellyfin'),
+          itemId,
+          seriesName, indexNumber: episodeList[currentEpisodeIndex]?.IndexNumber,
+          parentIndexNumber: episodeList[currentEpisodeIndex]?.ParentIndexNumber
+        },
+        c.episodeId,
+        c.source
+      )
+      if (result && result.ok && result.comments) {
+        engineRef.current?.loadComments(result.comments)
+        setDanmakuComments(result.comments)
+        setCurrentDanmakuCount(result.count ?? 0)
+        setDanmakuCountVisible(true)
+        setTimeout(() => setDanmakuCountVisible(false), 3000)
+        showStatus(`已绑定弹幕源: ${c.animeTitle} - ${c.episodeTitle}`)
+      } else {
+        setDanmakuError('获取弹幕失败，请重试或选择其他候选')
+      }
+    } catch (err) {
+      console.error(`[Player:handleSelectCandidate] 异常:`, err)
+      setDanmakuError('绑定弹幕失败')
+    }
     setDanmakuLoading(false)
   }
 
@@ -545,7 +935,7 @@ function Player(): ReactElement {
       if (xmlResult.success && xmlResult.data) {
         const data = xmlResult.data as { count: number; comments: DanmakuComment[]; source?: string }
         console.log(`[Player:handleLoadLocalXml] 本地弹幕加载成功，数量: ${data.count}，来源: ${data.source || '未知'}`)
-        engineRef.current?.loadComments(data.comments); setCurrentDanmakuCount(data.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000); showStatus(`已加载本地弹幕: ${data.source || ''}`)
+        engineRef.current?.loadComments(data.comments); setDanmakuComments(data.comments); setCurrentDanmakuCount(data.count); setDanmakuCountVisible(true); setTimeout(() => setDanmakuCountVisible(false), 3000); showStatus(`已加载本地弹幕: ${data.source || ''}`)
       } else {
         console.log(`[Player:handleLoadLocalXml] 本地弹幕加载失败，错误: ${xmlResult.error || '未知'}`)
         setDanmakuError(xmlResult.error || '未找到本地弹幕 XML')
@@ -559,70 +949,193 @@ function Player(): ReactElement {
 
   // ==================== 视频源 & 事件 ====================
 
+  /**
+   * 统一播放入口：拿到可播放 URL 后按引擎分发。
+   * - html5：写入 <video>.src
+   * - mpv：创建/更新 Win32 嵌入子窗口并 loadfile
+   * 服务器字幕两种引擎都走应用 HTML 自绘（位置/字号/字间距可调）
+   */
+  const startPlayback = useCallback(async (
+    url: string,
+    isLocal: boolean,
+    subs?: { index: number; label: string; language: string; codec: string; url: string }[]
+  ): Promise<void> => {
+    // 修复 R-S5: 清空旧字幕 cues，避免切源后旧字幕残留显示
+    subtitleCuesRef.current = []
+    // 修复 R-S6: 递增字幕拉取代号，过期的 .then() 回调检测后丢弃
+    const subGen = ++subtitleGenRef.current
+    mpvSourceLocalRef.current = isLocal
+    const subtitleList = subs || []
+    setSubtitleTracks(subtitleList)
+    let defaultIdx = -1
+    for (let i = 0; i < subtitleList.length; i++) {
+      const sub = subtitleList[i]
+      const isDefault = subtitleList.length === 1 || sub.language === 'chi' || sub.language === 'zho' || sub.language === 'chs' || sub.language === 'cht'
+      if (isDefault && defaultIdx === -1) defaultIdx = i
+    }
+    if (subtitleList.length > 0) {
+      subtitleList.forEach((sub, i) => {
+        window.api.jellyfin.fetchSubtitle(sub.url).then((result) => {
+          // 修复 R-S6: 切集/切源后丢弃过期的字幕响应，避免覆盖新字幕状态
+          if (subGen !== subtitleGenRef.current) return
+          if (result.success && result.data) {
+            const cues = parseVTT(result.data)
+            if (i === defaultIdx) {
+              setSubtitleCues(cues)
+              setActiveSubtitleIndex(i)
+              activeSubIdxRef.current = i
+            }
+            subtitleCuesRef.current[i] = cues
+          } else {
+            console.warn(`字幕加载失败: ${sub.label}`, result.error)
+          }
+        }).catch((err) => {
+          console.warn(`字幕加载异常: ${sub.label}`, err)
+        })
+      })
+    }
+
+    if (engineModeRef.current === 'mpv-canvas') {
+      // ===== 画布引擎（方案 C）：libmpv 实例渲染到 WebGL canvas，无任何窗口嵌入 =====
+      playerActions.setLoading(true)
+      playerActions.setError('')
+      const playRes = await window.api.mpvRender.play(url, mpvRenderOptsRef.current)
+      if (!playRes.success) {
+        playerActions.setError(`mpv 播放失败: ${playRes.error}`)
+        playerActions.setLoading(false)
+        return
+      }
+      // 新实例默认音量 100/倍速 1.0，同步应用当前设置
+      void window.api.mpvRender.setVolume(volumeRef.current)
+      void window.api.mpvRender.setSpeed(playbackRateRef.current)
+      setSrcReady(true)
+      return
+    }
+
+    if (engineModeRef.current === 'mpv') {
+      playerActions.setLoading(true)
+      playerActions.setError('')
+      const slot = mpvSlotRef.current
+      if (slot) {
+        const rect = slot.getBoundingClientRect()
+        const embedRes = await window.api.mpv.embed(rect.left, rect.top, rect.width, rect.height)
+        if (!embedRes.success) {
+          // 嵌入失败（Win32 不可用等）→ play 会以 mpv 独立窗口模式继续
+          console.warn('[Player] mpv 嵌入失败，回退独立窗口模式:', embedRes.error)
+        }
+      }
+      const playRes = await window.api.mpv.play(url)
+      if (!playRes.success) {
+        playerActions.setError(`mpv 播放失败: ${playRes.error}`)
+        playerActions.setLoading(false)
+        return
+      }
+      // 新 mpv 进程默认音量 100/倍速 1.0，同步应用当前音量/倍速设置
+      void window.api.mpv.setVolume(volumeRef.current)
+      void window.api.mpv.setSpeed(playbackRateRef.current)
+      setSrcReady(true)
+      return
+    }
+
+    const video = videoRef.current
+    if (!video) return
+    const oldTracks = video.querySelectorAll('track')
+    oldTracks.forEach(t => t.remove())
+    video.src = url
+    video.load()
+    setSrcReady(true)
+  }, [playerActions])
+
   useEffect(() => {
+    // 修复 R-S5: 切集/切源竞态保护，旧请求完成时若已取消则不再调用 startPlayback
+    let cancelled = false
     playerActions.setLoading(true); playerActions.setError('')
     if (localFile) {
       window.api.file.getLocalFileUrl(localFile).then((result) => {
+        if (cancelled) return
         if (result.success && result.data) {
           const data = result.data as { url: string }
-          if (data.url && videoRef.current) {
-            videoRef.current.src = data.url
-            videoRef.current.load()
-            setSrcReady(true)
+          if (data.url) {
+            void startPlayback(data.url, true)
             return
           }
         }
         playerActions.setError('无法读取本地文件'); playerActions.setLoading(false)
-      }).catch(() => { playerActions.setError('无法读取本地文件'); playerActions.setLoading(false) })
-      return
+      }).catch(() => { if (cancelled) return; playerActions.setError('无法读取本地文件'); playerActions.setLoading(false) })
+      return () => { cancelled = true }
     }
-    if (!itemId) { playerActions.setLoading(false); return }
+    if (!itemId) { playerActions.setLoading(false); return () => { cancelled = true } }
     window.api.jellyfin.getPlaybackUrl(itemId).then((result) => {
+      if (cancelled) return
       if (result.success) {
         const data = result.data as { url?: string; subtitles?: { index: number; label: string; language: string; codec: string; url: string }[] }
-        if (data?.url && videoRef.current) {
-          const video = videoRef.current
-          const oldTracks = video.querySelectorAll('track')
-          oldTracks.forEach(t => t.remove())
-          const subs = data.subtitles || []
-          setSubtitleTracks(subs)
-          let defaultIdx = -1
-          for (let i = 0; i < subs.length; i++) {
-            const sub = subs[i]
-            const isDefault = subs.length === 1 || sub.language === 'chi' || sub.language === 'zho' || sub.language === 'chs' || sub.language === 'cht'
-            if (isDefault && defaultIdx === -1) defaultIdx = i
-          }
-          video.src = data.url
-          video.load()
-          setSrcReady(true)
-          if (subs.length > 0) {
-            subs.forEach((sub, i) => {
-              window.api.jellyfin.fetchSubtitle(sub.url).then((result) => {
-                if (result.success && result.data) {
-                  const cues = parseVTT(result.data)
-                  if (i === defaultIdx) {
-                    setSubtitleCues(cues)
-                    setActiveSubtitleIndex(i)
-                    activeSubIdxRef.current = i
-                  }
-                  subtitleCuesRef.current[i] = cues
-                } else {
-                  console.warn(`字幕加载失败: ${sub.label}`, result.error)
-                }
-              }).catch((err) => {
-                console.warn(`字幕加载异常: ${sub.label}`, err)
-              })
-            })
-          }
+        if (data?.url) {
+          void startPlayback(data.url, false, data.subtitles)
           return
         }
       }
       playerActions.setError('获取播放地址失败'); playerActions.setLoading(false)
-    }).catch((err) => { playerActions.setError(`获取播放地址失败: ${String(err)}`); playerActions.setLoading(false) })
-  // 修复点 2.6: videoLoadKey 作为依赖，handleSwitchEpisode 递增后会重新触发此 Effect 重新加载 src
-  }, [itemId, localFile, videoLoadKey])
+    }).catch((err) => { if (cancelled) return; playerActions.setError(`获取播放地址失败: ${String(err)}`); playerActions.setLoading(false) })
+    return () => { cancelled = true }
+  // videoLoadKey：切集递增后重新加载；engineMode：引擎初始化完成/切换后重新加载
+  }, [itemId, localFile, videoLoadKey, engineMode, startPlayback])
+
+  // 字幕二分查找：由时间总线驱动（两种引擎共用）
+  const renderSubtitleAtTime = useCallback((time: number): void => {
+    const cues = subtitleCuesRef.current[activeSubIdxRef.current]
+    if (!cues || cues.length === 0) {
+      if (currentSubTextRef.current) {
+        currentSubTextRef.current = ''
+        setCurrentSubtitleText('')
+      }
+      return
+    }
+    let lo = 0, hi = cues.length - 1, found = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1
+      if (time >= cues[mid].start && time < cues[mid].end) { found = mid; break }
+      if (time < cues[mid].start) hi = mid - 1
+      else lo = mid + 1
+    }
+    const newText = found >= 0 ? cues[found].text : ''
+    if (newText !== currentSubTextRef.current) {
+      currentSubTextRef.current = newText
+      setCurrentSubtitleText(newText)
+    }
+  }, [])
 
   useEffect(() => {
+    // ===== mpv 家族引擎（打孔/画布）：手动时钟（事件同步锚点 + RAF 按速率外推）=====
+    if (engineMode !== 'html5') {
+      if (timeBusRef.current) timeBusRef.current.destroy()
+      timeBusRef.current = createMediaTimeBus()
+      const bus = timeBusRef.current
+      bus.attachManual()
+
+      // 弹幕引擎仍走 RAF 订阅，与 HTML5 路径完全一致
+      const unsubRAF = bus.subscribeRAF((time, playbackRate) => {
+        if (danmakuEnabledRef.current && engineRef.current) {
+          engineRef.current.update(time, playbackRate)
+        }
+      })
+
+      const unsubscribe = bus.subscribe((time, state) => {
+        playerActions.setCurrentTime(time)
+        playerActions.setDuration(state.duration)
+        playerActions.setPlaybackRate(state.playbackRate)
+        playerActions.setIsPlaying(state.isPlaying)
+        renderSubtitleAtTime(time)
+      })
+
+      return () => {
+        unsubscribe()
+        unsubRAF()
+        bus.destroy()
+        timeBusRef.current = null
+      }
+    }
+
+    // ===== HTML5 引擎：绑定 <video> =====
     const video = videoRef.current; if (!video) return
 
     if (timeBusRef.current) {
@@ -635,11 +1148,11 @@ function Player(): ReactElement {
     // 性能优化：弹幕引擎使用 RAF 订阅，每帧更新不经过 React state，避免 60fps 重渲染
     let frameCount = 0
     const unsubRAF = timeBusRef.current.subscribeRAF((time, playbackRate) => {
-      if (danmakuEnabled && engineRef.current) {
+      if (danmakuEnabledRef.current && engineRef.current) {
         engineRef.current.update(time, playbackRate)
       }
       frameCount++
-      if (frameCount % 8 === 0 && isPortrait && displayMode === 'contain') {
+      if (frameCount % 8 === 0 && isPortraitRef.current && displayModeRef.current === 'contain') {
         const blurCanvas = blurBgCanvasRef.current
         const blurCtx = blurCanvas?.getContext('2d')
         if (blurCanvas && blurCtx && video.videoWidth > 0) {
@@ -657,22 +1170,7 @@ function Player(): ReactElement {
       playerActions.setPlaybackRate(state.playbackRate)
       playerActions.setIsPlaying(state.isPlaying)
       playerActions.setBuffered(state.buffered)
-
-      const cues = subtitleCuesRef.current[activeSubIdxRef.current]
-      if (cues && cues.length > 0) {
-        let lo = 0, hi = cues.length - 1, found = -1
-        while (lo <= hi) {
-          const mid = (lo + hi) >>> 1
-          if (time >= cues[mid].start && time < cues[mid].end) { found = mid; break }
-          if (time < cues[mid].start) hi = mid - 1
-          else lo = mid + 1
-        }
-        const newText = found >= 0 ? cues[found].text : ''
-        if (newText !== currentSubTextRef.current) {
-          currentSubTextRef.current = newText
-          setCurrentSubtitleText(newText)
-        }
-      }
+      renderSubtitleAtTime(time)
     })
 
     const onLoadedMetadata = (): void => {
@@ -702,11 +1200,20 @@ function Player(): ReactElement {
     }
     const onVolumeChange = (): void => playerActions.setVolume(Math.round(video.volume * 100))
 
+    // 修复弹幕进度不匹配：seek（拖动进度条/方向键跳转）后必须重置弹幕引擎 position，
+    // 否则 engine.position 仍停在旧位置，弹幕时间轴与视频脱节（后退漏弹幕/前进堆叠错位）
+    const onSeeked = (): void => {
+      if (danmakuEnabledRef.current && engineRef.current) {
+        engineRef.current.seek(video.currentTime)
+      }
+    }
+
     video.addEventListener('loadedmetadata', onLoadedMetadata)
     video.addEventListener('waiting', onWaiting)
     video.addEventListener('canplay', onCanPlay)
     video.addEventListener('error', onError)
     video.addEventListener('volumechange', onVolumeChange)
+    video.addEventListener('seeked', onSeeked)
 
     return () => {
       unsubscribe()
@@ -718,25 +1225,59 @@ function Player(): ReactElement {
       video.removeEventListener('canplay', onCanPlay)
       video.removeEventListener('error', onError)
       video.removeEventListener('volumechange', onVolumeChange)
+      video.removeEventListener('seeked', onSeeked)
     }
-  }, [srcReady])
+    // R-S2: danmakuEnabled/isPortrait/displayMode 通过 ref 读取（danmakuEnabledRef 等），
+    // 不再进入依赖 —— 开关弹幕/切竖屏/切显示模式不会销毁重建整条 timeBus
+  }, [srcReady, engineMode, renderSubtitleAtTime, playerActions])
 
-  
+  // ==================== 控制（双引擎分发） ====================
 
-  // ==================== 控制 ====================
+  /** 跳转到绝对时间（秒），HTML5 / mpv 家族共用 */
+  const engineSeekTo = useCallback((target: number): void => {
+    const t = Math.max(0, target)
+    if (isMpvFamily()) {
+      void mpvCtl().seek(t)
+      // 立即同步本地时钟与弹幕位置，不等事件回环（进度条/弹幕无延迟感）
+      timeBusRef.current?.syncFromEngine({ currentTime: t })
+      engineRef.current?.seek(t)
+    } else {
+      const video = videoRef.current
+      if (video) video.currentTime = t
+    }
+    playerActions.forceNotifyCurrentTime()
+  }, [playerActions])
+
+  /** 设置音量 0-100+，HTML5 / mpv 家族共用 */
+  const engineSetVolume = useCallback((value: number): void => {
+    const v = Math.max(0, Math.min(150, Math.round(value)))
+    playerActions.setVolume(v)
+    if (isMpvFamily()) {
+      void mpvCtl().setVolume(v)
+      return
+    }
+    const video = videoRef.current
+    if (video) {
+      video.volume = v / 100
+      video.muted = v === 0
+    }
+  }, [playerActions])
 
   const handlePlayPause = (): void => {
+    if (isMpvFamily()) {
+      if (isPlaying) void mpvCtl().pause()
+      else void mpvCtl().resume()
+      return
+    }
     const video = videoRef.current; if (!video) return
     video.paused ? video.play().catch(() => showStatus('播放失败')) : video.pause()
   }
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>): void => {
-    const video = videoRef.current; if (!video || !duration) return
+    if (!duration) return
     const rect = e.currentTarget.getBoundingClientRect()
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-    video.currentTime = ratio * duration
-    // 性能优化：seek 后强制立即通知 UI，确保进度条即时响应
-    playerActions.forceNotifyCurrentTime()
+    engineSeekTo(ratio * duration)
   }
 
   // 字幕轨道选择（自定义渲染，不使用 textTracks）
@@ -758,28 +1299,40 @@ function Player(): ReactElement {
   }
 
   const handleFullscreen = (): void => {
-    const container = containerRef.current; if (!container) return
-    document.fullscreenElement ? document.exitFullscreen().catch(() => {}) : container.requestFullscreen().catch(() => showStatus('全屏切换失败'))
+    // 原生窗口全屏（主进程 setFullScreen）；状态以 onFullscreenChanged 事件为真源
+    void window.api.window.toggleFullscreen().then((res) => {
+      if (res?.success) setWindowFullscreen(!!res.data)
+    }).catch(() => {})
   }
 
   const handlePlaybackRateChange = (rate: number): void => {
-    const video = videoRef.current; if (!video) return
-    video.playbackRate = rate
+    if (isMpvFamily()) {
+      void mpvCtl().setSpeed(rate)
+      timeBusRef.current?.syncFromEngine({ playbackRate: rate })
+    } else {
+      const video = videoRef.current
+      if (video) video.playbackRate = rate
+    }
     playerActions.setPlaybackRate(rate)
     setContextMenu({ x: 0, y: 0, visible: false })
     setSpeedToast(`${rate}x`); setTimeout(() => setSpeedToast(''), 2000)
   }
 
   const handleVolumeChange = (value: number): void => {
-    playerActions.setVolume(value)
-    const video = videoRef.current
-    if (video) {
-      video.volume = value / 100
-      video.muted = value === 0
-    }
+    engineSetVolume(value)
   }
 
   const handleToggleMute = (): void => {
+    if (isMpvFamily()) {
+      // mpv 无独立 mute 状态：音量 0 即静音，恢复到静音前的音量
+      if (volume === 0) {
+        engineSetVolume(preMuteVolumeRef.current)
+      } else {
+        preMuteVolumeRef.current = volume
+        engineSetVolume(0)
+      }
+      return
+    }
     const video = videoRef.current
     if (!video) return
     video.muted = !video.muted
@@ -935,9 +1488,9 @@ function Player(): ReactElement {
   // P2: 截图
   const handleScreenshot = useCallback(async (): Promise<void> => {
     try {
-      const result = await window.api.mpv.screenshotSave()
+      const result = await mpvCtl().screenshotSave()
       if (result.success) { showStatus('截图已保存'); return }
-    } catch { /* mpv 不可用 */ }
+    } catch { /* mpv 家族引擎不可用 */ }
     // Canvas fallback
     const video = videoRef.current
     if (!video || !video.videoWidth) { showStatus('无可截取的视频帧'); return }
@@ -1003,15 +1556,30 @@ function Player(): ReactElement {
   }, [])
 
   const handleKeyDown = async (e: React.KeyboardEvent): Promise<void> => {
-    const video = videoRef.current; if (!video) return
     const tag = (e.target as HTMLElement).tagName; if (tag === 'INPUT' || tag === 'TEXTAREA') return
+    const video = videoRef.current
+    const useMpv = isMpvFamily()
 
     switch (e.key) {
-      case 'ArrowLeft': e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - (e.ctrlKey ? 30 : 5)); showStatus(e.ctrlKey ? '后退 30s' : '后退 5s'); break
-      case 'ArrowRight': e.preventDefault(); video.currentTime = Math.min(video.duration, video.currentTime + (e.ctrlKey ? 30 : 5)); showStatus(e.ctrlKey ? '前进 30s' : '前进 5s'); break
+      case 'ArrowLeft': {
+        e.preventDefault()
+        const delta = e.ctrlKey ? 30 : 5
+        if (useMpv) engineSeekTo(Math.max(0, currentTime - delta))
+        else if (video) video.currentTime = Math.max(0, video.currentTime - delta)
+        showStatus(e.ctrlKey ? '后退 30s' : '后退 5s')
+        break
+      }
+      case 'ArrowRight': {
+        e.preventDefault()
+        const delta = e.ctrlKey ? 30 : 5
+        if (useMpv) engineSeekTo(Math.min(duration || currentTime + delta, currentTime + delta))
+        else if (video) video.currentTime = Math.min(video.duration || 0, video.currentTime + delta)
+        showStatus(e.ctrlKey ? '前进 30s' : '前进 5s')
+        break
+      }
       case ' ': e.preventDefault(); handlePlayPause(); break
-      case 'ArrowUp': e.preventDefault(); video.volume = Math.min(1, video.volume + 0.1); playerActions.setVolume(Math.round(video.volume * 100)); break
-      case 'ArrowDown': e.preventDefault(); video.volume = Math.max(0, video.volume - 0.1); playerActions.setVolume(Math.round(video.volume * 100)); break
+      case 'ArrowUp': e.preventDefault(); engineSetVolume((useMpv ? volume : Math.round((video?.volume ?? 0) * 100)) + 10); break
+      case 'ArrowDown': e.preventDefault(); engineSetVolume((useMpv ? volume : Math.round((video?.volume ?? 0) * 100)) - 10); break
       case 'f': case 'F': e.preventDefault(); handleFullscreen(); break
       case 's': case 'S': e.preventDefault(); handleScreenshot(); break
       case 'p': case 'P': e.preventDefault(); window.api.window.alwaysOnTop().then(result => { if (result.success) { setAlwaysOnTop(!!result.data); showStatus(result.data ? '窗口置顶' : '取消置顶') } }).catch(() => {}); break
@@ -1019,7 +1587,7 @@ function Player(): ReactElement {
       case '[': e.preventDefault(); { const v = Math.max(-30, danmakuOffsetRef.current - 0.5); handleOffsetChange(v); showStatus(`弹幕偏移 ${v.toFixed(1)}s`); } break
       case ']': e.preventDefault(); { const v = Math.min(30, danmakuOffsetRef.current + 0.5); handleOffsetChange(v); showStatus(`弹幕偏移 ${v.toFixed(1)}s`); } break
       case 'v': case 'V': e.preventDefault(); { if (subtitleTracks.length > 0) { const nextIdx = activeSubtitleIndex + 1 >= subtitleTracks.length ? -1 : activeSubtitleIndex + 1; handleSubtitleSelect(nextIdx); showStatus(nextIdx === -1 ? '字幕关闭' : `字幕: ${subtitleTracks[nextIdx].label}`); } } break
-      case 'Escape': e.preventDefault(); if (infoOverlay) handleCloseInfo(); else if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); break
+      case 'Escape': e.preventDefault(); if (infoOverlay) handleCloseInfo(); else if (windowFullscreen) handleFullscreen(); break
     }
   }
 
@@ -1040,10 +1608,10 @@ function Player(): ReactElement {
 
   return (
     // 修复全屏黑条: 容器改为纯 relative，子元素均 absolute 定位，控件悬浮覆盖视频
-    <div ref={containerRef} className="h-full relative bg-black outline-none" onKeyDown={handleKeyDown} tabIndex={0}>
+    <div ref={containerRef} className={`h-full relative outline-none ${engineMode === 'mpv' && mpvActive ? 'bg-transparent' : 'bg-black'}`} onKeyDown={handleKeyDown} tabIndex={0}>
 
       {/* 视频区域 — 全屏铺满容器 */}
-      <div className={`absolute inset-0 bg-black overflow-hidden flex items-center justify-center ${isPortrait ? 'portrait-mode' : ''}`} onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
+      <div className={`absolute inset-0 overflow-hidden flex items-center justify-center ${isPortrait ? 'portrait-mode' : ''} ${engineMode === 'mpv' && mpvActive ? 'bg-transparent' : 'bg-black'}`} onContextMenu={handleContextMenu} onClick={handlePlayPause} onMouseMove={handleMouseMove}>
         {/* 顶部信息栏 */}
         <div className={`absolute top-0 left-0 right-0 z-30 transition-opacity duration-300 ease-in-out ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
           <div className="player-glass-bar bg-gradient-to-b from-black/60 to-black/30 px-4 py-3 flex items-center gap-3 border-none">
@@ -1067,8 +1635,8 @@ function Player(): ReactElement {
           </div>
         </div>
 
-        <div className="relative w-full h-full bg-black">
-          {isPortrait && displayMode === 'contain' && (
+        <div ref={mpvSlotRef} className={`relative w-full h-full ${engineMode === 'mpv' && mpvActive ? 'bg-transparent' : 'bg-black'}`}>
+          {isPortrait && engineMode === 'html5' && displayMode === 'contain' && (
             <div className="absolute inset-0 overflow-hidden -z-10">
               <canvas
                 ref={blurBgCanvasRef}
@@ -1080,11 +1648,15 @@ function Player(): ReactElement {
           <video
             ref={videoRef}
             className={`w-full h-full ${displayMode === 'cover' ? 'object-cover' : 'object-contain'}`}
+            style={engineMode !== 'html5' ? { display: 'none' } : undefined}
             controls={false}
             playsInline
             preload="metadata"
             crossOrigin="anonymous"
           />
+          {/* 画布引擎（方案 C）：libmpv 帧直接绘制为 DOM canvas，控件/弹幕/字幕天然悬浮其上 */}
+          {engineMode === 'mpv-canvas' && <MpvCanvasView />}
+          {/* 打孔引擎画面绘制在主窗口身后的原生窗口（透明孔透出）；弹幕/字幕 canvas 悬浮其上 */}
           <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-10" />
         </div>
 
@@ -1155,6 +1727,38 @@ function Player(): ReactElement {
         onLoadLocalXml={() => { void handleLoadLocalXml() }}
         onClose={() => { closeAllPopups(); setSearchResults([]) }}
       />
+
+      {/* V2 候选列表（低置信度/失败时展示，手动绑定兜底） */}
+      {matchCandidates.length > 0 && (
+        <div style={{ position: 'fixed', bottom: '72px', right: '20px' }} className="danmaku-search-popup w-80 player-glass-panel z-50 p-4 max-h-[60vh] overflow-auto">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs text-white/90 font-medium">候选弹幕源（点击绑定）</span>
+            <button onClick={() => setMatchCandidates([])} className="text-white/50 hover:text-white text-xs">✕</button>
+          </div>
+          {matchLogs.length > 0 && (
+            <details className="mb-2 text-[10px] text-white/40">
+              <summary className="cursor-pointer">匹配日志 ({matchLogs.length})</summary>
+              <pre className="whitespace-pre-wrap mt-1 max-h-24 overflow-auto">{matchLogs.join('\n')}</pre>
+            </details>
+          )}
+          <div className="space-y-1">
+            {matchCandidates.map((c, i) => (
+              <button
+                key={`${c.episodeId}-${i}`}
+                onClick={() => { void handleSelectCandidate(c) }}
+                className="w-full text-left px-3 py-2 rounded hover:bg-white/5 transition-colors"
+              >
+                <div className="text-xs text-white/90 truncate">{c.animeTitle}</div>
+                <div className="text-[11px] text-white/60 truncate">{c.episodeTitle}</div>
+                <div className="text-[10px] text-white/40">
+                  {c.source} · 分数 {c.score.toFixed(2)}
+                  {c.seasonHint != null ? ` · 季${c.seasonHint}` : ''}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 弹幕设置面板 */}
       <DanmakuSettingsPanel
@@ -1230,6 +1834,7 @@ function Player(): ReactElement {
           activeSubtitleIndex={activeSubtitleIndex}
           danmakuEnabled={danmakuEnabled}
           danmakuOffset={danmakuOffset}
+          danmakuComments={danmakuComments}
           pipActive={pipActive}
           subtitleSettingsOpen={subtitleSettingsOpen}
           onMouseMove={handleMouseMove}

@@ -83,3 +83,17 @@ sedwYHSqm
 # DWM 辅助工具
 disable-dwm.ps1
 tools/
+
+# 会话工具与缓存
+.workbuddy/
+.eb-cache/
+.backup_*/
+
+# 会话产出的临时文件（数字命名的空文件、报告、交付物）
+[0-9][0-9][0-9]
+[0-9][0-9][0-9][0-9]
+CODE_ANALYSIS_REPORT.md
+CODE_REVIEW_REPORT_*.md
+SECURITY_AUDIT_REPORT.md
+STARTUP_FIX_REPORT.md
+deliverables/

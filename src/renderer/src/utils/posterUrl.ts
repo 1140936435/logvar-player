@@ -32,7 +32,10 @@ export function getPosterUrl(options: PosterUrlOptions): string | null {
   }
 
   const authParam = options.token ? `&api_key=${encodeURIComponent(options.token)}` : ''
-  const imgBase = options.baseUrl.replace(/^https?:\/\//, 'jellyfin-image://')
+  // scheme 编码进 URL（与 emby-image 一致），主进程按前缀还原 https/http
+  const imgBase = options.baseUrl
+    .replace(/^https:\/\//, 'jellyfin-image://https/')
+    .replace(/^http:\/\//, 'jellyfin-image://http/')
   return `${imgBase}/Items/${options.itemId}/Images/Primary?maxHeight=${maxHeight}&tag=${encodeURIComponent(options.imageTag)}&quality=90&format=webp${authParam}`
 }
 

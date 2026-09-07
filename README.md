@@ -1,6 +1,6 @@
-# LogVar Media Player - 设计文档
+# logvar-player - 设计文档
 
-**项目名称**：LogVar Media Player  
+**项目名称**：logvar-player  
 **日期**：2026-06-10  
 **用途**：个人自用  
 **平台**：Windows 优先  
@@ -196,7 +196,7 @@ logvar-player/
 │   │   └── index.ts           # contextBridge 暴露 API
 │   └── shared/
 │       └── types.ts           # 共享类型定义
-├── electron.vite.config.ts
+├── electron.vite.config.cts
 ├── electron-builder.yml
 ├── package.json
 └── tsconfig.json
@@ -234,7 +234,7 @@ logvar-player/
 **首页（媒体库）：**
 ```
 ┌──────────────────────────────────────────┐
-│  🎬 LogVar Player    🔍搜索    ⚙设置    │
+│  🎬 logvar-player    🔍搜索    ⚙设置    │
 ├──────────────────────────────────────────┤
 │  继续观看                                │
 │  [卡片] [卡片] [卡片] [卡片]             │

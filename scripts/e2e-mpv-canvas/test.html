@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>mpv canvas e2e v2</title></head>
+<body style="margin:0;background:#000">
+<canvas id="c" style="width:320px;height:240px"></canvas>
+<script>
+// 真实视频 + 硬解开关对比测试：
+//   round A: hardwareDecode=true（与正式应用默认一致，d3d11va-copy 链路）
+//   round B: hardwareDecode=false（纯软解）
+// 每轮：play → 轮询 getFrame 最多 10s → 报告帧序号推进与像素非零情况
+const params = new URLSearchParams(location.search)
+const VIDEO = params.get('video') || ''
+
+const log = (m) => console.log('[e2e] ' + m)
+const logErr = (m) => console.log('[e2e][ERROR] ' + m)
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+async function round(label, hw) {
+  log(`===== ${label} (hardwareDecode=${hw}) =====`)
+  await window.api.mpvRender.destroy().catch(() => {})
+  await sleep(200)
+  window.api.mpvRender.setTargetSize(320, 240)
+  const playRes = await window.api.mpvRender.play(VIDEO, { hardwareDecode: hw })
+  log(`play=${JSON.stringify(playRes)}`)
+  if (!playRes.success) return
+
+  // 轮询：记录 seq 推进情况与首帧像素
+  let firstFrame = null
+  let lastSeq = -1
+  let seqSamples = []
+  const t0 = Date.now()
+  while (Date.now() - t0 < 12000) {
+    try {
+      const f = await window.api.mpvRender.getFrame(lastSeq)
+      if (f && f.seq !== lastSeq) {
+        if (!firstFrame) {
+          firstFrame = f
+          log(`首帧到达 耗时=${Date.now() - t0}ms seq=${f.seq} w=${f.width} h=${f.height}`)
+        }
+        lastSeq = f.seq
+        seqSamples.push(f.seq)
+      }
+    } catch (e) {
+      logErr('getFrame 异常: ' + (e && e.message))
+      break
+    }
+    await sleep(120)
+  }
+
+  if (!firstFrame) {
+    logErr(`${label}: 12s 内没有任何帧（seq 未推进）→ 对应真实应用的黑屏症状`)
+  } else {
+    const b = firstFrame.buffer
+    const px = b instanceof Uint8Array ? b : new Uint8Array(b)
+    let nonZero = 0
+    for (let i = 0; i < px.length; i += 997) if (px[i] !== 0 || px[i + 2] !== 0) nonZero++
+    log(`首帧抽样非零=${nonZero} seq跨度=[${seqSamples[0]}..${seqSamples[seqSamples.length - 1]}] 共${seqSamples.length}次更新` +
+        (nonZero === 0 ? '  ← 帧全黑！' : ''))
+  }
+  await window.api.mpvRender.stop().catch(() => {})
+}
+
+async function main() {
+  if (!VIDEO) { logErr('未传 video 参数'); done(); return }
+  log('测试文件: ' + VIDEO)
+  if (!window.api || !window.api.mpvRender) { logErr('window.api.mpvRender 不存在'); done(); return }
+
+  await round('ROUND-A 硬解(真实应用默认)', true)
+  await round('ROUND-B 软解', false)
+
+  await window.api.mpvRender.destroy().catch(() => {})
+  done()
+}
+
+let doneCount = 0
+function done() {
+  if (doneCount++ > 0) return
+  console.log('E2E_DONE')
+}
+main().catch(e => { console.log('[e2e][ERROR] 未捕获异常: ' + e.message); done() })
+</script>
+</body>
+</html>

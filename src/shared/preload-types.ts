@@ -1,5 +1,8 @@
 // Preload API 类型定义
-import type { DanmakuComment, DanmakuConfig, DanmakuMatchResult, DanmakuSearchResponse, JellyfinItem, JellyfinLibrary, LocalDanmakuCache, MpvTrack, MpvState, PlayerState, RecentlyAddedItem, RecentlyAddedConfig, ServerType } from './types'
+import type { DanmakuComment, DanmakuConfig, DanmakuMatchResult, DanmakuSearchResponse, JellyfinItem, JellyfinLibrary, LocalDanmakuCache, MpvTrack, MpvState, PlayerState, RecentlyAddedItem, RecentlyAddedConfig, ServerType, DanmakuMatchMeta, DanmakuMatchResultV2, DanmakuBindEntry } from './types'
+
+// 供 preload/index.ts 通过 import('../shared/preload-types').Xxx 引用的类型在此重新导出
+export type { RecentlyAddedItem, RecentlyAddedConfig } from './types'
 
 // ===== 通用响应类型 =====
 export interface ApiResponse<T = unknown> {
@@ -18,7 +21,8 @@ export interface JellyfinConnectResponse {
 
 export interface JellyfinLibrariesResponse {
   success: boolean
-  data?: JellyfinLibrary[]
+  // 修复 X-S2: 主进程 get-libraries 返回 { Items: [...] }，类型对齐真实响应结构
+  data?: { Items: JellyfinLibrary[] }
   error?: string
 }
 
@@ -44,6 +48,15 @@ export interface DanmakuMatchResponse {
   success: boolean
   data?: DanmakuMatchResult
   error?: string
+}
+
+// 多级匹配响应（V2，对标弹弹play/Animeko 多级优先级架构）
+export interface DanmakuMatchV2Response {
+  success: boolean
+  data?: DanmakuMatchResultV2['data']
+  candidates?: DanmakuMatchResultV2['candidates']
+  error?: string
+  log?: string[]
 }
 
 export interface DanmakuSearchApiResponse {
@@ -245,8 +258,47 @@ export interface VideoApi {
   getInfo: (filePath: string) => Promise<ApiResponse<VideoInfo>>
 }
 
+// ===== mpv 画布渲染引擎（方案 C：libmpv SW render API，视频作为 DOM 层） =====
+export interface MpvRenderFrame {
+  seq: number
+  width: number
+  height: number
+  stride: number
+  /** rgb0 像素（R,G,B,X），长度 = stride * height；跨 contextBridge 后为 Uint8Array */
+  buffer: Uint8Array
+}
+
+export interface MpvRenderOptions {
+  hardwareDecode?: boolean
+  hdrToneMapping?: boolean
+}
+
+/** 与主进程 mpv 控制面对齐的方法名，Player 页可无差别分发 */
+export interface MpvRenderApi {
+  play: (filePath: string, options?: MpvRenderOptions) => Promise<ApiResponse<void>>
+  stop: () => Promise<ApiResponse<void>>
+  pause: () => Promise<ApiResponse<void>>
+  resume: () => Promise<ApiResponse<void>>
+  seek: (position: number) => Promise<ApiResponse<void>>
+  setVolume: (volume: number) => Promise<ApiResponse<void>>
+  setSpeed: (speed: number) => Promise<ApiResponse<void>>
+  disableSubtitle: () => Promise<ApiResponse<void>>
+  /** 当前帧导出为 PNG 保存（主进程对话框），返回保存路径 */
+  screenshotSave: () => Promise<ApiResponse<string>>
+  isAvailable: () => Promise<ApiResponse<boolean>>
+  /** 拉取最新帧；无新帧 resolve null */
+  getFrame: (lastSeq: number) => Promise<MpvRenderFrame | null>
+  /** 设置渲染目标尺寸（画布 backing store 物理像素） */
+  setTargetSize: (width: number, height: number) => void
+  /** 离开播放页：释放 mpv 实例与渲染循环 */
+  destroy: () => Promise<ApiResponse<void>>
+  onEvent: (callback: (event: string, data: MpvEvent) => void) => void
+  offEvent: () => void
+}
+
 // ===== API 类型定义 =====
 export interface Api {
+  mpvRender: MpvRenderApi
   mpv: {
     play: (filePath: string) => Promise<ApiResponse<void>>
     stop: () => Promise<ApiResponse<void>>
@@ -270,6 +322,8 @@ export interface Api {
     isAvailable: () => Promise<ApiResponse<boolean>>
     embed: (x: number, y: number, width: number, height: number) => Promise<ApiResponse<void>>
     updateEmbed: (x: number, y: number, width: number, height: number) => Promise<ApiResponse<void>>
+    /** 离开播放页：销毁嵌入子窗口并结束 mpv 进程 */
+    hide: () => Promise<ApiResponse<void>>
     onEvent: (callback: (event: string, data: MpvEvent) => void) => void
     offEvent: () => void
   }
@@ -307,18 +361,21 @@ export interface Api {
     search: (keyword: string) => Promise<DanmakuSearchApiResponse>
     getComments: (commentId: string, source?: string) => Promise<DanmakuCommentsResponse>
     getSegmentComments: (params: unknown) => Promise<DanmakuCommentsResponse>
-    prefetchSeries: (animeId: number) => Promise<ApiResponse<void>>
+    prefetchSeries: (animeId: number, currentEpisodeId?: number) => Promise<ApiResponse<void>>
     getConfig: () => Promise<DanmakuConfigResponse>
     setConfig: (config: { primary?: string; mirrors?: string[]; appId?: string; appSecret?: string }) => Promise<ApiResponse<void>>
     testApi: (url: string) => Promise<ApiResponse<{ success: boolean; elapsed: number; animeCount?: number; epCount?: number; detail?: string }>>
     parseLocalXml: (xmlPath: string) => Promise<DanmakuCommentsResponse>
     findLocalXml: (videoPath: string) => Promise<ApiResponse<{ count: number; comments: DanmakuComment[]; source: string }>>
-    // 预下载弹幕到本地缓存
-    downloadDanmaku: (title: string) => Promise<LocalDanmakuCacheResponse>
-    // 获取已缓存的本地弹幕列表
-    getLocalDanmakuList: () => Promise<LocalDanmakuListResponse>
-    // 删除本地弹幕缓存
-    deleteLocalDanmaku: (episodeId: number) => Promise<ApiResponse<void>>
+    // ===== V2 多级优先级匹配（结构化元数据，解决切集串弹幕） =====
+    // 多级匹配：manual→id→hash→metadata→regex→candidates
+    matchEpisode: (meta: DanmakuMatchMeta) => Promise<DanmakuMatchV2Response>
+    // 手动绑定弹幕源（持久化，下次直接复用精准ID）
+    bindEpisode: (entry: DanmakuBindEntry) => Promise<ApiResponse<void>>
+    // 清除手动绑定
+    clearBind: (mediaSourceId: string, itemId: string) => Promise<ApiResponse<void>>
+    // 获取候选列表（强制重新匹配，不读缓存）
+    getCandidates: (meta: DanmakuMatchMeta) => Promise<DanmakuMatchV2Response>
   }
 
   file: {
@@ -368,21 +425,28 @@ export interface Api {
     delete: (key: string) => Promise<boolean>
   }
 
+  data: {
+    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[] }) => Promise<ApiResponse<{ filePath: string; keyCount: number; size: number }>>
+    import: (options?: { merge?: boolean; selectedKeys?: string[] }) => Promise<ApiResponse<{ importedCount: number; skippedCount: number; warnings: string[]; importedKeys: string[]; skippedKeys: string[] }>>
+    listKeys: () => Promise<ApiResponse<Array<{ key: string; hasSensitive: boolean }>>>
+  }
+
   window: {
     minimize: () => Promise<void>
     maximize: () => Promise<void>
     close: () => Promise<void>
+    toggleFullscreen: () => Promise<ApiResponse<boolean>>
     alwaysOnTop: (enabled?: boolean) => Promise<ApiResponse<boolean>>
+    /** 原生全屏状态变化（enter/leave-full-screen），返回取消订阅函数 */
+    onFullscreenChanged: (callback: (fullscreen: boolean) => void) => () => void
   }
 }
 
 // 全局 Window 接口扩展
+// 修复 X-S4: 移除 electron 属性，避免与 env.d.ts 中的声明冲突，env.d.ts 为唯一真源
 declare global {
   interface Window {
     api: Api
-    electron: {
-      platform: string
-    }
   }
 }
 

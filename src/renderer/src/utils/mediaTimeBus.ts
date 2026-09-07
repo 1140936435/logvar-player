@@ -19,6 +19,11 @@ export class MediaTimeBus {
   private animationFrameId: number | null = null
   private isSeeking: boolean = false
 
+  // 手动时钟模式（mpv 引擎）：不绑定 <video>，由外部事件同步锚点，
+  // RAF 循环按 wall-clock + 播放速率外推，保证弹幕动画平滑
+  private manualMode: boolean = false
+  private manualWallTime: number = 0
+
   private state: MediaTimeState = {
     currentTime: 0,
     duration: 0,
@@ -28,6 +33,7 @@ export class MediaTimeBus {
   }
 
   attachVideo(video: HTMLVideoElement): void {
+    this.manualMode = false
     this.videoElement = video
     this.state.duration = video.duration || 0
     this.state.currentTime = video.currentTime || 0
@@ -35,9 +41,55 @@ export class MediaTimeBus {
     this.setupVideoListeners()
   }
 
+  /** 手动模式：用于 mpv 等无 <video> 元素的播放引擎 */
+  attachManual(): void {
+    this.cleanupVideoListeners()
+    this.videoElement = null
+    this.manualMode = true
+    this.state = {
+      currentTime: 0,
+      duration: 0,
+      playbackRate: 1,
+      isPlaying: false,
+      buffered: 0
+    }
+    this.manualWallTime = performance.now()
+  }
+
+  /** 手动模式下由引擎事件（time-pos/pause/speed/duration）同步状态 */
+  syncFromEngine(patch: {
+    currentTime?: number
+    duration?: number
+    isPlaying?: boolean
+    playbackRate?: number
+    buffered?: number
+  }): void {
+    this.manualWallTime = performance.now()
+    if (patch.currentTime !== undefined && Number.isFinite(patch.currentTime)) {
+      this.state.currentTime = patch.currentTime
+    }
+    if (patch.duration !== undefined && Number.isFinite(patch.duration)) {
+      this.state.duration = patch.duration
+    }
+    if (patch.playbackRate !== undefined && Number.isFinite(patch.playbackRate)) {
+      this.state.playbackRate = patch.playbackRate
+    }
+    if (patch.buffered !== undefined) {
+      this.state.buffered = patch.buffered
+    }
+    if (patch.isPlaying !== undefined) {
+      this.state.isPlaying = patch.isPlaying
+      // 暂停时停止 RAF 循环（弹幕冻结）；播放时恢复
+      if (patch.isPlaying) this.start()
+      else this.stop()
+    }
+    this.notify()
+  }
+
   detachVideo(): void {
     this.cleanupVideoListeners()
     this.videoElement = null
+    this.manualMode = false
     this.stop()
   }
 
@@ -45,9 +97,12 @@ export class MediaTimeBus {
     if (!this.videoElement) return
     const video = this.videoElement
     video.addEventListener('play', this.onPlay)
+    // 修复：waiting 不再绑 onPause。waiting 时 video.paused 仍为 false，
+    // 若设 isPlaying=false，网络恢复后不触发 play 事件，按钮卡在暂停。
+    // 卡顿的 loading 状态由 Player.tsx 的 onWaiting 单独管理。
+    video.addEventListener('playing', this.onPlay)
     video.addEventListener('pause', this.onPause)
     video.addEventListener('ended', this.onPause)
-    video.addEventListener('waiting', this.onPause)
     video.addEventListener('seeking', this.onSeeking)
     video.addEventListener('seeked', this.onSeeked)
     video.addEventListener('progress', this.onProgress)
@@ -58,9 +113,9 @@ export class MediaTimeBus {
     if (!this.videoElement) return
     const video = this.videoElement
     video.removeEventListener('play', this.onPlay)
+    video.removeEventListener('playing', this.onPlay)
     video.removeEventListener('pause', this.onPause)
     video.removeEventListener('ended', this.onPause)
-    video.removeEventListener('waiting', this.onPause)
     video.removeEventListener('seeking', this.onSeeking)
     video.removeEventListener('seeked', this.onSeeked)
     video.removeEventListener('progress', this.onProgress)
@@ -142,6 +197,27 @@ export class MediaTimeBus {
   // 性能优化：loop 中 RAF 观察者每帧调用（弹幕引擎需要平滑动画），
   // 常规观察者通过 store 层节流（约 200ms 通知一次 UI 更新）
   private loop = (): void => {
+    // 手动模式（mpv）：不依赖 <video>，用 wall-clock 外推播放进度
+    if (this.manualMode) {
+      const now = performance.now()
+      // tab 隐藏时 rAF 暂停，恢复后首帧 dt 可能达几十秒，
+      // 钳制到 0.25s 防止 currentTime 单帧暴增（真实进度由 mpv time 事件重锚）
+      const dt = Math.min((now - this.manualWallTime) / 1000, 0.25)
+      this.manualWallTime = now
+      if (this.state.isPlaying) {
+        this.state.currentTime += dt * this.state.playbackRate
+      }
+
+      // 每帧调用 RAF 观察者（弹幕引擎需要平滑更新）
+      this.rafObservers.forEach((observer) => {
+        observer(this.state.currentTime, this.state.playbackRate)
+      })
+      this.notify()
+
+      this.animationFrameId = requestAnimationFrame(this.loop)
+      return
+    }
+
     if (!this.videoElement || this.isSeeking) {
       this.animationFrameId = requestAnimationFrame(this.loop)
       return

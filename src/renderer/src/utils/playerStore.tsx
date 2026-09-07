@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useRef, useEffect, useCallback, useState } from 'react'
+import React, { createContext, useContext, useRef, useEffect, useMemo, useState } from 'react'
 
 export interface PlayerStoreState {
   currentTime: number
@@ -167,18 +167,20 @@ export function usePlayerStore(): [PlayerStoreState, PlayerStoreActions] {
     return unsubscribe
   }, [store])
 
-  const actions: PlayerStoreActions = {
-    setCurrentTime: useCallback((time: number) => store.setCurrentTime(time), [store]),
-    forceNotifyCurrentTime: useCallback(() => store.forceNotifyCurrentTime(), [store]),
-    setDuration: useCallback((duration: number) => store.setDuration(duration), [store]),
-    setPlaybackRate: useCallback((rate: number) => store.setPlaybackRate(rate), [store]),
-    setIsPlaying: useCallback((playing: boolean) => store.setIsPlaying(playing), [store]),
-    setVolume: useCallback((volume: number) => store.setVolume(volume), [store]),
-    setBuffered: useCallback((buffered: number) => store.setBuffered(buffered), [store]),
-    setError: useCallback((error: string) => store.setError(error), [store]),
-    setLoading: useCallback((loading: boolean) => store.setLoading(loading), [store]),
-    reset: useCallback(() => store.reset(), [store])
-  }
+  // 性能优化：actions 用 useMemo 缓存，空依赖 —— store 实例来自 Provider 的 useRef，
+  // 全生命周期稳定不变。此前每次渲染重建 actions 对象导致依赖它的 effect 每 ~200ms 重跑。
+  const actions: PlayerStoreActions = useMemo(() => ({
+    setCurrentTime: (time: number) => store.setCurrentTime(time),
+    forceNotifyCurrentTime: () => store.forceNotifyCurrentTime(),
+    setDuration: (duration: number) => store.setDuration(duration),
+    setPlaybackRate: (rate: number) => store.setPlaybackRate(rate),
+    setIsPlaying: (playing: boolean) => store.setIsPlaying(playing),
+    setVolume: (volume: number) => store.setVolume(volume),
+    setBuffered: (buffered: number) => store.setBuffered(buffered),
+    setError: (error: string) => store.setError(error),
+    setLoading: (loading: boolean) => store.setLoading(loading),
+    reset: () => store.reset()
+  }), [])
 
   return [state, actions]
 }

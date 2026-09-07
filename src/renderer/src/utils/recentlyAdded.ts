@@ -26,7 +26,7 @@ export async function getRecentlyAdded(limit?: number, forceRefresh = false): Pr
       return limit ? cachedList.slice(0, limit) : cachedList
     }
 
-    const result = await window.api.recentlyAdded.list(limit || 100)
+    const result = await window.api.recentlyAdded.list(limit ?? 0) // 0 = 不限制，返回全量
     if (result.success && result.data) {
       cachedList = result.data
       listCacheTime = now
@@ -153,7 +153,9 @@ export async function detectAndRecordNewMedia(
   serverId?: string
 ): Promise<number> {
   try {
-    const existing = await getRecentlyAdded(100, true)
+    // 修复 M6: 全量拉取已有记录做比对（此前只取前 100 条，
+    // 媒体库超过 100 条时旧媒体会被误判为新媒体重复入库）
+    const existing = await getRecentlyAdded(undefined, true)
     const existingIds = new Set(existing.map(item => item.itemId))
 
     const newEntries: RecentlyAddedItem[] = []

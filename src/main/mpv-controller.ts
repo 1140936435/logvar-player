@@ -10,9 +10,14 @@
 
 import { EventEmitter } from 'events'
 import { join, dirname } from 'path'
-import { existsSync } from 'fs'
+import { existsSync, mkdirSync } from 'fs'
 import { execSync } from 'child_process'
 import { app, BrowserWindow, screen } from 'electron'
+
+/** HWND（void* 返回值可能是 bigint 或 number）转十进制字符串，mpv --wid 接受十进制句柄 */
+function hwndToString(hwnd: unknown): string {
+  return typeof hwnd === 'bigint' ? hwnd.toString() : String(hwnd)
+}
 
 // ==================== IPC 路径工具 ====================
 // mpv 在 Windows 上使用命名管道 (named pipe)，不是 Unix socket 文件
@@ -21,7 +26,10 @@ const isWin32 = process.platform === 'win32'
 
 /** 获取 mpv IPC 连接路径 */
 function getIpcConnectPath(socketPath: string): string {
-  return isWin32 ? `\\\\.\\pipe\\${socketPath}` : socketPath
+  if (!isWin32) return socketPath
+  // ipcSocketPath 在 win32 下生成时已包含完整 \\.\pipe\ 前缀，不能重复拼接
+  if (socketPath.startsWith('\\\\.\\pipe\\')) return socketPath
+  return `\\\\.\\pipe\\${socketPath}`
 }
 
 // ==================== 类型定义 ====================
@@ -52,6 +60,7 @@ export interface MpvControllerOptions {
   mpvBinary?: string
   hardwareDecode: boolean
   hdrToneMapping: boolean
+  debugLog?: boolean
 }
 
 // ==================== Win32 API（通过 koffi） ====================
@@ -59,6 +68,7 @@ export interface MpvControllerOptions {
 let win32: {
   CreateWindowExW: Function
   SetWindowPos: Function
+  ShowWindow: Function
   DestroyWindow: Function
   GetModuleHandleW: Function
   RegisterClassExW: Function
@@ -123,6 +133,7 @@ function initWin32(): boolean {
     const SetWindowPos = user32.func('SetWindowPos', 'int', [
       'void *', 'void *', 'int', 'int', 'int', 'int', 'uint32'
     ])
+    const ShowWindow = user32.func('ShowWindow', 'int', ['void *', 'int'])
     const DestroyWindow = user32.func('DestroyWindow', 'int', ['void *'])
 
     // 注册窗口类
@@ -157,6 +168,7 @@ function initWin32(): boolean {
     win32 = {
       CreateWindowExW,
       SetWindowPos,
+      ShowWindow,
       DestroyWindow,
       GetModuleHandleW,
       RegisterClassExW,
@@ -198,6 +210,14 @@ export class MpvController extends EventEmitter {
   private mpvBinaryPath: string = ''
   private isRunning: boolean = false
   private loadedFilePath: string = ''
+  // 互斥锁：防止 embed/play 并发调用 start() 时重复 spawn 进程
+  private startingPromise: Promise<void> | null = null
+  /** mpv 渲染窗口（打孔架构）：主窗口身后的 WS_POPUP 顶层窗口，非 WS_CHILD */
+  private lastRectDip: { left: number; top: number; width: number; height: number } | null = null
+  /** 渲染窗口是否已显示（file-loaded 后才揭示，避免透出桌面） */
+  private mpvWindowRevealed = false
+  /** 已挂过窗口同步监听的 BrowserWindow（防重复绑定） */
+  private winListenersAttachedFor: BrowserWindow | null = null
 
   constructor(options: MpvControllerOptions) {
     super()
@@ -264,18 +284,23 @@ export class MpvController extends EventEmitter {
       parentHwnd = BigInt(handleBuf.readUInt32LE(0))
     }
 
-    console.log(`[MpvController] Creating child window: parent=0x${parentHwnd.toString(16)}, pos=(${x},${y}), size=${width}x${height}`)
+    console.log(`[MpvController] Creating mpv render window (below main): pos=(${x},${y}), size=${width}x${height}`)
 
-    const WS_CHILD = 0x40000000
-    const WS_VISIBLE = 0x10000000
+    const WS_POPUP = 0x80000000
+    // WS_EX_TOOLWINDOW: 不进任务栏/Alt+Tab；WS_EX_NOACTIVATE: 永不抢焦点。
+    // 视频窗口位于主窗口身后，鼠标与键盘输入全部由主窗口（Chromium）接收。
+    const WS_EX_TOOLWINDOW = 0x00000080
+    const WS_EX_NOACTIVATE = 0x08000000
 
+    // 注意：创建时不可见（无 WS_VISIBLE）。file-loaded 后 revealMpvWindow() 才显示，
+    // 避免空窗口在打孔区域透出桌面/白底。
     const hwnd = win32.CreateWindowExW(
-      0,                          // dwExStyle
+      WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, // dwExStyle
       registeredClassName!,       // lpClassName
       '',                         // lpWindowName
-      WS_CHILD | WS_VISIBLE,      // dwStyle
-      x, y, width, height,       // position & size
-      parentHwnd,                 // hWndParent (bigint directly)
+      WS_POPUP,                   // dwStyle（隐藏的顶层弹窗）
+      0, 0, Math.max(1, Math.round(width)), Math.max(1, Math.round(height)),
+      null,                       // hWndParent：顶层窗口，非 WS_CHILD
       null,                       // hMenu
       win32.GetModuleHandleW(null), // hInstance
       null                        // lpParam
@@ -287,20 +312,97 @@ export class MpvController extends EventEmitter {
     }
 
     this.childHwnd = hwnd
-    console.log('[MpvController] Child window created successfully')
+    this.lastRectDip = { left: x, top: y, width, height }
+    this.mpvWindowRevealed = false
+
+    this.attachWindowListeners(parentWindow)
+    this.syncMpvWindowPosition()
+
+    console.log('[MpvController] mpv render window created (hidden, behind main window)')
     return true
   }
 
-  /** 更新子窗口位置和大小 */
-  updateChildWindowPosition(x: number, y: number, width: number, height: number): void {
-    if (!this.childHwnd || !win32 || !koffiModule) return
-
-    const SWP_NOZORDER = 0x0004
-
-    win32.SetWindowPos(this.childHwnd, BigInt(0), x, y, width, height, SWP_NOZORDER)
+  /** 计算视频槽位的屏幕物理像素矩形（contentBounds(DIP) + 视口相对矩形(DIP)，×显示器 scaleFactor） */
+  private computeScreenPhysicalRect(): { x: number; y: number; w: number; h: number } | null {
+    if (!this.parentWindow || this.parentWindow.isDestroyed() || !this.lastRectDip) return null
+    try {
+      const cb = this.parentWindow.getContentBounds()
+      const sf = screen.getDisplayMatching(cb).scaleFactor || 1
+      const r = this.lastRectDip
+      return {
+        x: Math.round((cb.x + r.left) * sf),
+        y: Math.round((cb.y + r.top) * sf),
+        w: Math.max(1, Math.round(r.width * sf)),
+        h: Math.max(1, Math.round(r.height * sf))
+      }
+    } catch {
+      return null
+    }
   }
 
-  /** 销毁子窗口 */
+  /** 同步 mpv 渲染窗口位置，并将其插到主窗口正后方（z 序紧邻其下，打孔可见） */
+  private syncMpvWindowPosition(): void {
+    if (!this.childHwnd || !win32) return
+    const rect = this.computeScreenPhysicalRect()
+    if (!rect) return
+    // hWndInsertAfter = 主窗口 HWND → mpv 窗口被放到主窗口正后方
+    let insertAfter: bigint = BigInt(1) // HWND_BOTTOM 兜底
+    if (this.parentHwndBuffer && this.parentHwndBuffer.length === 8) {
+      insertAfter = this.parentHwndBuffer.readBigUInt64LE(0)
+    }
+    const SWP_NOACTIVATE = 0x0010
+    try {
+      win32.SetWindowPos(this.childHwnd, insertAfter, rect.x, rect.y, rect.w, rect.h, SWP_NOACTIVATE)
+    } catch (err) {
+      console.warn('[MpvController] SetWindowPos failed:', err)
+    }
+  }
+
+  /** file-loaded 后显示渲染窗口（打孔透出画面）。延迟由调用方控制。 */
+  private revealMpvWindow(): void {
+    if (!this.childHwnd || !win32 || this.mpvWindowRevealed) return
+    this.mpvWindowRevealed = true
+    const SW_SHOWNA = 8
+    try {
+      win32.ShowWindow(this.childHwnd, SW_SHOWNA)
+    } catch { /* ignore */ }
+    this.syncMpvWindowPosition()
+    console.log('[MpvController] mpv render window revealed')
+  }
+
+  /** 主窗口移动/缩放/全屏/最小化时同步渲染窗口（一次性绑定） */
+  private attachWindowListeners(win: BrowserWindow): void {
+    if (this.winListenersAttachedFor === win) return
+    this.winListenersAttachedFor = win
+    const sync = (): void => { if (this.childHwnd) this.syncMpvWindowPosition() }
+    win.on('move', sync)
+    win.on('resize', sync)
+    win.on('maximize', sync)
+    win.on('enter-full-screen', sync)
+    win.on('leave-full-screen', sync)
+    win.on('restore', () => {
+      if (!this.childHwnd) return
+      if (this.mpvWindowRevealed) {
+        try { win32?.ShowWindow(this.childHwnd, 8) } catch { /* ignore */ }
+      }
+      sync()
+    })
+    win.on('minimize', () => {
+      if (this.childHwnd) {
+        try { win32?.ShowWindow(this.childHwnd, 0) } catch { /* ignore */ } // SW_HIDE
+      }
+    })
+    win.on('closed', () => { this.winListenersAttachedFor = null })
+  }
+
+  /** 更新渲染窗口位置和大小（DIP 视口坐标，随主窗口移动自动跟随） */
+  updateChildWindowPosition(x: number, y: number, width: number, height: number): void {
+    this.lastRectDip = { left: x, top: y, width, height }
+    if (!this.childHwnd) return
+    this.syncMpvWindowPosition()
+  }
+
+  /** 销毁渲染窗口 */
   destroyChildWindow(): void {
     if (this.childHwnd && win32) {
       try {
@@ -310,6 +412,7 @@ export class MpvController extends EventEmitter {
       }
       this.childHwnd = null
     }
+    this.mpvWindowRevealed = false
   }
 
   // ==================== mpv 进程管理 ====================
@@ -321,53 +424,96 @@ export class MpvController extends EventEmitter {
       return
     }
 
+    // 互斥锁：若已有 start() 在进行中，复用同一个 Promise 防止重复 spawn
+    if (this.startingPromise) {
+      return this.startingPromise
+    }
+
     // mpv 不可用时直接抛出错误
     if (!this.isAvailable()) {
       throw new Error('mpv 未安装或未找到可执行文件')
     }
 
-    // 生成 IPC socket 路径
-    const socketDir = join(app.getPath('userData'), 'mpv_ipc')
-    this.ipcSocketPath = join(socketDir, `mpv_socket_${Date.now()}.sock`)
+    // 立即记录 in-flight Promise，防止 embed/play 并发调用导致重复 spawn
+    const p = this.performStart()
+    this.startingPromise = p
+    try {
+      await p
+    } finally {
+      // 清除互斥锁，允许后续 start() 调用
+      if (this.startingPromise === p) {
+        this.startingPromise = null
+      }
+    }
+  }
+
+  /** start() 的实际执行体（已通过互斥锁保护） */
+  private async performStart(): Promise<void> {
+    // 生成 IPC 路径
+    // Windows: mpv 要求命名管道完整路径 \\.\pipe\<name>，且必须原样传给 --input-ipc-server；
+    // 传入普通文件路径时 mpv 无法创建服务端。Unix/macOS 使用 socket 文件。
+    if (isWin32) {
+      this.ipcSocketPath = `\\\\.\\pipe\\huanying-mpv-${process.pid}-${Date.now()}`
+    } else {
+      const socketDir = join(app.getPath('userData'), 'mpv_ipc')
+      if (!existsSync(socketDir)) mkdirSync(socketDir, { recursive: true })
+      this.ipcSocketPath = join(socketDir, `mpv_socket_${Date.now()}.sock`)
+    }
 
     // 构建 mpv 参数
     const mpvArgs: string[] = [
       '--no-terminal',
-      '--msg-level=all=debug',
+      // 注意：--no-terminal 会丢弃全部终端输出（含日志），verbose 日志须落文件（见 debugLog 分支）
+      this.options.debugLog ? '--msg-level=all=v' : '--msg-level=all=warn',
       `--input-ipc-server=${this.ipcSocketPath}`,
       '--hr-seek=absolute',
       '--hr-seek-framedrop=no',
       '--keep-open=yes',
       '--idle=yes',
+      // 未嵌入子窗口（独立窗口模式）时也强制创建播放窗口
+      '--force-window=yes',
+      // 显式指定视频输出与 GPU API，消除默认配置不确定性
+      '--vo=gpu',
+      '--gpu-api=d3d11',
     ]
 
-    // 硬件解码
+    // 调试日志：--no-terminal 下 stderr 不可用，用 --log-file 采集 mpv verbose 日志
+    // （每次启动覆盖写入，路径：userData/logs/mpv-debug.log）
+    if (this.options.debugLog) {
+      const logDir = join(app.getPath('userData'), 'logs')
+      if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true })
+      mpvArgs.push(`--log-file=${join(logDir, 'mpv-debug.log')}`)
+      console.log(`[MpvController] mpv debug log: ${join(logDir, 'mpv-debug.log')}`)
+    }
+
+    // 硬件解码：多方式列表（mpv 原生逐个尝试，每个文件加载时重新探测）。
+    // 单独 --hwdec=d3d11va 在 Optimus 双显卡笔记本上会失败——mpv 的 D3D11 渲染设备
+    // 选了 NVIDIA，而 ffmpeg d3d11va 解码设备可能落在 Intel 核显上，枚举不到 HEVC
+    // profile（No decoder device for codec found）。列表让 mpv 在 d3d11va 失败后
+    // 自动尝试 nvdec-copy（NVIDIA 直连，-copy 不依赖 VO interop）等其余方式。
     if (this.options.hardwareDecode) {
-      mpvArgs.push('--hwdec=auto-safe')
+      mpvArgs.push('--hwdec=d3d11va,nvdec-copy,dxva2-copy,qsv-copy')
     } else {
       mpvArgs.push('--hwdec=no')
     }
 
-    // HDR 色调映射
+    // HDR 色调映射（使用 bt.2390 算法，比 auto 更稳定）
     if (this.options.hdrToneMapping) {
-      mpvArgs.push('--tone-mapping=auto')
+      mpvArgs.push('--tone-mapping=bt.2390')
       mpvArgs.push('--tone-mapping-max-boost=2')
     }
 
-    // 嵌入窗口
-    if (this.childHwnd && koffiModule) {
-      let hwndValue: bigint
-      if (this.parentHwndBuffer && this.parentHwndBuffer.length === 8) {
-        // 子窗口的 HWND 需要单独获取
-        // 从 childHwnd 编码值中提取
-        const childBuf = Buffer.alloc(8)
-        koffiModule.encode(childBuf, 0, 'void *', this.childHwnd)
-        hwndValue = childBuf.readBigUInt64LE(0)
-      } else {
-        hwndValue = BigInt(0)
-      }
-      mpvArgs.push(`--wid=${hwndValue}`)
+    // 嵌入窗口：把 createChildWindow 创建的子窗口句柄交给 mpv，
+    // mpv 会把视频渲染到该子窗口（而非自己新建顶层窗口）
+    if (this.childHwnd) {
+      mpvArgs.push(`--wid=${hwndToString(this.childHwnd)}`)
+      // 嵌入模式禁用 mpv 自身键鼠绑定，输入事件由 Electron 窗口统一处理
       mpvArgs.push('--no-input-default-bindings')
+      // 关键：默认 flip-model 交换链对子窗口（--wid）呈现异常——初始化成功但画面不上屏（黑屏）。
+      // 关闭 flip 改用 bitblt 模式：D3D11 将帧拷贝到后缓冲再 Present，兼容子窗口场景。
+      // 注意选项名是 --d3d11-flip（Flag），非新版 mpv 的 --gpu-d3d11-swapchain-mode；
+      // 传错选项名会导致 mpv 启动即退出、IPC 管道从未创建（connect ENOENT）。
+      mpvArgs.push('--d3d11-flip=no')
     }
 
     console.log(`[MpvController] Starting mpv: ${this.mpvBinaryPath}`)
@@ -390,14 +536,18 @@ export class MpvController extends EventEmitter {
       if (this.mpvProcess.stderr) {
         const chunks: string[] = []
         this.mpvProcess.stderr.on('data', (data: Buffer) => {
-          const line = data.toString().trim()
-          chunks.push(line)
-          if (chunks.length > 100) chunks.splice(0, 50)
-          if (chunks.length <= 10) {
-            console.log(`[MpvController] mpv stderr: ${line}`)
-          }
-          if (chunks.length === 11) {
-            console.log(`[MpvController] ... (more stderr lines hidden)`)
+          // 一次 data 可能包含多行，逐行处理保证日志准确
+          for (const rawLine of data.toString().split(/\r?\n/)) {
+            const line = rawLine.trim()
+            if (!line) continue
+            chunks.push(line)
+            if (chunks.length > 100) chunks.splice(0, 50)
+            if (chunks.length <= 10) {
+              console.log(`[MpvController] mpv stderr: ${line}`)
+            }
+            if (chunks.length === 11) {
+              console.log(`[MpvController] ... (more stderr lines hidden)`)
+            }
           }
         })
       }
@@ -438,6 +588,21 @@ export class MpvController extends EventEmitter {
       console.log('[MpvController] Started successfully')
     } catch (err) {
       console.error('[MpvController] Failed to start:', err)
+      // spawn 失败时清理可能残留的 mpv 僵尸进程
+      if (this.mpvProcess && this.mpvProcess.pid) {
+        try {
+          if (isWin32) {
+            require('child_process').execSync(
+              `taskkill /pid ${this.mpvProcess.pid} /f /t`,
+              { stdio: 'ignore', timeout: 3000 }
+            )
+          } else {
+            this.mpvProcess.kill('SIGKILL')
+          }
+        } catch { /* 进程可能已退出 */ }
+        this.cleanup()
+        this.mpvProcess = null
+      }
       this.emit('error', err instanceof Error ? err : new Error(String(err)))
       throw err
     }
@@ -447,13 +612,9 @@ export class MpvController extends EventEmitter {
   private waitForSocket(timeoutMs = 5000): Promise<void> {
     return new Promise((resolve, reject) => {
       if (isWin32) {
-        // Windows: mpv 创建命名管道而非文件，通过 existsSync 永远检测不到
-        // 直接等待足够时间让 mpv 创建管道
-        console.log('[MpvController] Windows: waiting for named pipe...')
-        setTimeout(() => {
-          console.log('[MpvController] Named pipe ready (timeout-based)')
-          resolve()
-        }, 800)
+        // Windows: mpv 创建命名管道而非文件，existsSync 永远检测不到；
+        // 就绪状态由 connectIpc() 的连接重试保证
+        resolve()
       } else {
         // Unix/macOS: 继续使用文件检测
         const start = Date.now()
@@ -473,20 +634,25 @@ export class MpvController extends EventEmitter {
     })
   }
 
-  /** 连接 mpv IPC socket */
-  private connectIpc(): Promise<void> {
+  /** 连接 mpv IPC socket（Windows 命名管道创建有延迟，需要重试） */
+  private connectIpc(attempt = 0): Promise<void> {
     return new Promise((resolve, reject) => {
       const net = require('net') as typeof import('net')
       const connectPath = getIpcConnectPath(this.ipcSocketPath)
-      console.log(`[MpvController] Connecting to IPC: ${connectPath}`)
-      const socket = net.createConnection(connectPath)
+      const maxAttempts = isWin32 ? 40 : 1 // Windows: 每 250ms 重试，最长 10s
+      if (attempt === 0) {
+        console.log(`[MpvController] Connecting to IPC: ${connectPath}`)
+      }
 
       let buffer = ''
-      let handshakeDone = false
+      let settled = false
+
+      const socket = net.createConnection(connectPath)
 
       socket.on('connect', () => {
-        console.log('[MpvController] IPC connected')
-        // mpv IPC 需要先发送 handshake
+        settled = true
+        console.log(`[MpvController] IPC connected${attempt > 0 ? ` (after ${attempt + 1} attempts)` : ''}`)
+        // 订阅 mpv 属性变化事件
         socket.write(JSON.stringify({ command: ['observe_property', 1, 'time-pos'] }) + '\n')
         socket.write(JSON.stringify({ command: ['observe_property', 2, 'duration'] }) + '\n')
         socket.write(JSON.stringify({ command: ['observe_property', 3, 'pause'] }) + '\n')
@@ -495,7 +661,7 @@ export class MpvController extends EventEmitter {
         socket.write(JSON.stringify({ command: ['observe_property', 6, 'track-list'] }) + '\n')
         socket.write(JSON.stringify({ command: ['observe_property', 7, 'fullscreen'] }) + '\n')
         socket.write(JSON.stringify({ command: ['observe_property', 8, 'filename'] }) + '\n')
-        handshakeDone = true
+        this.ipcConnection = socket as unknown as import('net').Socket
         resolve()
       })
 
@@ -514,16 +680,35 @@ export class MpvController extends EventEmitter {
       })
 
       socket.on('error', (err: Error) => {
-        console.error('[MpvController] IPC error:', err)
-        if (!handshakeDone) reject(err)
+        if (settled) {
+          console.error('[MpvController] IPC error:', err)
+          return
+        }
+        // 连接建立前的错误（管道尚不存在）
+        socket.destroy()
+        // 快速失败：mpv 进程已退出（多为非法启动参数导致秒退），不必重试到超时
+        if (this.mpvProcess && this.mpvProcess.exitCode !== null) {
+          reject(new Error(`mpv 进程启动后立即退出（exitCode=${this.mpvProcess.exitCode}），通常是启动参数无效或二进制异常`))
+          return
+        }
+        if (attempt + 1 < maxAttempts) {
+          setTimeout(() => {
+            this.connectIpc(attempt + 1).then(resolve).catch(reject)
+          }, 250)
+        } else {
+          reject(err)
+        }
       })
 
       socket.on('close', () => {
         console.log('[MpvController] IPC closed')
-        this.ipcConnection = null
+        if (this.ipcConnection === (socket as unknown as import('net').Socket)) {
+          this.ipcConnection = null
+        }
+        // 拒绝所有挂起的 IPC 请求，避免调用方永远 pending
+        this.pendingRequests.forEach(p => p.reject(new Error('IPC connection closed')))
+        this.pendingRequests.clear()
       })
-
-      this.ipcConnection = socket as unknown as import('net').Socket
     })
   }
 
@@ -599,6 +784,9 @@ export class MpvController extends EventEmitter {
     // 文件加载事件
     if (msg.event === 'file-loaded') {
       this.emit('file-loaded')
+      // 打孔揭示：延迟 150ms 等渲染端收到同一事件并把视频区域切透明后重绘，
+      // 避免渲染端仍是黑底时揭示（黑底盖住 → 只是黑一瞬），或提前揭示透出桌面。
+      setTimeout(() => this.revealMpvWindow(), 150)
     }
 
     // 播放开始
@@ -654,8 +842,7 @@ export class MpvController extends EventEmitter {
   async loadFile(filePath: string): Promise<void> {
     this.loadedFilePath = filePath
     await this.sendCommand(['loadfile', filePath, 'replace'])
-    // 启动时间轮询（确保时间更新频率足够高）
-    this.startTimePolling()
+    // 时间更新通过 connectIpc() 中的 observe_property(time-pos) 推送，无需主动轮询
   }
 
   /** 获取已加载的完整文件路径/URL */
@@ -769,18 +956,9 @@ export class MpvController extends EventEmitter {
   // ==================== 时间轮询 ====================
 
   private startTimePolling(): void {
+    // 已在 connectIpc() 中通过 observe_property(time-pos) 订阅时间变化，
+    // 主动轮询会导致双重通道并浪费 IPC 带宽，这里保留为 no-op 以兼容旧调用点
     this.stopTimePolling()
-    // 每 100ms 轮询时间，确保进度条平滑
-    this.timePollTimer = setInterval(async () => {
-      if (!this.isRunning || !this.ipcConnection) return
-      try {
-        const time = await this.getProperty('time-pos')
-        if (typeof time === 'number') {
-          this.state.timePos = time
-          this.emit('time', time)
-        }
-      } catch { /* ignore */ }
-    }, 100)
   }
 
   private stopTimePolling(): void {
@@ -800,6 +978,8 @@ export class MpvController extends EventEmitter {
       this.ipcConnection = null
     }
 
+    // 拒绝所有挂起的 IPC 请求，避免调用方永远 pending
+    this.pendingRequests.forEach(p => p.reject(new Error('IPC connection closed')))
     this.pendingRequests.clear()
     this.propertyObservers.clear()
 
@@ -849,10 +1029,28 @@ export class MpvController extends EventEmitter {
       try { (this.ipcConnection as any).destroy() } catch { /* ignore */ }
       this.ipcConnection = null
     }
+    // 拒绝所有挂起的 IPC 请求，避免调用方永远 pending
+    this.pendingRequests.forEach(p => p.reject(new Error('IPC connection closed')))
     this.pendingRequests.clear()
     this.propertyObservers.clear()
     this.isRunning = false
     console.log('[MpvController] Destroyed')
+  }
+
+  /** 退出钩子用：同步强制结束 mpv 进程树（destroy() 是异步的，will-quit 不等异步） */
+  killSync(): void {
+    if (this.mpvProcess && this.mpvProcess.pid && !this.mpvProcess.killed) {
+      const pid = this.mpvProcess.pid
+      try {
+        if (isWin32) {
+          require('child_process').execSync(`taskkill /pid ${pid} /f /t`, { stdio: 'ignore', timeout: 3000 })
+        } else {
+          this.mpvProcess.kill('SIGKILL')
+        }
+      } catch { /* 进程可能已退出 */ }
+    }
+    this.isRunning = false
+    this.stopTimePolling()
   }
 
   /** 检查 mpv 是否可用 */

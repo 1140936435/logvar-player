@@ -133,13 +133,15 @@
     }
 
     function createLogEntry(entry) {
+      const safeLevels = ['info', 'warn', 'error', 'debug'];
+      const level = safeLevels.includes(entry.level) ? entry.level : 'info';
       const div = document.createElement('div');
       div.className = 'log-entry';
-      div.dataset.level = entry.level;
+      div.dataset.level = level;
       div.innerHTML =
         `<span class="timestamp">${formatTime(entry.timestamp)}</span>` +
-        `<span class="level ${entry.level}">${entry.level.toUpperCase()}</span>` +
-        `<span class="source">[${entry.source}]</span>` +
+        `<span class="level ${level}">${level.toUpperCase()}</span>` +
+        `<span class="source">[${escapeHtml(entry.source)}]</span>` +
         `<span class="message">${escapeHtml(entry.message)}</span>`;
       return div;
     }

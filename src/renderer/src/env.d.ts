@@ -1,4 +1,5 @@
 /// <reference types="react" />
+/// <reference types="vite/client" />
 
 // 修复点 1.8: 消除 WindowApi vs Api 双份声明冲突，以 shared/preload-types.ts 里的 Api 为唯一真源
 // 修复点 1.1: 移除不存在的 electron-vite/renderer 三斜线引用

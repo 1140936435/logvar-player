@@ -204,7 +204,7 @@ function AppLayout(): ReactElement {
   }, [])
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden relative" style={{ background: 'var(--bg-page)' }}>
+    <div className="app-shell h-screen flex flex-col overflow-hidden relative">
       <TopBar dark={dark} toggleTheme={toggle} />
       <main className="flex-1 overflow-auto relative z-10">
         <AnimatePresence mode="wait">
