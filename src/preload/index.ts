@@ -158,8 +158,9 @@ const api: Api = {
   server: {
     list: () => ipcRenderer.invoke('server:list'),
     getActive: () => ipcRenderer.invoke('server:get-active'),
+    ensureConnected: () => ipcRenderer.invoke('server:ensure-connected'),
     add: (params: { name: string; url: string; token: string }) => ipcRenderer.invoke('server:add', params),
-    update: (params: { id: string; name?: string; url?: string; token?: string }) => ipcRenderer.invoke('server:update', params),
+    update: (params: import('../shared/preload-types').ServerUpdateParams) => ipcRenderer.invoke('server:update', params),
     remove: (id: string) => ipcRenderer.invoke('server:remove', id),
     switch: (id: string) => ipcRenderer.invoke('server:switch', id),
     test: (url: string, token: string) => ipcRenderer.invoke('server:test', url, token),
@@ -194,7 +195,7 @@ const api: Api = {
 
   // 数据导入导出
   data: {
-    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[] }) =>
+    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[]; includeSensitive?: boolean }) =>
       ipcRenderer.invoke('data:export', options),
     import: (options?: { merge?: boolean; selectedKeys?: string[] }) =>
       ipcRenderer.invoke('data:import', options),

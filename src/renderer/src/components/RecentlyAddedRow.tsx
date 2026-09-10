@@ -15,7 +15,6 @@ interface RecentlyAddedRowProps {
   items: RecentlyAddedItem[]
   onItemClick: (item: RecentlyAddedItem) => void
   baseUrl: string
-  token: string
   scrollSpeed?: number
   savedScrollPosition?: number
   onScrollPositionChange?: (position: number) => void
@@ -107,7 +106,6 @@ export function RecentlyAddedRow({
   items,
   onItemClick,
   baseUrl,
-  token,
   scrollSpeed = 1,
   savedScrollPosition = 0,
   onScrollPositionChange,
@@ -130,13 +128,12 @@ export function RecentlyAddedRow({
   const getPosterUrl = useCallback((item: RecentlyAddedItem): string | null => {
     return buildPosterUrl({
       baseUrl,
-      token,
       serverType: serverType || 'jellyfin',
       itemId: item.itemId,
       imageTag: item.imageTag,
       doubanPosterPath: doubanPosters[item.itemId],
     })
-  }, [baseUrl, token, serverType, doubanPosters])
+  }, [baseUrl, serverType, doubanPosters])
 
   // 更新箭头显示状态
   const updateArrowVisibility = useCallback(() => {

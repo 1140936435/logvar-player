@@ -91,7 +91,7 @@ function Detail(): ReactElement {
   const [expandedEpisode, setExpandedEpisode] = useState<string | null>(null)
 
   const [baseUrl, setBaseUrl] = useState('http://localhost:8096')
-  const [jellyfinToken, setJellyfinToken] = useState('')
+  // 凭据保留在主进程（DTO 边界），图片认证由 jellyfin-image/emby-image 协议按 host 注入
   const [localPosters, setLocalPosters] = useState<Record<string, string>>({})
   const [serverType, setServerType] = useState<'jellyfin' | 'emby'>('jellyfin')
   const [posterError, setPosterError] = useState(false)
@@ -123,20 +123,18 @@ function Detail(): ReactElement {
       if (result.success && result.data?.server) {
         const srv = result.data.server
         if (srv.url) setBaseUrl(srv.url.replace(/\/+$/, ''))
-        if (srv.token) setJellyfinToken(srv.token)
-        const detectedType = (srv as any).type === 'emby' ? 'emby' : 'jellyfin'
+        const detectedType = srv.type === 'emby' ? 'emby' : 'jellyfin'
         setServerType(detectedType)
         console.log(`[Detail] 从 server.getActive 检测到服务器类型: ${detectedType}`)
       } else {
-        // 降级：从旧配置读取
+        // 降级：从旧配置读取（store:get 已被主进程剥离凭据，仅取 url）
         window.api.store.get('jellyfin').then((saved: unknown) => {
-          const s = saved as { url?: string; token?: string } | null
+          const s = saved as { url?: string } | null
           if (cancelled) return
           if (s?.url) {
             setBaseUrl(s.url.replace(/\/+$/, ''))
             setServerType('jellyfin')
           }
-          if (s?.token) setJellyfinToken(s.token)
         }).catch(() => {})
       }
     }).catch(() => {})
@@ -257,15 +255,11 @@ function Detail(): ReactElement {
 
     if (serverType === 'emby') {
       const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
-      const tokenParam = jellyfinToken ? `&token=${encodeURIComponent(jellyfinToken)}` : ''
-      const url = `${imgBase}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90${tokenParam}`
-      console.log(`[Detail][Emby Poster] ${detail.Name}: ${url.replace(/token=[^&]+/, 'token=***')}`)
-      return url
+      return `${imgBase}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90`
     }
 
-    const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
     const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
-    return `${imgBase}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90${authParam}`
+    return `${imgBase}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90`
   }
 
   const getBackdropUrl = (): string | null => {
@@ -273,15 +267,11 @@ function Detail(): ReactElement {
 
     if (serverType === 'emby') {
       const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
-      const tokenParam = jellyfinToken ? `&token=${encodeURIComponent(jellyfinToken)}` : ''
-      const url = `${imgBase}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85${tokenParam}`
-      console.log(`[Detail][Emby Backdrop] ${detail.Name}: ${url.replace(/token=[^&]+/, 'token=***')}`)
-      return url
+      return `${imgBase}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85`
     }
 
-    const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
     const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
-    return `${imgBase}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85${authParam}`
+    return `${imgBase}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85`
   }
 
   const getPersonAvatar = (person: PersonInfo): string | null => {
@@ -289,31 +279,25 @@ function Detail(): ReactElement {
 
     if (serverType === 'emby') {
       const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
-      const tokenParam = jellyfinToken ? `&token=${encodeURIComponent(jellyfinToken)}` : ''
       if (person.Id) {
-        const url = tag
-          ? `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100&tag=${tag}${tokenParam}`
-          : `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100${tokenParam}`
-        console.log(`[Detail][Emby PersonAvatar] ${person.Name}: ${url.replace(/token=[^&]+/, 'token=***')}`)
-        return url
+        return tag
+          ? `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100&tag=${tag}`
+          : `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100`
       }
-      const url2 = tag
-        ? `${imgBase}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100&tag=${tag}${tokenParam}`
-        : `${imgBase}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100${tokenParam}`
-      console.log(`[Detail][Emby PersonAvatar] ${person.Name}: ${url2.replace(/token=[^&]+/, 'token=***')}`)
-      return url2
+      return tag
+        ? `${imgBase}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100&tag=${tag}`
+        : `${imgBase}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100`
     }
 
-    const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
     const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
     if (person.Id) {
       return tag
-        ? `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100&tag=${tag}${authParam}`
-        : `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100${authParam}`
+        ? `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100&tag=${tag}`
+        : `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100`
     }
     return tag
-      ? `${baseUrl}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100&tag=${tag}`
-      : `${baseUrl}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100`
+      ? `${imgBase}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100&tag=${tag}`
+      : `${imgBase}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100`
   }
 
   const getEpisodeThumbUrl = (ep: EpisodeInfo): string | null => {
@@ -321,15 +305,11 @@ function Detail(): ReactElement {
 
     if (serverType === 'emby') {
       const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
-      const tokenParam = jellyfinToken ? `&token=${encodeURIComponent(jellyfinToken)}` : ''
-      const url = `${imgBase}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85${tokenParam}`
-      console.log(`[Detail][Emby EpisodeThumb] ${ep.Name}: ${url.replace(/token=[^&]+/, 'token=***')}`)
-      return url
+      return `${imgBase}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85`
     }
 
-    const authParam = jellyfinToken ? `&api_key=${jellyfinToken}` : ''
     const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
-    return `${imgBase}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85${authParam}`
+    return `${imgBase}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85`
   }
 
   const isSeries = detail?.Type === 'Series' || detail?.CollectionType === 'tvshows'

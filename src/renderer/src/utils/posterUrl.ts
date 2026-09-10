@@ -2,7 +2,6 @@ export type ServerType = 'emby' | 'jellyfin'
 
 export interface PosterUrlOptions {
   baseUrl: string
-  token?: string
   serverType: ServerType
   itemId: string
   imageTag?: string
@@ -10,6 +9,10 @@ export interface PosterUrlOptions {
   doubanPosterPath?: string
 }
 
+/**
+ * 构建海报 URL（jellyfin-image/emby-image 协议链接，不含任何凭据）。
+ * 认证由主进程按 URL host 匹配已配置服务器后注入 X-Emby-Token 请求头。
+ */
 export function getPosterUrl(options: PosterUrlOptions): string | null {
   if (options.doubanPosterPath) {
     let urlPath = options.doubanPosterPath.replace(/\\/g, '/')
@@ -27,16 +30,14 @@ export function getPosterUrl(options: PosterUrlOptions): string | null {
     const imgBase = options.baseUrl
       .replace(/^https:\/\//, 'emby-image://https/')
       .replace(/^http:\/\//, 'emby-image://http/')
-    const tokenParam = options.token ? `&token=${encodeURIComponent(options.token)}` : ''
-    return `${imgBase}/Items/${options.itemId}/Images/Primary?maxHeight=${maxHeight}&tag=${encodeURIComponent(options.imageTag)}&quality=90&format=webp${tokenParam}`
+    return `${imgBase}/Items/${options.itemId}/Images/Primary?maxHeight=${maxHeight}&tag=${encodeURIComponent(options.imageTag)}&quality=90&format=webp`
   }
 
-  const authParam = options.token ? `&api_key=${encodeURIComponent(options.token)}` : ''
   // scheme 编码进 URL（与 emby-image 一致），主进程按前缀还原 https/http
   const imgBase = options.baseUrl
     .replace(/^https:\/\//, 'jellyfin-image://https/')
     .replace(/^http:\/\//, 'jellyfin-image://http/')
-  return `${imgBase}/Items/${options.itemId}/Images/Primary?maxHeight=${maxHeight}&tag=${encodeURIComponent(options.imageTag)}&quality=90&format=webp${authParam}`
+  return `${imgBase}/Items/${options.itemId}/Images/Primary?maxHeight=${maxHeight}&tag=${encodeURIComponent(options.imageTag)}&quality=90&format=webp`
 }
 
 export function getOptimalPosterHeight(): number {

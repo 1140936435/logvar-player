@@ -19,7 +19,6 @@ interface RecommendedRowProps {
   isLoading: boolean
   isColdStart: boolean
   serverType: 'jellyfin' | 'emby'
-  jellyfinToken?: string
   connectedServer?: string
   onItemClick: (item: RecommendationItem) => void
   onLoadMore: () => void
@@ -236,7 +235,6 @@ export function RecommendedRow({
   isLoading,
   isColdStart,
   serverType,
-  jellyfinToken,
   connectedServer,
   onItemClick,
   onLoadMore,
@@ -248,7 +246,6 @@ export function RecommendedRow({
   const [showRightArrow, setShowRightArrow] = useState(true)
 
   const baseUrl = connectedServer || 'http://localhost:8096'
-  const token = jellyfinToken || ''
 
   const updateArrowVisibility = useCallback(() => {
     if (!scrollRef.current) return
@@ -270,13 +267,12 @@ export function RecommendedRow({
     if (!item.posterUrl) return null
     return buildPosterUrl({
       baseUrl,
-      token,
       serverType,
       itemId: item.itemId,
       imageTag: item.posterUrl,
       maxHeight: 400
     })
-  }, [serverType, token, baseUrl])
+  }, [serverType, baseUrl])
 
   if (isLoading && items.length === 0) {
     return (

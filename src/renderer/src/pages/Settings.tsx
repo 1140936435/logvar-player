@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, type ReactElement } from 'react'
 import { useNavigate } from 'react-router-dom'
-// 修复点 1.21: preload-types 实际上没有导出 ServerInfo/ServerTestResult，只有 ServerConfig。
+// server:* IPC 返回的是公开 DTO（PublicServerConfig）：凭据不出主进程。
 // ServerInfo / ServerTestResult 是 Settings 里内聚的本地类型，自行定义。
-import type { ServerConfig as ApiServerConfig, EmbyTestResponse } from '../../../shared/preload-types'
+import type { PublicServerConfig as ApiServerConfig, EmbyTestResponse } from '../../../shared/preload-types'
 import type { JellyfinServerInfo, ServerType } from '../../../shared/types'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -198,6 +198,8 @@ function Settings(): ReactElement {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
   const [exportFormat, setExportFormat] = useState<'json' | 'csv'>('json')
   const [importMerge, setImportMerge] = useState(true)
+  // 是否在导出中包含服务器/弹幕凭据（明文，默认关闭，主进程默认也会强制排除）
+  const [includeSensitive, setIncludeSensitive] = useState(false)
   const [exportResult, setExportResult] = useState<{ success: boolean; message: string } | null>(null)
   const [importResult, setImportResult] = useState<{ success: boolean; message: string; details?: string } | null>(null)
 
@@ -256,14 +258,18 @@ function Settings(): ReactElement {
     try {
       const result = await window.api.data.export({
         format: exportFormat,
-        includeKeys: Array.from(selectedKeys)
+        includeKeys: Array.from(selectedKeys),
+        includeSensitive
       })
-      
+
       if (result.success && result.data) {
         const sizeKB = (result.data.size / 1024).toFixed(1)
+        const excluded = result.data.excludedSensitive?.length
+          ? `（已排除 ${result.data.excludedSensitive.length} 项凭据：${result.data.excludedSensitive.join('、')}）`
+          : ''
         setExportResult({
           success: true,
-          message: `导出成功！共 ${result.data.keyCount} 项数据，大小 ${sizeKB} KB`
+          message: `导出成功！共 ${result.data.keyCount} 项数据，大小 ${sizeKB} KB${excluded}`
         })
       } else {
         setExportResult({
@@ -278,7 +284,7 @@ function Settings(): ReactElement {
       })
     }
     setExporting(false)
-  }, [selectedKeys, exportFormat])
+  }, [selectedKeys, exportFormat, includeSensitive])
 
   // 导入数据
   const handleImport = useCallback(async (): Promise<void> => {
@@ -385,33 +391,21 @@ function Settings(): ReactElement {
           return
         }
         if (editingServer) {
-          // 编辑模式下更新 Emby 服务器（仅 name/url/账号密码/token/userId 可变）
-          // 复用 server.update 更新基础字段，再用 store 直接写回 type/username/password/userId
-          await window.api.server.update({
+          // 编辑模式：一次性更新 Emby 全部字段（含新测试拿到的 token/userId），
+          // 凭据经 server:update 专用通道写入，不走通用 store
+          const result = await window.api.server.update({
             id: editingServer.id,
             name: serverForm.name.trim() || `Emby (${serverForm.username.trim()})`,
             url: serverForm.url.trim(),
-            token: embyLoginResult.token
+            token: embyLoginResult.token,
+            type: 'emby',
+            username: serverForm.username.trim(),
+            password: serverForm.password,
+            userId: embyLoginResult.userId
           })
-          // 直接更新 servers 数组中的 Emby 专属字段
-          const listRes = await window.api.server.list()
-          if (listRes.success && listRes.data) {
-            const updated = listRes.data.map((s) => {
-              if (s.id === editingServer.id) {
-                return {
-                  ...s,
-                  type: 'emby' as ServerType,
-                  username: serverForm.username.trim(),
-                  password: serverForm.password,
-                  userId: embyLoginResult.userId,
-                  token: embyLoginResult.token,
-                  url: serverForm.url.trim(),
-                  name: serverForm.name.trim() || `Emby (${serverForm.username.trim()})`
-                }
-              }
-              return s
-            })
-            await window.api.store.set('jellyfin:servers', updated)
+          if (!result.success) {
+            setServerStatus({ type: 'error', message: result.error || '更新失败' })
+            return
           }
           setServerStatus({ type: 'success', message: '服务器已更新' })
         } else {
@@ -433,14 +427,14 @@ function Settings(): ReactElement {
           }
         }
       } else {
-        // Jellyfin：使用原有逻辑
-        if (!serverForm.token.trim()) return
+        // Jellyfin：新增必须填 token；编辑时留空表示保持原凭据不变
+        if (!editingServer && !serverForm.token.trim()) return
         if (editingServer) {
           await window.api.server.update({
             id: editingServer.id,
             name: serverForm.name.trim() || 'Jellyfin',
             url: serverForm.url.trim(),
-            token: serverForm.token.trim()
+            ...(serverForm.token.trim() ? { token: serverForm.token.trim() } : {})
           })
           setServerStatus({ type: 'success', message: '服务器已更新' })
         } else {
@@ -511,9 +505,10 @@ function Settings(): ReactElement {
     setServerForm({
       name: server.name,
       url: server.url,
-      token: server.token,
+      // 凭据不出主进程：编辑时不再回显 token/密码，留空表示保持不变
+      token: '',
       username: server.username || '',
-      password: server.password || ''
+      password: ''
     })
     // 编辑模式下清空登录缓存，要求用户重新测试以刷新 token
     setEmbyLoginResult(null)
@@ -819,12 +814,12 @@ function Settings(): ReactElement {
 
             {/* Jellyfin：API Token */}
             {serverType === 'jellyfin' && (
-              <Field label="API Token" hint="在 Jellyfin 控制台 → 高级 → API 密钥获取">
+              <Field label="API Token" hint={editingServer ? '凭据由主进程安全保存，编辑时不回显；留空表示保持原 Token 不变' : '在 Jellyfin 控制台 → 高级 → API 密钥获取'}>
                 <input
                   type="password"
                   value={serverForm.token}
                   onChange={(e) => setServerForm(prev => ({ ...prev, token: e.target.value }))}
-                  placeholder="粘贴 API Token"
+                  placeholder={editingServer ? '留空则保持原 Token 不变' : '粘贴 API Token'}
                   className="ios-input"
                 />
               </Field>
@@ -905,17 +900,17 @@ function Settings(): ReactElement {
                 onClick={handleSaveServer}
                 disabled={
                   !serverForm.url.trim() ||
-                  (serverType === 'jellyfin' ? !serverForm.token.trim() : !embyLoginResult || !serverForm.username.trim() || !serverForm.password)
+                  (serverType === 'jellyfin' ? (!editingServer && !serverForm.token.trim()) : !embyLoginResult || !serverForm.username.trim() || !serverForm.password)
                 }
                 className={
                   !serverForm.url.trim() ||
-                  (serverType === 'jellyfin' ? !serverForm.token.trim() : !embyLoginResult || !serverForm.username.trim() || !serverForm.password)
+                  (serverType === 'jellyfin' ? (!editingServer && !serverForm.token.trim()) : !embyLoginResult || !serverForm.username.trim() || !serverForm.password)
                     ? 'ios-btn ios-btn-primary opacity-40 cursor-not-allowed'
                     : 'ios-btn ios-btn-primary'
                 }
                 whileTap={
                   !serverForm.url.trim() ||
-                  (serverType === 'jellyfin' ? !serverForm.token.trim() : !embyLoginResult || !serverForm.username.trim() || !serverForm.password)
+                  (serverType === 'jellyfin' ? (!editingServer && !serverForm.token.trim()) : !embyLoginResult || !serverForm.username.trim() || !serverForm.password)
                     ? {}
                     : { scale: 0.96 }
                 }
@@ -1312,6 +1307,21 @@ function Settings(): ReactElement {
               ))}
             </div>
           </div>
+
+          <label className="flex items-start gap-3 cursor-pointer px-1">
+            <input
+              type="checkbox"
+              checked={includeSensitive}
+              onChange={(e) => setIncludeSensitive(e.target.checked)}
+              className="w-4 h-4 mt-0.5 rounded border-[var(--separator)] text-[var(--accent)] focus:ring-[var(--accent)]"
+            />
+            <span className="text-[13px] text-[var(--text-secondary)] leading-relaxed">
+              在导出中包含服务器与弹幕凭据
+              <span className="block text-[11px] text-amber-500 mt-0.5">
+                凭据将以明文写入导出文件，仅建议在受信任的迁移场景下开启；默认开启时主进程也会强制排除
+              </span>
+            </span>
+          </label>
 
           <button
             onClick={handleExport}

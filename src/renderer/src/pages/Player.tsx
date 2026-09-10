@@ -44,11 +44,8 @@ function Player(): ReactElement {
   const seriesId = searchParams.get('seriesId') || ''
   const seasonId = searchParams.get('seasonId') || ''
 
-  const [jellyfinToken, setJellyfinToken] = useState('')
-  // 修复 R-S4: jellyfinTokenRef 镜像最新 token，供 savePlayHistory 闭包读取，
-  // 避免 callback 依赖捕获初始空 token（deps 未含 jellyfinToken 导致历史永久无 authParam）
-  const jellyfinTokenRef = useRef(jellyfinToken)
-  jellyfinTokenRef.current = jellyfinToken
+  // 凭据保留在主进程（DTO 边界）：Player 不再持有 jellyfinToken，
+  // 历史海报 URL 由主进程按服务器配置派生，Jellyfin 请求一律走 Main 注入认证
   // M4: itemId 镜像 ref —— 手动选择弹幕（ignoreEpoch）在 await 返回后用它判断
   // 是否已切集，防止旧集选择结果污染新集
   const itemIdRef = useRef(itemId)
@@ -107,14 +104,7 @@ function Player(): ReactElement {
   volumeRef.current = volume
   playbackRateRef.current = playbackRate
 
-  useEffect(() => {
-    window.api.store.get('jellyfin').then((saved: unknown) => {
-      const s = saved as { token?: string } | null
-      if (s?.token) setJellyfinToken(s.token)
-    }).catch(() => {})
-  }, [])
-  
-  // 获取剧集列表（电视剧）— 合并 token 加载与请求，避免双重请求
+  // 获取剧集列表（电视剧）— Jellyfin 请求由主进程持凭据发起，Renderer 无需 token
   const episodeFetchedRef = useRef(false)
   useEffect(() => {
     // 本地文件不需要剧集列表
@@ -125,7 +115,7 @@ function Player(): ReactElement {
     // 已经获取过则跳过
     if (episodeFetchedRef.current) return
 
-    const fetchEpisodes = async (token: string): Promise<void> => {
+    const fetchEpisodes = async (): Promise<void> => {
       if (seriesId) {
         // 条件 1: seriesId 直接可用
         try {
@@ -182,24 +172,10 @@ function Player(): ReactElement {
       setEpisodeFetchDone(true)
     }
 
-    // 先尝试直接用已有 token，没有则先加载
-    if (jellyfinToken) {
-      episodeFetchedRef.current = true
-      fetchEpisodes(jellyfinToken)
-    } else {
-      window.api.store.get('jellyfin').then((saved: unknown) => {
-        const s = saved as { token?: string } | null
-        if (s?.token) {
-          setJellyfinToken(s.token)
-          episodeFetchedRef.current = true
-          fetchEpisodes(s.token)
-        } else {
-          // 无 token 也算拉取完成，避免 danmaku effect 永久阻塞
-          setEpisodeFetchDone(true)
-        }
-      }).catch(() => { setEpisodeFetchDone(true) })
-    }
-  }, [seriesId, seasonId, itemId, localFile]) // 移除 jellyfinToken 依赖
+    // 剧集/详情请求均走主进程认证，直接拉取即可
+    episodeFetchedRef.current = true
+    void fetchEpisodes()
+  }, [seriesId, seasonId, itemId, localFile])
 
   // 初始化播放引擎：读取设置偏好 + 探测可用性。
   // 优先级：显式偏好 > 默认。默认在 libmpv 画布引擎（方案 C）可用时优先选用，
@@ -542,15 +518,12 @@ function Player(): ReactElement {
     const t = playHistoryTimeRef.current
     if (t < 5) return
     try {
-      // 修复 R-S4: 使用 ref 读取最新 token，避免闭包捕获过期空 token
-      const token = jellyfinTokenRef.current
-      const authParam = token ? `&api_key=${token}` : ''
-      const posterUrl = localFile ? '' : `${baseUrl}/Items/${itemId}/Images/Primary?maxHeight=300${authParam}`
+      // 海报 URL 由主进程按服务器配置派生（协议链接，不含凭据），Renderer 只传 itemId + baseUrl
       const historyName = seriesName && !itemName.startsWith(seriesName)
         ? `${seriesName} - ${itemName}` : itemName
       await window.api.history.save({
         itemId: itemId || `local:${localFile}`,
-        name: historyName, duration, position: t, posterUrl,
+        name: historyName, duration, position: t,
         watchedAt: Date.now(), localFile: localFile || undefined,
         baseUrl: localFile ? undefined : baseUrl,
         seriesName: seriesName || undefined

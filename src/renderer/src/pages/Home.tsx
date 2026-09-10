@@ -5,7 +5,7 @@ import {
   Search, FolderOpen, Video, ChevronRight, ArrowLeft,
   Clock, Trash2, X, Loader2, TvMinimal, Film, Folder, Database, ChevronDown, CircleDot, ImagePlus, Download, Globe
 } from 'lucide-react'
-import { cachedFetch, clearCache } from '../utils/apiCache'
+import { cachedFetch, clearCache, setServerScope } from '../utils/apiCache'
 import { formatTimeAgo } from '../utils/time'
 import { useHomeStore } from '../providers/HomeStoreProvider'
 import { RecentlyAddedRow } from '../components/RecentlyAddedRow'
@@ -73,7 +73,8 @@ interface ServerConfig {
   id: string
   name: string
   url: string
-  token: string
+  /** 服务器类型（DTO 不含凭据，凭据不出主进程） */
+  type?: 'jellyfin' | 'emby'
 }
 
 interface ServerInfo {
@@ -148,7 +149,7 @@ function Home(): ReactElement {
   const [libraryLoadingMore, setLibraryLoadingMore] = useState<Record<string, boolean>>({})
   const LIBRARY_PAGE_SIZE = 50
   const [connectedServer, setConnectedServer] = useState('')
-  const [jellyfinToken, setJellyfinToken] = useState('')
+  // 凭据保留在主进程（DTO 边界），Renderer 不再持有 jellyfinToken
   // 当前连接的服务器类型：'jellyfin' | 'emby'
   const [serverType, setServerType] = useState<'jellyfin' | 'emby'>('jellyfin')
 
@@ -300,36 +301,11 @@ function Home(): ReactElement {
     try {
       let libResult = await window.api.jellyfin.getLibraries()
       if (!libResult.success && libResult.error === '未连接到 Jellyfin 服务器') {
-        // 优先从旧 key 恢复，如果未连接则从多服务器列表获取活跃服务器
-        const saved = await window.api.store.get('jellyfin') as { url?: string; token?: string } | null
-        const servers = await window.api.store.get('jellyfin:servers') as Array<{ id?: string; url: string; token: string }> | null
-        const activeId = await window.api.store.get('jellyfin:activeServerId') as string | null
-
-        let url = saved?.url
-        let token = saved?.token
-
-        // enc: 值表示解密失败，视为空值
-        if (url?.startsWith('enc:')) url = undefined
-        if (token?.startsWith('enc:')) token = undefined
-
-        // 旧 key 没有数据，从多服务器列表获取活跃服务器
-        if ((!url || !token) && servers && servers.length > 0) {
-          const active = activeId ? servers.find(s => s.id === activeId) : servers[0]
-          if (active) {
-            url = active.url?.startsWith('enc:') ? undefined : active.url
-            token = active.token?.startsWith('enc:') ? undefined : active.token
-          }
-        }
-
-        if (!url || !token) {
+        // 凭据只保存在主进程：让主进程用已存凭据重连活跃服务器，Renderer 不接触 token
+        const reconnect = await window.api.server.ensureConnected()
+        if (!reconnect.success) {
           setPageState('error')
-          setErrorMsg('Jellyfin 服务器凭据未配置或无法解密，请在设置中重新输入 URL 和 Token')
-          return
-        }
-        const connectResult = await window.api.jellyfin.connect(url, token)
-        if (!connectResult.success) {
-          setPageState('error')
-          setErrorMsg(connectResult.error || '重新连接失败')
+          setErrorMsg(reconnect.error || '服务器未配置或凭据不可用，请在设置中重新配置服务器')
           return
         }
         libResult = await window.api.jellyfin.getLibraries()
@@ -391,18 +367,16 @@ function Home(): ReactElement {
         if (activeResult.success && activeResult.data?.server) {
           const srv = activeResult.data.server
           if (srv.url) setConnectedServer(srv.url.replace(/\/+$/, ''))
-          if (srv.token) setJellyfinToken(srv.token)
-          const detectedType = (srv as any).type === 'emby' ? 'emby' : 'jellyfin'
+          const detectedType = srv.type === 'emby' ? 'emby' : 'jellyfin'
           setServerType(detectedType)
           console.log(`[Home] 从 server.getActive 检测到服务器类型: ${detectedType}`)
         } else {
-          // 降级：从旧配置读取
-          const saved = await window.api.store.get('jellyfin') as { url?: string; token?: string } | null
+          // 降级：从旧配置读取（store:get 已被主进程剥离凭据，仅取 url）
+          const saved = await window.api.store.get('jellyfin') as { url?: string } | null
           if (saved?.url) {
             setConnectedServer(saved.url.replace(/\/+$/, ''))
             setServerType('jellyfin')
           }
-          if (saved?.token) setJellyfinToken(saved.token)
         }
       } catch { /* ignore */ }
 
@@ -575,11 +549,12 @@ function Home(): ReactElement {
       if (activeResult.success && activeResult.data) {
         const d = activeResult.data as ServerInfo
         setActiveServerId(d.id)
+        // API 缓存按服务器隔离：确定活跃服务器后即切换作用域
+        if (d.id) setServerScope(d.id)
         if (d.server) {
           setConnectedServer(d.server.url.replace(/\/+$/, ''))
-          setJellyfinToken(d.server.token)
           // 获取服务器类型，默认 jellyfin
-          setServerType((d.server as any).type === 'emby' ? 'emby' : 'jellyfin')
+          setServerType(d.server.type === 'emby' ? 'emby' : 'jellyfin')
         }
       }
     } catch { /* ignore */ }
@@ -848,13 +823,12 @@ function Home(): ReactElement {
   const getPosterUrl = useCallback((item: MediaItem): string | null => {
     return buildPosterUrl({
       baseUrl: connectedServer || 'http://localhost:8096',
-      token: jellyfinToken,
       serverType,
       itemId: item.Id,
       imageTag: item.ImageTags?.Primary,
       doubanPosterPath: doubanPosters[item.Id],
     })
-  }, [connectedServer, jellyfinToken, serverType, doubanPosters])
+  }, [connectedServer, serverType, doubanPosters])
 
   const breadcrumb = drillStack.map((d) => d.parentName)
   const currentDrill = drillStack.length > 0 ? drillStack[drillStack.length - 1] : null
@@ -1333,7 +1307,6 @@ function Home(): ReactElement {
               items={recentlyAddedItems}
               onItemClick={handleRecentlyAddedClick}
               baseUrl={connectedServer || 'http://localhost:8096'}
-              token={jellyfinToken}
               serverType={serverType}
               scrollSpeed={recentlyAddedScrollSpeed}
               savedScrollPosition={recentlyAddedScrollPos}
@@ -1351,7 +1324,6 @@ function Home(): ReactElement {
             isLoading={recommendationLoading}
             isColdStart={isColdStart}
             serverType={serverType}
-            jellyfinToken={jellyfinToken}
             connectedServer={connectedServer}
             onItemClick={(item) => handleRecommendationClick(item)}
             onLoadMore={loadMoreRecommendations}

@@ -318,7 +318,10 @@ async function jellyfinRequest<T>(
   const response = await fetch(url, {
     ...options,
     headers,
-    signal: AbortSignal.timeout(15000)
+    // 合并调用方取消信号与默认超时：任何一方触发都会中断请求
+    signal: options.signal
+      ? AbortSignal.any([options.signal, AbortSignal.timeout(15000)])
+      : AbortSignal.timeout(15000)
   })
 
   console.log(`[jellyfinRequest] response status=${response.status}, statusText=${response.statusText}`)
@@ -372,6 +375,41 @@ function getServers(): JellyfinServerConfig[] {
 function saveServers(servers: JellyfinServerConfig[]): void {
   configData['jellyfin:servers'] = servers
   saveConfigFile()
+}
+
+/** Renderer 可见的服务器公开信息：绝不包含 token/password 等凭据 */
+interface PublicServerConfig {
+  id: string
+  name: string
+  url: string
+  type?: 'jellyfin' | 'emby'
+  username?: string
+  userId?: string
+  hasToken: boolean
+  hasPassword: boolean
+}
+
+function toPublicServer(s: JellyfinServerConfig): PublicServerConfig {
+  return {
+    id: s.id,
+    name: s.name,
+    url: s.url,
+    type: s.type,
+    username: s.username,
+    userId: s.userId,
+    hasToken: !!s.token,
+    hasPassword: !!s.password
+  }
+}
+
+/** 按 URL host 查找已配置服务器（图片协议注入认证、历史海报派生共用） */
+function findServerByHost(host: string): JellyfinServerConfig | null {
+  for (const s of getServers()) {
+    try {
+      if (new URL(normalizeUrl(s.url)).host === host) return s
+    } catch { /* 忽略无法解析的服务器 URL */ }
+  }
+  return null
 }
 
 function getActiveServerId(): string | null {
@@ -637,14 +675,23 @@ ipcMain.handle('jellyfin:connect', async (_event, url: string, token: string) =>
 // ==================== 多服务器 IPC ====================
 
 ipcMain.handle('server:list', async () => {
-  return { success: true, data: getServers() }
+  // DTO 边界：凭据不出主进程
+  return { success: true, data: getServers().map(toPublicServer) }
 })
 
 ipcMain.handle('server:get-active', async () => {
   const id = getActiveServerId()
   const servers = getServers()
   const active = servers.find(s => s.id === id) || null
-  return { success: true, data: { id, server: active } }
+  return { success: true, data: { id, server: active ? toPublicServer(active) : null } }
+})
+
+/** Renderer 请求重连：主进程用自持凭据连接活跃服务器，Renderer 不接触 token */
+ipcMain.handle('server:ensure-connected', async () => {
+  if (jellyfinAuth) return { success: true }
+  const id = getActiveServerId()
+  if (!id) return { success: false, error: '无活跃服务器，请在设置中配置' }
+  return connectToServer(id)
 })
 
 ipcMain.handle('server:add', async (_event, params: { name: string; url: string; token: string }) => {
@@ -658,18 +705,31 @@ ipcMain.handle('server:add', async (_event, params: { name: string; url: string;
   }
   servers.push(server)
   saveServers(servers)
-  return { success: true, data: server }
+  return { success: true, data: toPublicServer(server) }
 })
 
-ipcMain.handle('server:update', async (_event, params: { id: string; name?: string; url?: string; token?: string }) => {
+ipcMain.handle('server:update', async (_event, params: {
+  id: string
+  name?: string
+  url?: string
+  token?: string
+  type?: 'jellyfin' | 'emby'
+  username?: string
+  password?: string
+  userId?: string
+}) => {
   const servers = getServers()
   const server = servers.find(s => s.id === params.id)
   if (!server) return { success: false, error: '服务器不存在' }
   if (params.name !== undefined) server.name = params.name
   if (params.url !== undefined) server.url = params.url.replace(/\/+$/, '')
   if (params.token !== undefined) server.token = params.token
+  if (params.type !== undefined) server.type = params.type
+  if (params.username !== undefined) server.username = params.username
+  if (params.password !== undefined) server.password = params.password
+  if (params.userId !== undefined) server.userId = params.userId
   saveServers(servers)
-  return { success: true }
+  return { success: true, data: toPublicServer(server) }
 })
 
 ipcMain.handle('server:remove', async (_event, id: string) => {
@@ -754,7 +814,7 @@ ipcMain.handle('server:add-emby', async (_event, params: {
     servers.push(server)
     saveServers(servers)
     console.log(`[server][emby] 已添加服务器: ${server.name} (userId=${server.userId})`)
-    return { success: true, data: server }
+    return { success: true, data: toPublicServer(server) }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -1541,10 +1601,46 @@ function sanitizeEncryptedBlobs(value: unknown): unknown {
   return value
 }
 
+// ==================== 凭据边界：敏感 key / 字段识别 ====================
+// 原则：configData 内存中持有的是解密后的明文。任何离开主进程的路径
+// （导出文件、store:get 返回给 Renderer）都必须经过这里的显式过滤，
+// 不能依赖"值看起来还是密文"这种隐式假设。
+
+/** 整体视为凭据的配置命名空间：默认禁止导出，Renderer 读取时剥离敏感字段 */
+const CREDENTIAL_NAMESPACES = new Set([
+  'jellyfin',
+  'emby',
+  'jellyfin:servers',
+])
+
+/** 对象字段级敏感名：递归抹除（同时覆盖导出值与 Renderer 返回值） */
+const SENSITIVE_FIELD_RE = /^(token|password|app[-_]?secret|api[-_]?key|access[-_]?token|refresh[-_]?token|secret|authorization)$/i
+
+function isCredentialKey(key: string): boolean {
+  // 凭据命名空间 + 所有加密存储键（danmaku app-secret/api 凭据等）都按敏感处理
+  return CREDENTIAL_NAMESPACES.has(key) || ENCRYPTED_KEYS.has(key)
+}
+
+/** 递归抹除对象中的凭据字段（token/password/appSecret/apiKey 等），返回新对象 */
+function stripSensitiveFields(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripSensitiveFields)
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = SENSITIVE_FIELD_RE.test(k) ? '' : stripSensitiveFields(v)
+    }
+    return out
+  }
+  return value
+}
+
 ipcMain.handle('store:get', async (_event, key: string) => {
   const raw = configData[key] ?? null
-  // 安全检查：确保解密失败的 enc: 密文不会泄露到渲染进程
-  return sanitizeEncryptedBlobs(raw)
+  // 安全边界：Renderer 不持有凭据。先清理解密失败的 enc: 密文，
+  // 再递归抹除 token/password/appSecret/apiKey 等字段（url/username 等非敏感字段保留）
+  return stripSensitiveFields(sanitizeEncryptedBlobs(raw))
 })
 
 ipcMain.handle('store:set', async (_event, key: string, value: unknown) => {
@@ -1559,6 +1655,11 @@ ipcMain.handle('store:set', async (_event, key: string, value: unknown) => {
     console.warn('[store:set] rejected sensitive key:', key)
     return false
   }
+  // 凭据命名空间整体走 server:* / emby:* 专用 IPC，拒绝通用 store 通道写入
+  if (CREDENTIAL_NAMESPACES.has(key)) {
+    console.warn('[store:set] rejected credential namespace key:', key)
+    return false
+  }
   configData[key] = value
   saveConfigFile()
   return true
@@ -1566,7 +1667,7 @@ ipcMain.handle('store:set', async (_event, key: string, value: unknown) => {
 
 ipcMain.handle('store:delete', async (_event, key: string) => {
   // 与 store:set 同理，敏感键的清除也走专用 handler（登出流程）
-  if (typeof key === 'string' && ENCRYPTED_KEYS.has(key)) {
+  if (typeof key === 'string' && (ENCRYPTED_KEYS.has(key) || CREDENTIAL_NAMESPACES.has(key))) {
     console.warn('[store:delete] rejected sensitive key:', key)
     return false
   }
@@ -1578,7 +1679,7 @@ ipcMain.handle('store:delete', async (_event, key: string) => {
 // ==================== 数据导入导出 ====================
 
 // 导出配置数据
-ipcMain.handle('data:export', async (_event, options?: { format?: 'json' | 'csv'; includeKeys?: string[] }) => {
+ipcMain.handle('data:export', async (_event, options?: { format?: 'json' | 'csv'; includeKeys?: string[]; includeSensitive?: boolean }) => {
   if (!mainWindow) return { success: false, error: '主窗口未创建' }
   
   try {
@@ -1603,11 +1704,19 @@ ipcMain.handle('data:export', async (_event, options?: { format?: 'json' | 'csv'
     }
     
     const keysToExport = options?.includeKeys || Object.keys(configData)
-    
+    const includeSensitive = options?.includeSensitive === true
+    const excludedSensitive: string[] = []
+
     for (const key of keysToExport) {
-      if (configData[key] !== undefined) {
-        exportData.data[key] = sanitizeEncryptedBlobs(configData[key])
+      if (configData[key] === undefined) continue
+      // 白名单原则：凭据命名空间（服务器 token/密码、弹幕 AppSecret 等）默认禁止导出，
+      // 即使 Renderer 显式勾选也只认 includeSensitive 开关，防止凭据混进导出文件
+      if (!includeSensitive && isCredentialKey(key)) {
+        excludedSensitive.push(key)
+        continue
       }
+      // 非凭据 key 也可能嵌套敏感字段（如对象里的 token 字段），递归抹除兜底
+      exportData.data[key] = stripSensitiveFields(sanitizeEncryptedBlobs(configData[key]))
     }
     
     let content: string
@@ -1626,12 +1735,13 @@ ipcMain.handle('data:export', async (_event, options?: { format?: 'json' | 'csv'
     
     writeFileSync(result.filePath, content, 'utf-8')
     
-    return { 
-      success: true, 
-      data: { 
+    return {
+      success: true,
+      data: {
         filePath: result.filePath,
         keyCount: Object.keys(exportData.data).length,
-        size: Buffer.byteLength(content, 'utf-8')
+        size: Buffer.byteLength(content, 'utf-8'),
+        excludedSensitive
       }
     }
   } catch (err) {
@@ -1744,11 +1854,11 @@ ipcMain.handle('data:import', async (_event, options?: { merge?: boolean; select
 
 // 获取可导出的配置键列表
 ipcMain.handle('data:list-keys', async () => {
-  const sensitiveKeys = ['jellyfin', 'emby', 'jellyfin:servers']
   const keys = Object.keys(configData).filter(k => !k.startsWith('__') && !k.startsWith('system:'))
   const keyInfo = keys.map(k => ({
     key: k,
-    hasSensitive: sensitiveKeys.some(sk => k.includes(sk))
+    // 精确匹配凭据命名空间，避免误伤 'jellyfin:activeServerId' 这类普通配置项
+    hasSensitive: isCredentialKey(k)
   }))
   return { success: true, data: keyInfo }
 })
@@ -2044,7 +2154,8 @@ function sanitizeHistoryItem(item: unknown): PlayHistoryItem | null {
     name: it.name.slice(0, 256),
     duration: num(it.duration),
     position: num(it.position),
-    posterUrl: str(it.posterUrl, 512) ?? '',
+    // 海报 URL 不信任渲染端传值（历史上曾把 api_key 拼进 URL 落盘），由主进程统一派生
+    posterUrl: '',
     watchedAt: Date.now(),
     localFile: str(it.localFile, 1024),
     baseUrl: str(it.baseUrl, 256),
@@ -2052,9 +2163,50 @@ function sanitizeHistoryItem(item: unknown): PlayHistoryItem | null {
   }
 }
 
+/** 由服务器配置派生历史海报 URL：jellyfin-image/emby-image 协议链接，不含任何凭据，
+ * 展示时由主进程按 host 注入认证头 */
+function buildHistoryPosterUrl(baseUrl: string, itemId: string): string {
+  try {
+    const u = new URL(normalizeUrl(baseUrl))
+    const server = findServerByHost(u.host)
+    const type = server?.type === 'emby' ? 'emby' : 'jellyfin'
+    const scheme = u.protocol === 'http:' ? 'http' : 'https'
+    return `${type}-image://${scheme}/${u.host}/Items/${encodeURIComponent(itemId)}/Images/Primary?maxHeight=300`
+  } catch {
+    return ''
+  }
+}
+
+/** 一次性迁移：旧历史记录 posterUrl 内嵌 api_key/token/access_token 明文，
+ * 统一重写为协议 URL（重写失败则清空海报，凭据绝不保留） */
+function migrateHistoryPosters(): void {
+  try {
+    const items = loadHistory()
+    let changed = false
+    for (const it of items) {
+      if (!it.posterUrl) continue
+      if (!/[?&](api_key|token|access_token)=/i.test(it.posterUrl)) continue
+      it.posterUrl = (!it.localFile && it.baseUrl && it.itemId)
+        ? buildHistoryPosterUrl(it.baseUrl, it.itemId)
+        : ''
+      changed = true
+    }
+    if (changed) {
+      saveHistory(items)
+      console.log('[history] 已迁移历史海报 URL：移除内嵌凭据，改写为协议链接')
+    }
+  } catch (err) {
+    console.warn('[history] 海报 URL 迁移失败:', err)
+  }
+}
+
 ipcMain.handle('history:save', async (_event, item: PlayHistoryItem) => {
   const sanitized = sanitizeHistoryItem(item)
   if (!sanitized) return { success: false, error: 'invalid history item' }
+  // 海报 URL 由主进程按服务器配置派生（不含凭据）
+  if (!sanitized.localFile && sanitized.baseUrl && sanitized.itemId) {
+    sanitized.posterUrl = buildHistoryPosterUrl(sanitized.baseUrl, sanitized.itemId)
+  }
   const items = loadHistory()
   // 去重：同名同 itemId 覆盖更新
   const idx = items.findIndex((h) => h.itemId === sanitized.itemId)
@@ -4049,7 +4201,8 @@ async function fetchImageWithToken(realUrl: string, headers: Record<string, stri
 function registerJellyfinImageProtocol(): void {
   protocol.handle('jellyfin-image', async (request) => {
     try {
-      // URL 格式 jellyfin-image://https/host:port/path?api_key=xxx 或 jellyfin-image://http/...
+      // URL 格式 jellyfin-image://https/host:port/path 或 jellyfin-image://http/...（不含凭据）
+      // 认证由主进程按 host 匹配已配置服务器后注入 X-Emby-Token 请求头
       // 与 emby-image 一致把真实 scheme 编码进 URL，避免 HTTPS 服务器被降级为明文 http
       let realUrl = request.url
         .replace(/^jellyfin-image:\/\/https\//, 'https://')
@@ -4057,34 +4210,25 @@ function registerJellyfinImageProtocol(): void {
         .replace(/^jellyfin-image:\/\//, 'https://');
 
       const url = new URL(realUrl);
-      const token = url.searchParams.get('api_key') || '';
+      // 兼容旧链接：剥掉 URL 内嵌的 api_key，认证一律改由主进程按 host 注入
       url.searchParams.delete('api_key');
       realUrl = url.toString();
 
       // host 白名单：仅允许已配置的 Jellyfin 服务器主机，防止协议被滥用于任意内网探测
-      const allowedHosts = new Set(
-        getServers()
-          .map((s) => {
-            try {
-              return new URL(normalizeUrl(s.url)).host
-            } catch {
-              return null
-            }
-          })
-          .filter((h): h is string => !!h)
-      );
-      if (!allowedHosts.has(url.host)) {
+      const server = findServerByHost(url.host);
+      if (!server) {
         console.warn(`[jellyfin-image] host 不在白名单: ${url.host}`);
         return new Response('Forbidden', { status: 403 });
       }
 
-      const cacheKey = `jellyfin_${url.pathname}_${url.search}`;
+      // 缓存 key 含服务器 host，避免多服务器同 path 撞图
+      const cacheKey = `jellyfin_${url.host}_${url.pathname}_${url.search}`;
       const cachedData = await posterCache.get(cacheKey);
 
       if (cachedData) {
-        return new Response(cachedData, {
+        return new Response(cachedData.data, {
           headers: {
-            'Content-Type': 'image/png',
+            'Content-Type': cachedData.mimeType,
             'Cache-Control': 'public, max-age=604800',
           },
         });
@@ -4092,8 +4236,8 @@ function registerJellyfinImageProtocol(): void {
 
       // token 通过请求头传递（X-Emby-Token 对 Jellyfin/Emby 均有效），避免 api_key 明文出现在代理/日志中
       const headers: Record<string, string> = {};
-      if (token) {
-        headers['X-Emby-Token'] = token;
+      if (server.token) {
+        headers['X-Emby-Token'] = server.token;
       }
 
       try {
@@ -4105,12 +4249,13 @@ function registerJellyfinImageProtocol(): void {
             throw new Error(`${response.status} ${response.statusText}`);
           }
 
+          const mimeType = response.headers.get('content-type') || 'image/png';
           const buffer = Buffer.from(await response.arrayBuffer());
-          await posterCache.set(cacheKey, buffer, realUrl);
+          await posterCache.set(cacheKey, buffer, realUrl, mimeType);
 
           return new Response(buffer, {
             headers: {
-              'Content-Type': response.headers.get('content-type') || 'image/png',
+              'Content-Type': mimeType,
               'Cache-Control': 'public, max-age=604800',
             },
           });
@@ -4142,43 +4287,33 @@ function registerEmbyImageProtocol(): void {
         .replace(/^emby-image:\/\//, 'https://');
 
       const urlObj = new URL(realUrl);
-      const token = urlObj.searchParams.get('token') || '';
+      // 兼容旧链接：剥掉 URL 内嵌的 token，认证一律改由主进程按 host 注入
       urlObj.searchParams.delete('token');
       realUrl = urlObj.toString();
 
-      // host 白名单：与 jellyfin-image 一致，仅允许已配置服务器的 host，
-      // 防止协议被滥用于任意内网地址探测/SSRF
-      const allowedHosts = new Set(
-        getServers()
-          .map((s) => {
-            try {
-              return new URL(normalizeUrl(s.url)).host
-            } catch {
-              return null
-            }
-          })
-          .filter((h): h is string => !!h)
-      );
-      if (!allowedHosts.has(urlObj.host)) {
+      // host 白名单：仅允许已配置服务器的 host，防止协议被滥用于任意内网地址探测/SSRF
+      const server = findServerByHost(urlObj.host);
+      if (!server) {
         console.warn(`[emby-image] host 不在白名单: ${urlObj.host}`);
         return new Response('Forbidden', { status: 403 });
       }
 
-      const cacheKey = `emby_${urlObj.pathname}_${urlObj.search}`;
+      // 缓存 key 含服务器 host，避免多服务器同 path 撞图
+      const cacheKey = `emby_${urlObj.host}_${urlObj.pathname}_${urlObj.search}`;
       const cachedData = await posterCache.get(cacheKey);
 
       if (cachedData) {
-        return new Response(cachedData, {
+        return new Response(cachedData.data, {
           headers: {
-            'Content-Type': 'image/png',
+            'Content-Type': cachedData.mimeType,
             'Cache-Control': 'public, max-age=604800',
           },
         });
       }
 
       const headers: Record<string, string> = {};
-      if (token) {
-        headers['X-Emby-Token'] = token;
+      if (server.token) {
+        headers['X-Emby-Token'] = server.token;
       }
 
       try {
@@ -4190,12 +4325,13 @@ function registerEmbyImageProtocol(): void {
             throw new Error(`${response.status} ${response.statusText}`);
           }
 
+          const mimeType = response.headers.get('content-type') || 'image/png';
           const buffer = Buffer.from(await response.arrayBuffer());
-          await posterCache.set(cacheKey, buffer, realUrl);
+          await posterCache.set(cacheKey, buffer, realUrl, mimeType);
 
           return new Response(buffer, {
             headers: {
-              'Content-Type': response.headers.get('content-type') || 'image/png',
+              'Content-Type': mimeType,
               'Cache-Control': 'public, max-age=604800',
             },
           });
@@ -4442,6 +4578,9 @@ app.whenReady().then(() => {
 
   createWindow()
   createTray()
+
+  // 一次性迁移：清理旧历史记录海报 URL 中内嵌的 api_key/token 明文
+  migrateHistoryPosters()
 
   // 启动时自动连接上次活跃的服务器
   const activeId = getActiveServerId()

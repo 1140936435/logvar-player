@@ -99,7 +99,9 @@ export interface PlayHistoryItem {
   name: string
   duration: number
   position: number
-  posterUrl: string
+  /** 海报 URL：由主进程派生（jellyfin-image/emby-image 协议，不含凭据）。
+   * 保存时由主进程覆盖，渲染端传入值会被忽略，故保存输入中可省略 */
+  posterUrl?: string
   watchedAt: number
   localFile?: string
   baseUrl?: string
@@ -167,9 +169,39 @@ export interface ServerConfig {
   userId?: string
 }
 
+/**
+ * Renderer 可见的服务器公开信息（DTO）。
+ * 凭据（token/password）不出主进程，仅用 hasToken/hasPassword 表示是否已配置。
+ */
+export interface PublicServerConfig {
+  id: string
+  name: string
+  url: string
+  /** 服务器类型，旧配置无该字段时默认按 'jellyfin' 处理 */
+  type?: ServerType
+  /** Emby 专属：登录账号 */
+  username?: string
+  /** Emby 专属：登录后获得 userId */
+  userId?: string
+  hasToken: boolean
+  hasPassword: boolean
+}
+
+/** 更新服务器参数：未提供的字段保持不变（token 留空即不修改凭据） */
+export interface ServerUpdateParams {
+  id: string
+  name?: string
+  url?: string
+  token?: string
+  type?: ServerType
+  username?: string
+  password?: string
+  userId?: string
+}
+
 export interface ServerListResponse {
   success: boolean
-  data?: ServerConfig[]
+  data?: PublicServerConfig[]
   error?: string
 }
 
@@ -177,7 +209,7 @@ export interface ServerActiveResponse {
   success: boolean
   data?: {
     id: string
-    server: ServerConfig | null
+    server: PublicServerConfig | null
   }
   error?: string
 }
@@ -388,13 +420,15 @@ export interface Api {
   server: {
     list: () => Promise<ServerListResponse>
     getActive: () => Promise<ServerActiveResponse>
-    add: (params: { name: string; url: string; token: string }) => Promise<ApiResponse<void>>
-    update: (params: { id: string; name?: string; url?: string; token?: string }) => Promise<ApiResponse<void>>
+    /** 主进程用自持凭据重连活跃服务器（Renderer 不接触 token） */
+    ensureConnected: () => Promise<ApiResponse<void>>
+    add: (params: { name: string; url: string; token: string }) => Promise<ApiResponse<PublicServerConfig>>
+    update: (params: ServerUpdateParams) => Promise<ApiResponse<PublicServerConfig>>
     remove: (id: string) => Promise<ApiResponse<void>>
     switch: (id: string) => Promise<ApiResponse<void>>
     test: (url: string, token: string) => Promise<ApiResponse<void>>
     /** 新增 Emby 服务器（已通过 testEmby 拿到 token/userId） */
-    addEmby: (params: EmbyAddServerParams) => Promise<ApiResponse<ServerConfig>>
+    addEmby: (params: EmbyAddServerParams) => Promise<ApiResponse<PublicServerConfig>>
     /** 测试 Emby 连接：账号密码登录 + 校验 */
     testEmby: (params: EmbyTestParams) => Promise<EmbyTestResponse>
   }
@@ -426,7 +460,7 @@ export interface Api {
   }
 
   data: {
-    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[] }) => Promise<ApiResponse<{ filePath: string; keyCount: number; size: number }>>
+    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[]; includeSensitive?: boolean }) => Promise<ApiResponse<{ filePath: string; keyCount: number; size: number; excludedSensitive?: string[] }>>
     import: (options?: { merge?: boolean; selectedKeys?: string[] }) => Promise<ApiResponse<{ importedCount: number; skippedCount: number; warnings: string[]; importedKeys: string[]; skippedKeys: string[] }>>
     listKeys: () => Promise<ApiResponse<Array<{ key: string; hasSensitive: boolean }>>>
   }
