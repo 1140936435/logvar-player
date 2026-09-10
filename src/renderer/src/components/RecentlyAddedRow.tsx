@@ -14,6 +14,8 @@ import { getPosterUrl as buildPosterUrl, getOptimalPosterHeight } from '../utils
 interface RecentlyAddedRowProps {
   items: RecentlyAddedItem[]
   onItemClick: (item: RecentlyAddedItem) => void
+  /** 服务器 ID：serverId 格式协议 URL（精确匹配服务器，无 host 冲突） */
+  serverId?: string
   baseUrl: string
   scrollSpeed?: number
   savedScrollPosition?: number
@@ -105,6 +107,7 @@ const PosterCard = memo(function PosterCard({
 export function RecentlyAddedRow({
   items,
   onItemClick,
+  serverId,
   baseUrl,
   scrollSpeed = 1,
   savedScrollPosition = 0,
@@ -127,13 +130,14 @@ export function RecentlyAddedRow({
 
   const getPosterUrl = useCallback((item: RecentlyAddedItem): string | null => {
     return buildPosterUrl({
+      serverId,
       baseUrl,
       serverType: serverType || 'jellyfin',
       itemId: item.itemId,
       imageTag: item.imageTag,
       doubanPosterPath: doubanPosters[item.itemId],
     })
-  }, [baseUrl, serverType, doubanPosters])
+  }, [serverId, baseUrl, serverType, doubanPosters])
 
   // 更新箭头显示状态
   const updateArrowVisibility = useCallback(() => {

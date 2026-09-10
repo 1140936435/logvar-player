@@ -78,7 +78,9 @@ export interface DanmakuConfigResponse {
   primary: string
   mirrors: string[]
   appId?: string
+  /** Secret 掩码（如 ab****yz），原文不出主进程 */
   appSecretHint?: string
+  hasAppSecret?: boolean
 }
 
 export interface LocalDanmakuCacheResponse {
@@ -197,6 +199,8 @@ export interface ServerUpdateParams {
   username?: string
   password?: string
   userId?: string
+  /** Emby 编辑：true 时主进程取最近一次 testEmby 登录的 token/userId */
+  useTestedEmbyLogin?: boolean
 }
 
 export interface ServerListResponse {
@@ -215,30 +219,15 @@ export interface ServerActiveResponse {
 }
 
 // ===== Emby 相关类型 =====
+// EmbyLoginResponse/EmbyLoginResult 已移除：AccessToken 只留在主进程，
+// Renderer 通过 server.testEmby 拿到非敏感校验结果
 
-/** Emby 账号密码登录返回结果 */
-export interface EmbyLoginResult {
-  token: string
-  userId: string
-  serverName?: string
-  version?: string
-  username?: string
-}
-
-export interface EmbyLoginResponse {
-  success: boolean
-  data?: EmbyLoginResult
-  error?: string
-}
-
-/** 新增 Emby 服务器参数（含登录后获取的 token/userId） */
+/** 新增 Emby 服务器参数（token/userId 由主进程从最近一次 testEmby 登录取用） */
 export interface EmbyAddServerParams {
   name: string
   url: string
   username: string
   password: string
-  token: string
-  userId: string
 }
 
 /** 测试 Emby 连接参数 */
@@ -424,18 +413,18 @@ export interface Api {
     ensureConnected: () => Promise<ApiResponse<void>>
     add: (params: { name: string; url: string; token: string }) => Promise<ApiResponse<PublicServerConfig>>
     update: (params: ServerUpdateParams) => Promise<ApiResponse<PublicServerConfig>>
-    remove: (id: string) => Promise<ApiResponse<void>>
-    switch: (id: string) => Promise<ApiResponse<void>>
+    remove: (id: string) => Promise<ApiResponse<void> & { warning?: string }>
+    /** 切换活跃服务器；API Key 多用户时返回 MULTI_USER + users 列表 */
+    switch: (id: string) => Promise<ApiResponse<void> & { users?: Array<{ id: string; name?: string }> }>
     test: (url: string, token: string) => Promise<ApiResponse<void>>
-    /** 新增 Emby 服务器（已通过 testEmby 拿到 token/userId） */
+    /** 新增 Emby 服务器（token/userId 由主进程从最近一次 testEmby 登录取用） */
     addEmby: (params: EmbyAddServerParams) => Promise<ApiResponse<PublicServerConfig>>
-    /** 测试 Emby 连接：账号密码登录 + 校验 */
+    /** 测试 Emby 连接：账号密码登录 + 校验（token 只留在主进程） */
     testEmby: (params: EmbyTestParams) => Promise<EmbyTestResponse>
-  }
-
-  emby: {
-    /** 账号密码登录 Emby，返回 token + userId */
-    login: (url: string, username: string, password: string) => Promise<EmbyLoginResponse>
+    /** 列出 Jellyfin API Key 模式下可选的用户（多用户禁止静默选第一个） */
+    listUsers: (id: string) => Promise<ApiResponse<Array<{ id: string; name?: string }>>>
+    /** 为 Jellyfin API Key 服务器指定用户 */
+    setUser: (id: string, userId: string) => Promise<ApiResponse<PublicServerConfig>>
   }
 
   recentlyAdded: {

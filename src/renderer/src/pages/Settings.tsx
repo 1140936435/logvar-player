@@ -158,7 +158,10 @@ function Settings(): ReactElement {
   // 通用字段：name / url；jellyfin 用 token；emby 用 username / password
   // 测试成功后 emby 还会暂存 loginResult（含 token/userId），供保存时使用
   const [serverForm, setServerForm] = useState({ name: '', url: '', token: '', username: '', password: '' })
-  const [embyLoginResult, setEmbyLoginResult] = useState<{ token: string; userId: string } | null>(null)
+  // Emby 测试登录是否通过（token 只存在主进程，Renderer 不持有）
+  const [embyTested, setEmbyTested] = useState(false)
+  // API Key 多用户服务器的用户选择器
+  const [userPicker, setUserPicker] = useState<{ serverId: string; users: Array<{ id: string; name?: string }> } | null>(null)
   const [serverConnecting, setServerConnecting] = useState(false)
   const [serverTesting, setServerTesting] = useState(false)
   const [serverTestResult, setServerTestResult] = useState<ServerTestResult | null>(null)
@@ -169,6 +172,8 @@ function Settings(): ReactElement {
   const [danmakuMirrors, setDanmakuMirrors] = useState('')
   const [danmakuAppId, setDanmakuAppId] = useState('')
   const [danmakuAppSecret, setDanmakuAppSecret] = useState('')
+  // Secret 掩码提示（"已配置（ab****yz），留空保持不变"），不回显原文
+  const [danmakuSecretHint, setDanmakuSecretHint] = useState('')
   const [danmakuTestResult, setDanmakuTestResult] = useState<DanmakuTestResult | null>(null)
   const [danmakuTesting, setDanmakuTesting] = useState(false)
   const [danmakuSaving, setDanmakuSaving] = useState(false)
@@ -339,7 +344,7 @@ function Settings(): ReactElement {
     if (!serverForm.url.trim()) return
     setServerTesting(true)
     setServerTestResult(null)
-    setEmbyLoginResult(null)
+    setEmbyTested(false)
     try {
       if (serverType === 'emby') {
         if (!serverForm.username.trim() || !serverForm.password) return
@@ -348,17 +353,9 @@ function Settings(): ReactElement {
           username: serverForm.username.trim(),
           password: serverForm.password
         }) as EmbyTestResponse
-        // 测试成功后保存 token/userId 供"添加服务器"使用
+        // 测试成功即代表主进程已暂存登录 token（10 分钟内有效），保存时直接取用
         if (result.success && result.data) {
-          // 调用 emby.login 获取完整 token/userId（testEmby 仅返回校验信息）
-          const loginRes = await window.api.emby.login(
-            serverForm.url.trim(),
-            serverForm.username.trim(),
-            serverForm.password
-          )
-          if (loginRes.success && loginRes.data) {
-            setEmbyLoginResult({ token: loginRes.data.token, userId: loginRes.data.userId })
-          }
+          setEmbyTested(true)
         }
         setServerTestResult({
           success: result.success,
@@ -381,8 +378,8 @@ function Settings(): ReactElement {
     if (!serverForm.url.trim()) return
     try {
       if (serverType === 'emby') {
-        // Emby：必须先测试成功拿到 token/userId 才能保存
-        if (!embyLoginResult) {
+        // Emby：必须先测试成功（token 暂存主进程）才能保存
+        if (!embyTested) {
           setServerStatus({ type: 'error', message: '请先点击「测试连接」验证账号密码' })
           return
         }
@@ -391,17 +388,15 @@ function Settings(): ReactElement {
           return
         }
         if (editingServer) {
-          // 编辑模式：一次性更新 Emby 全部字段（含新测试拿到的 token/userId），
-          // 凭据经 server:update 专用通道写入，不走通用 store
+          // 编辑模式：一次性更新 Emby 全部字段，token/userId 由主进程从测试登录取用
           const result = await window.api.server.update({
             id: editingServer.id,
             name: serverForm.name.trim() || `Emby (${serverForm.username.trim()})`,
             url: serverForm.url.trim(),
-            token: embyLoginResult.token,
             type: 'emby',
             username: serverForm.username.trim(),
             password: serverForm.password,
-            userId: embyLoginResult.userId
+            useTestedEmbyLogin: true
           })
           if (!result.success) {
             setServerStatus({ type: 'error', message: result.error || '更新失败' })
@@ -413,9 +408,7 @@ function Settings(): ReactElement {
             name: serverForm.name.trim() || `Emby (${serverForm.username.trim()})`,
             url: serverForm.url.trim(),
             username: serverForm.username.trim(),
-            password: serverForm.password,
-            token: embyLoginResult.token,
-            userId: embyLoginResult.userId
+            password: serverForm.password
           })
           if (result.success && result.data) {
             const newServer = result.data as ServerConfig
@@ -454,13 +447,13 @@ function Settings(): ReactElement {
       setEditingServer(null)
       setServerForm({ name: '', url: '', token: '', username: '', password: '' })
       setServerTestResult(null)
-      setEmbyLoginResult(null)
+      setEmbyTested(false)
       await loadServers()
       setTimeout(() => setServerStatus(null), 3000)
     } catch (err) {
       setServerStatus({ type: 'error', message: err instanceof Error ? err.message : '操作失败' })
     }
-  }, [serverForm, editingServer, loadServers, serverType, embyLoginResult])
+  }, [serverForm, editingServer, loadServers, serverType, embyTested])
 
   const handleConnectServer = useCallback(async (id: string): Promise<void> => {
     setServerConnecting(true)
@@ -478,6 +471,10 @@ function Settings(): ReactElement {
         await loadServers()
         // 导航回 Home 页面，触发媒体库刷新
         navigate('/')
+      } else if (result.error === 'MULTI_USER' && result.users && result.users.length > 0) {
+        // API Key + 多用户：禁止静默选第一个，弹出让用户显式选择
+        setUserPicker({ serverId: id, users: result.users })
+        setServerStatus({ type: 'info', message: '该服务器有多个用户，请选择要使用的用户' })
       } else {
         setServerStatus({ type: 'error', message: result.error || '连接失败' })
       }
@@ -487,14 +484,44 @@ function Settings(): ReactElement {
     setServerConnecting(false)
   }, [servers, loadServers, navigate])
 
+  /** 用户选择器：为 API Key 服务器保存显式 userId 后重连 */
+  const handlePickUser = useCallback(async (userId: string): Promise<void> => {
+    if (!userPicker) return
+    const { serverId } = userPicker
+    setUserPicker(null)
+    try {
+      const setResult = await window.api.server.setUser(serverId, userId)
+      if (!setResult.success) {
+        setServerStatus({ type: 'error', message: setResult.error || '保存用户选择失败' })
+        return
+      }
+    } catch (err) {
+      setServerStatus({ type: 'error', message: err instanceof Error ? err.message : '保存用户选择失败' })
+      return
+    }
+    await handleConnectServer(serverId)
+  }, [userPicker, handleConnectServer])
+
   const handleRemoveServer = useCallback(async (id: string): Promise<void> => {
     if (!confirm('确定要删除此服务器吗？')) return
     try {
-      await window.api.server.remove(id)
+      const result = await window.api.server.remove(id)
       await loadServers()
       if (activeServerId === id) {
         setActiveServerId(null)
-        setServerStatus({ type: 'info', message: '已断开连接' })
+        // 删除活跃服务器：主进程已自动切换到剩余第一台（或返回切换失败警告）
+        const warning = (result as { warning?: string }).warning
+        if (warning) {
+          setServerStatus({ type: 'error', message: warning })
+        } else if (!result.success) {
+          setServerStatus({ type: 'error', message: result.error || '删除失败' })
+        } else {
+          setServerStatus({ type: 'info', message: '已删除，并已切换到剩余服务器' })
+          // 重新拉取活跃服务器状态
+          window.api.server.getActive().then((r) => {
+            if (r.success && r.data?.id) setActiveServerId(r.data.id)
+          }).catch(() => {})
+        }
       }
     } catch { /* ignore */ }
   }, [activeServerId, loadServers])
@@ -511,7 +538,7 @@ function Settings(): ReactElement {
       password: ''
     })
     // 编辑模式下清空登录缓存，要求用户重新测试以刷新 token
-    setEmbyLoginResult(null)
+    setEmbyTested(false)
     setShowAddForm(true)
     setServerTestResult(null)
   }, [])
@@ -523,7 +550,9 @@ function Settings(): ReactElement {
       setDanmakuPrimary(cfg.primary)
       setDanmakuMirrors(cfg.mirrors.join('\n'))
       setDanmakuAppId(cfg.appId || '')
-      setDanmakuAppSecret(cfg.appSecretHint || '')
+      // Secret 不回显：输入框留空表示保持不变，仅展示掩码提示
+      setDanmakuAppSecret('')
+      setDanmakuSecretHint(cfg.hasAppSecret ? `已配置（${cfg.appSecretHint || '****'}），留空保持不变` : '')
     }).catch(() => {})
 
     // 加载播放器设置
@@ -578,11 +607,12 @@ function Settings(): ReactElement {
     setDanmakuSaving(true)
     try {
       const mirrors = danmakuMirrors.split('\n').map((s) => s.trim()).filter((s) => s.length > 0)
-      const updates: { primary: string; mirrors: string[]; appId: string; appSecret: string } = {
+      // Secret 留空 = 保持不变：仅当用户输入了新值才携带 appSecret
+      const updates: { primary: string; mirrors: string[]; appId: string; appSecret?: string } = {
         primary: danmakuPrimary.trim(),
         mirrors,
         appId: danmakuAppId.trim(),
-        appSecret: danmakuAppSecret.trim()
+        ...(danmakuAppSecret.trim() ? { appSecret: danmakuAppSecret.trim() } : {})
       }
       await window.api.danmaku.setConfig(updates)
       setDanmakuSaveMsg('已保存')
@@ -706,6 +736,37 @@ function Settings(): ReactElement {
         )}
       </AnimatePresence>
 
+      {/* API Key 多用户选择器：禁止静默选第一个用户 */}
+      <AnimatePresence>
+        {userPicker && (
+          <motion.div
+            className="px-4 py-3 rounded-[var(--radius-md)] bg-[var(--bg-elevated)] border border-[var(--border-color)]"
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+          >
+            <p className="text-[13px] text-[var(--text-secondary)] mb-2.5">该服务器有多个用户，请选择要使用的用户：</p>
+            <div className="flex flex-wrap gap-2">
+              {userPicker.users.map((u) => (
+                <button
+                  key={u.id}
+                  onClick={() => handlePickUser(u.id)}
+                  className="ios-btn ios-btn-secondary px-3 py-1.5 text-[13px]"
+                >
+                  {u.name || u.id}
+                </button>
+              ))}
+              <button
+                onClick={() => setUserPicker(null)}
+                className="ios-btn ios-btn-ghost px-3 py-1.5 text-[13px]"
+              >
+                取消
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* 服务器列表 */}
       <div className="space-y-3">
         {servers.length === 0 && !showAddForm && (
@@ -727,7 +788,7 @@ function Settings(): ReactElement {
             setServerType('jellyfin')
             setServerForm({ name: '', url: '', token: '', username: '', password: '' })
             setServerTestResult(null)
-            setEmbyLoginResult(null)
+            setEmbyTested(false)
           }}
           className="ios-btn ios-btn-secondary w-full"
           whileTap={{ scale: 0.96 }}
@@ -759,7 +820,7 @@ function Settings(): ReactElement {
                   setEditingServer(null)
                   setServerForm({ name: '', url: '', token: '', username: '', password: '' })
                   setServerTestResult(null)
-                  setEmbyLoginResult(null)
+                  setEmbyTested(false)
                 }}
                 className="p-1.5 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
                 whileTap={{ scale: 0.9 }}
@@ -777,7 +838,7 @@ function Settings(): ReactElement {
                   onClick={() => {
                     setServerType(t)
                     setServerTestResult(null)
-                    setEmbyLoginResult(null)
+                    setEmbyTested(false)
                   }}
                   className={`flex-1 py-2 text-[13px] font-medium rounded-[var(--radius-sm)] transition-colors ${
                     serverType === t
@@ -864,7 +925,7 @@ function Settings(): ReactElement {
             )}
 
             {/* Emby 提示：需先测试拿到 token 才能保存 */}
-            {serverType === 'emby' && !embyLoginResult && (
+            {serverType === 'emby' && !embyTested && (
               <p className="text-[12px] text-[var(--text-quaternary)] flex items-center gap-1.5">
                 <Info size={13} strokeWidth={1.5} />
                 Emby 需先点击「测试连接」验证账号密码后才能保存
@@ -900,17 +961,17 @@ function Settings(): ReactElement {
                 onClick={handleSaveServer}
                 disabled={
                   !serverForm.url.trim() ||
-                  (serverType === 'jellyfin' ? (!editingServer && !serverForm.token.trim()) : !embyLoginResult || !serverForm.username.trim() || !serverForm.password)
+                  (serverType === 'jellyfin' ? (!editingServer && !serverForm.token.trim()) : !embyTested || !serverForm.username.trim() || !serverForm.password)
                 }
                 className={
                   !serverForm.url.trim() ||
-                  (serverType === 'jellyfin' ? (!editingServer && !serverForm.token.trim()) : !embyLoginResult || !serverForm.username.trim() || !serverForm.password)
+                  (serverType === 'jellyfin' ? (!editingServer && !serverForm.token.trim()) : !embyTested || !serverForm.username.trim() || !serverForm.password)
                     ? 'ios-btn ios-btn-primary opacity-40 cursor-not-allowed'
                     : 'ios-btn ios-btn-primary'
                 }
                 whileTap={
                   !serverForm.url.trim() ||
-                  (serverType === 'jellyfin' ? (!editingServer && !serverForm.token.trim()) : !embyLoginResult || !serverForm.username.trim() || !serverForm.password)
+                  (serverType === 'jellyfin' ? (!editingServer && !serverForm.token.trim()) : !embyTested || !serverForm.username.trim() || !serverForm.password)
                     ? {}
                     : { scale: 0.96 }
                 }
@@ -991,7 +1052,7 @@ function Settings(): ReactElement {
               type="password"
               value={danmakuAppSecret}
               onChange={(e) => setDanmakuAppSecret(e.target.value)}
-              placeholder="DandanPlay App-Secret"
+              placeholder={danmakuSecretHint || 'DandanPlay App-Secret（留空保持不变）'}
               className="ios-input"
             />
           </Field>

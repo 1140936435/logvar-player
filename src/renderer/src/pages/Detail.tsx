@@ -6,6 +6,7 @@ import {
   ChevronRight, Users, Info, ExternalLink, Download
 } from 'lucide-react'
 import { cachedFetch } from '../utils/apiCache'
+import { getImageBase } from '../utils/posterUrl'
 import { formatDurationChinese } from '../utils/time'
 
 /* ==================== 类型 ==================== */
@@ -91,7 +92,8 @@ function Detail(): ReactElement {
   const [expandedEpisode, setExpandedEpisode] = useState<string | null>(null)
 
   const [baseUrl, setBaseUrl] = useState('http://localhost:8096')
-  // 凭据保留在主进程（DTO 边界），图片认证由 jellyfin-image/emby-image 协议按 host 注入
+  // 凭据保留在主进程（DTO 边界），图片认证由 jellyfin-image/emby-image 协议按 serverId 注入
+  const [activeServerId, setActiveServerId] = useState<string | null>(null)
   const [localPosters, setLocalPosters] = useState<Record<string, string>>({})
   const [serverType, setServerType] = useState<'jellyfin' | 'emby'>('jellyfin')
   const [posterError, setPosterError] = useState(false)
@@ -120,6 +122,7 @@ function Detail(): ReactElement {
     // 从 server.getActive() 获取当前活跃服务器（包含正确的 type 字段）
     window.api.server.getActive().then((result: any) => {
       if (cancelled) return
+      if (result.data?.id) setActiveServerId(result.data.id)
       if (result.success && result.data?.server) {
         const srv = result.data.server
         if (srv.url) setBaseUrl(srv.url.replace(/\/+$/, ''))
@@ -245,6 +248,9 @@ function Detail(): ReactElement {
     navigate(`/player?itemId=${encodeURIComponent(targetId)}&name=${encodeURIComponent(targetName)}&base=${encodeURIComponent(serverUrl)}&seriesName=${encodeURIComponent(seriesName)}&seriesId=${encodeURIComponent(seriesId)}&seasonId=${encodeURIComponent(seasonId)}`)
   }
 
+  // 图片协议前缀：serverId 格式优先（精确匹配服务器、无 host 冲突、scheme 由配置决定）
+  const imgBase = getImageBase({ serverId: activeServerId || undefined, baseUrl, serverType })
+
   const getPosterUrl = (): string | null => {
     if (itemId && localPosters[itemId]) {
       let urlPath = localPosters[itemId].replace(/\\/g, '/')
@@ -252,44 +258,17 @@ function Detail(): ReactElement {
       return `local-file://${urlPath}`
     }
     if (!detail?.ImageTags?.Primary || !itemId) return null
-
-    if (serverType === 'emby') {
-      const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
-      return `${imgBase}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90`
-    }
-
-    const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
     return `${imgBase}/Items/${itemId}/Images/Primary?maxHeight=600&tag=${detail.ImageTags.Primary}&quality=90`
   }
 
   const getBackdropUrl = (): string | null => {
     if (!detail?.ImageTags?.Backdrop || !itemId) return null
-
-    if (serverType === 'emby') {
-      const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
-      return `${imgBase}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85`
-    }
-
-    const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
     return `${imgBase}/Items/${itemId}/Images/Backdrop?maxHeight=800&tag=${detail.ImageTags.Backdrop}&quality=85`
   }
 
   const getPersonAvatar = (person: PersonInfo): string | null => {
     const tag = person.ImageTags?.Primary || person.PrimaryImageTag
 
-    if (serverType === 'emby') {
-      const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
-      if (person.Id) {
-        return tag
-          ? `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100&tag=${tag}`
-          : `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100`
-      }
-      return tag
-        ? `${imgBase}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100&tag=${tag}`
-        : `${imgBase}/Persons/${encodeURIComponent(person.Name)}/Images/Primary?maxHeight=100`
-    }
-
-    const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
     if (person.Id) {
       return tag
         ? `${imgBase}/Items/${person.Id}/Images/Primary?maxHeight=100&tag=${tag}`
@@ -302,13 +281,6 @@ function Detail(): ReactElement {
 
   const getEpisodeThumbUrl = (ep: EpisodeInfo): string | null => {
     if (!ep.ImageTags?.Primary) return null
-
-    if (serverType === 'emby') {
-      const imgBase = baseUrl.replace(/^https:\/\//, 'emby-image://https/').replace(/^http:\/\//, 'emby-image://http/')
-      return `${imgBase}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85`
-    }
-
-    const imgBase = baseUrl.replace(/^https:\/\//, 'jellyfin-image://https/').replace(/^http:\/\//, 'jellyfin-image://http/')
     return `${imgBase}/Items/${ep.Id}/Images/Primary?maxHeight=200&tag=${ep.ImageTags.Primary}&quality=85`
   }
 

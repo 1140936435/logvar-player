@@ -167,14 +167,12 @@ const api: Api = {
     addEmby: (params: import('../shared/preload-types').EmbyAddServerParams) =>
       ipcRenderer.invoke('server:add-emby', params),
     testEmby: (params: import('../shared/preload-types').EmbyTestParams) =>
-      ipcRenderer.invoke('server:test-emby', params)
+      ipcRenderer.invoke('server:test-emby', params),
+    listUsers: (id: string) => ipcRenderer.invoke('server:list-users', id),
+    setUser: (id: string, userId: string) => ipcRenderer.invoke('server:set-user', id, userId)
   },
 
-  // Emby API
-  emby: {
-    login: (url: string, username: string, password: string) =>
-      ipcRenderer.invoke('emby:login', url, username, password)
-  },
+  // Emby API 已移除独立登录通道：登录统一走 server.testEmby，token 只留在主进程
 
   // 最近入库
   recentlyAdded: {

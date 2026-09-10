@@ -12,6 +12,8 @@
     "prebuild": "npm run prepare:icons",
     "build": "electron-vite build --config electron.vite.config.cts",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepreview": "npm run prepare:icons",
     "preview": "electron-vite preview --config electron.vite.config.cts",
     "start": "node launcher.cjs",
