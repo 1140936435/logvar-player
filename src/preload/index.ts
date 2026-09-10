@@ -69,9 +69,14 @@ const api: Api = {
     updateEmbed: (x: number, y: number, width: number, height: number) => ipcRenderer.invoke('mpv:update-embed', x, y, width, height),
     hide: () => ipcRenderer.invoke('mpv:hide'),
     onEvent: ((callback: (event: string, data: unknown) => void) => {
-      ipcRenderer.on('mpv:event', (_event, msg) => callback(msg.event, msg.data))
+      const listener = (_event: unknown, msg: { event: string; data: unknown }): void =>
+        callback(msg.event, msg.data)
+      ipcRenderer.on('mpv:event', listener)
+      // 返回独立 unsubscribe：仅移除本次注册的监听，不影响其他订阅者
+      return () => { ipcRenderer.removeListener('mpv:event', listener) }
     }) as Api['mpv']['onEvent'],
     offEvent: (): void => {
+      // 兼容旧调用：清空该通道全部监听
       ipcRenderer.removeAllListeners('mpv:event')
     }
   },

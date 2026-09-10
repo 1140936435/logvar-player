@@ -812,37 +812,45 @@ ipcMain.handle('server:update', async (_event, params: {
   const servers = getServers()
   const server = servers.find(s => s.id === params.id)
   if (!server) return { success: false, error: '服务器不存在' }
-  const wasActive = getActiveServerId() === params.id
-  if (params.name !== undefined) server.name = params.name
-  if (params.url !== undefined) server.url = params.url.replace(/\/+$/, '')
-  if (params.type !== undefined) server.type = params.type
-  if (params.username !== undefined) server.username = params.username
-  if (params.password !== undefined) server.password = params.password
+
+  // 原子性：先在副本 next 上应用全部变更并完成校验，全部通过后才一次性写回。
+  // 避免校验失败（如 Emby 暂存登录失效）时已就地修改 configData 中的对象，
+  // 造成半更新状态被后续任意一次落盘固化。
+  const next: JellyfinServerConfig = { ...server }
+  if (params.name !== undefined) next.name = params.name
+  if (params.url !== undefined) next.url = params.url.replace(/\/+$/, '')
+  if (params.type !== undefined) next.type = params.type
+  if (params.username !== undefined) next.username = params.username
+  if (params.password !== undefined) next.password = params.password
   if (params.useTestedEmbyLogin) {
-    // Emby 凭据收回主进程：从暂存的测试登录取 token/userId，不经 Renderer
-    const login = takePendingEmbyLogin(server.url, server.username || '')
+    // Emby 凭据收回主进程：从暂存的测试登录取 token/userId，不经 Renderer。
+    // 用「变更后」的 url/username 匹配，确保暂存登录与即将保存的表单一致。
+    const login = takePendingEmbyLogin(next.url, next.username || '')
     if (!login) {
       return { success: false, error: '登录凭证已失效或与表单不匹配，请重新点击「测试连接」' }
     }
-    server.token = login.token
-    server.userId = login.userId
+    next.token = login.token
+    next.userId = login.userId
   }
-  if (params.token !== undefined) server.token = params.token
-  if (params.userId !== undefined) server.userId = params.userId
-  saveServers(servers)
+  if (params.token !== undefined) next.token = params.token
+  if (params.userId !== undefined) next.userId = params.userId
+
+  const wasActive = getActiveServerId() === params.id
+  // 校验全部通过后才提交：用 next 替换目标项后一次性保存
+  saveServers(servers.map(s => (s.id === params.id ? next : s)))
 
   // 一致性：当前活跃服务器的 url/token/userId/type 变化必须同步到 jellyfinAuth，
   // 保证下一次 API 调用立即使用新凭据（而不是等重连）
   if (wasActive && jellyfinAuth) {
     jellyfinAuth = {
-      url: server.url,
-      token: server.token,
-      userId: server.userId || '',
-      type: server.type === 'emby' ? 'emby' : 'jellyfin'
+      url: next.url,
+      token: next.token,
+      userId: next.userId || '',
+      type: next.type === 'emby' ? 'emby' : 'jellyfin'
     }
     console.log(`[server] 活跃服务器配置已更新，auth 已同步 (type=${jellyfinAuth.type})`)
   }
-  return { success: true, data: toPublicServer(server) }
+  return { success: true, data: toPublicServer(next) }
 })
 
 ipcMain.handle('server:remove', async (_event, id: string) => {
@@ -861,7 +869,7 @@ ipcMain.handle('server:remove', async (_event, id: string) => {
       })
       if (!connectResult.success) {
         jellyfinAuth = null
-        return { success: true, data: { warning: `已删除服务器，但切换到 "${next.name}" 失败：${connectResult.error}` } }
+        return { success: true, warning: `已删除服务器，但切换到 "${next.name}" 失败：${connectResult.error}` } }
       }
     } else {
       setActiveServerId('')
@@ -1079,6 +1087,97 @@ ipcMain.handle('jellyfin:get-item-details', async (_event, itemId: string) => {
   }
 })
 
+// ==================== 播放流代理（凭据不出主进程） ====================
+// Renderer 只拿到 127.0.0.1 回环 URL，真正的服务器地址与 token 由主进程注入。
+// mpv（独立/画布）与 html5 各引擎都只是普通 http 客户端，因此统一走本代理，
+// 避免 api_key 明文出现在渲染端（也无需各引擎单独适配请求头）。
+let streamProxyServer: http.Server | null = null
+let streamProxyPort = 0
+
+function startStreamProxy(): void {
+  if (streamProxyServer) return
+  streamProxyServer = http.createServer((req, res) => {
+    handleStreamProxyRequest(req, res)
+  })
+  streamProxyServer.on('error', (err) => {
+    console.error('[stream-proxy] server error:', err)
+  })
+  streamProxyServer.listen(0, '127.0.0.1', () => {
+    const addr = streamProxyServer?.address()
+    if (addr && typeof addr === 'object') {
+      streamProxyPort = addr.port
+      console.log(`[stream-proxy] listening on 127.0.0.1:${streamProxyPort}`)
+    }
+  })
+}
+
+/** 构造回环播放 URL：/__stream/<serverId>/<内网路径与查询>，不含任何凭据 */
+function buildStreamUrl(serverId: string, path: string): string {
+  const suffix = path.startsWith('/') ? path : `/${path}`
+  return `http://127.0.0.1:${streamProxyPort}/__stream/${encodeURIComponent(serverId)}${suffix}`
+}
+
+function handleStreamProxyRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const fail = (code: number, msg: string): void => {
+    if (!res.headersSent) res.writeHead(code)
+    res.end(msg)
+  }
+  // 仅接受本机回环请求，防止被同机其他进程以外的来源当作跳板
+  const remote = req.socket.remoteAddress || ''
+  if (remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
+    fail(403, 'Forbidden')
+    return
+  }
+  const m = (req.url || '').match(/^\/__stream\/([^/]+)(\/.*)?$/)
+  if (!m) {
+    fail(404, 'Not Found')
+    return
+  }
+  const serverId = decodeURIComponent(m[1])
+  const rest = m[2] || '/'
+  const server = getServers().find(s => s.id === serverId)
+  if (!server || !server.token) {
+    fail(404, 'Server Not Found')
+    return
+  }
+  let target: URL
+  try {
+    target = new URL(`${normalizeUrl(server.url)}${rest}`)
+  } catch {
+    fail(400, 'Bad Target')
+    return
+  }
+  const headers: Record<string, string> = { 'X-Emby-Token': server.token }
+  if (req.headers.range) headers['Range'] = String(req.headers.range)
+  if (req.headers['user-agent']) headers['User-Agent'] = String(req.headers['user-agent'])
+  const transport = target.protocol === 'https:' ? https : http
+  const proxyReq = transport.request(
+    {
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: `${target.pathname}${target.search}`,
+      method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+      headers
+    },
+    (upstream) => {
+      const out: Record<string, string | string[]> = {}
+      for (const key of ['content-type', 'content-length', 'accept-ranges', 'content-range', 'etag', 'last-modified']) {
+        const v = upstream.headers[key]
+        if (v !== undefined) out[key] = v
+      }
+      res.writeHead(upstream.statusCode || 502, out)
+      upstream.pipe(res)
+    }
+  )
+  proxyReq.on('error', (err) => {
+    console.error('[stream-proxy] upstream error:', err)
+    fail(502, 'Bad Gateway')
+  })
+  res.on('close', () => proxyReq.destroy())
+  proxyReq.end()
+}
+
 ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
   if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
 
@@ -1094,8 +1193,9 @@ ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
     const mediaSources = item?.MediaSources
     if (!mediaSources || mediaSources.length === 0) {
       console.warn(`No MediaSources for item ${itemId}, trying itemId as fallback`)
-      const baseUrl = normalizeUrl(jellyfinAuth.url)
-      const url = `${baseUrl}/Videos/${itemId}/stream?Static=true&api_key=${jellyfinAuth.token}`
+      const activeId = getActiveServerId()
+      if (!activeId) return { success: false, error: '未找到活跃服务器' }
+      const url = buildStreamUrl(activeId, `/Videos/${itemId}/stream?Static=true`)
       console.log(`get-playback-url (fallback): ${url}`)
       return { success: true, data: { url, subtitles: [] } }
     }
@@ -1103,8 +1203,6 @@ ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
     const mediaSourceId = mediaSources[0].Id
     const container = mediaSources[0].Container || ''
     console.log(`get-playback-url: mediaSourceId=${mediaSourceId}, container=${container}, itemId=${itemId}`)
-
-    const baseUrl = normalizeUrl(jellyfinAuth.url)
 
     // 提取字幕轨道信息
     const streams = mediaSources[0].MediaStreams || []
@@ -1125,7 +1223,9 @@ ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
         }
       })
 
-    const url = `${baseUrl}/Videos/${itemId}/stream?Static=true&MediaSourceId=${mediaSourceId}&api_key=${jellyfinAuth.token}`
+    const activeId = getActiveServerId()
+    if (!activeId) return { success: false, error: '未找到活跃服务器' }
+    const url = buildStreamUrl(activeId, `/Videos/${itemId}/stream?Static=true&MediaSourceId=${mediaSourceId}`)
     console.log(`get-playback-url (final): ${url}, subtitles: ${subtitles.length}`)
     return { success: true, data: { url, subtitles } }
   } catch (err) {
@@ -4344,6 +4444,13 @@ async function fetchImageWithToken(realUrl: string, headers: Record<string, stri
  *    按 origin+basePath 最长前缀匹配服务器 —— 同 host 不同 basePath 不会串 token，
  *    scheme 必须与服务器配置一致（https 配置拒绝 http 请求）
  * 匹配失败返回 null（协议层回 403），防止协议被滥用于任意内网探测 */
+/** 仅允许访问图片 API：Jellyfin/Emby 图片端点形如 /Items/{id}/Images/{type}[/...]。
+ * 协议不得被当作任意 API 代理（如 /Videos/*/stream、/Users 等），
+ * 否则持凭据的请求可越过图片范围访问其他接口。 */
+function isImageApiPath(pathname: string): boolean {
+  return /\/Items\/[^/]+\/Images\//i.test(pathname)
+}
+
 function resolveImageRequest(
   requestUrl: string,
   protoPrefix: string
@@ -4365,6 +4472,11 @@ function resolveImageRequest(
       // 兼容旧链接：剥离内嵌凭据参数，认证一律由主进程注入
       u.searchParams.delete('api_key')
       u.searchParams.delete('token')
+      // 图片范围限制：仅放行 /Items/{id}/Images/... 端点
+      if (!isImageApiPath(u.pathname)) {
+        console.warn(`[image] 拒绝非图片 API 路径: ${u.pathname}`)
+        return null
+      }
       const realUrl = `${base.origin}${basePath}${u.pathname}${u.search}`
       return { server: byId, realUrl, cachePath: `${u.pathname}${u.search}` }
     } catch {
@@ -4383,6 +4495,11 @@ function resolveImageRequest(
   }
   ru.searchParams.delete('api_key')
   ru.searchParams.delete('token')
+  // 图片范围限制：仅放行 /Items/{id}/Images/... 端点
+  if (!isImageApiPath(ru.pathname)) {
+    console.warn(`[image] 拒绝非图片 API 路径: ${ru.pathname}`)
+    return null
+  }
   const realUrl = ru.toString()
   const matched = findServerByUrlPrefix(realUrl)
   if (!matched) {
@@ -4402,8 +4519,14 @@ function makeServerImageHandler(proto: 'jellyfin-image' | 'emby-image') {
         return new Response('Forbidden', { status: 403 })
       }
       const { server, realUrl, cachePath } = resolved
-      // 缓存 key 含 serverId，避免多服务器同 path 撞图
-      const cacheKey = `${proto}_${server.id}${cachePath}`
+      // 缓存 key 含 serverId，避免多服务器同 path 撞图；使用 SHA-256 摘要，
+      // 不受原始路径中的特殊字符影响，落盘文件名稳定且不泄露原始 URL 结构
+      const cacheKey = crypto
+        .createHash('sha256')
+        .update(`${proto}\u0000${server.id}\u0000${cachePath}`)
+        .digest('hex')
+      // 等待缓存初始化（建目录 + v1→v2 迁移）完成，避免早期读写与迁移清理竞争
+      await posterCache.ready()
       const cachedData = await posterCache.get(cacheKey)
       if (cachedData) {
         return new Response(cachedData.data, {
@@ -4705,6 +4828,9 @@ app.whenReady().then(() => {
   registerEmbyImageProtocol()
   registerLocalFileProtocol()
   registerDoubanImageProtocol()
+
+  // 启动播放流代理：Renderer 只拿回环 URL，凭据留在主进程
+  startStreamProxy()
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

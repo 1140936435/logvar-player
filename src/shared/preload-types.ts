@@ -313,7 +313,8 @@ export interface MpvRenderApi {
   setTargetSize: (width: number, height: number) => void
   /** 离开播放页：释放 mpv 实例与渲染循环 */
   destroy: () => Promise<ApiResponse<void>>
-  onEvent: (callback: (event: string, data: MpvEvent) => void) => void
+  /** 订阅事件，返回独立 unsubscribe（仅移除本次订阅） */
+  onEvent: (callback: (event: string, data: MpvEvent) => void) => () => void
   offEvent: () => void
 }
 
@@ -345,7 +346,8 @@ export interface Api {
     updateEmbed: (x: number, y: number, width: number, height: number) => Promise<ApiResponse<void>>
     /** 离开播放页：销毁嵌入子窗口并结束 mpv 进程 */
     hide: () => Promise<ApiResponse<void>>
-    onEvent: (callback: (event: string, data: MpvEvent) => void) => void
+    /** 订阅事件，返回独立 unsubscribe（仅移除本次订阅） */
+    onEvent: (callback: (event: string, data: MpvEvent) => void) => () => void
     offEvent: () => void
   }
 

@@ -340,6 +340,13 @@ function Settings(): ReactElement {
     } catch { /* ignore */ }
   }, [])
 
+  // 表单中任一影响连接/登录的字段变化都会使既有「测试连接」结果失效：
+  // 避免用旧凭据的测试成功去保存新凭据（Emby 尤其关键——暂存 token 与 url+username 绑定）
+  const invalidateServerTest = useCallback((): void => {
+    setServerTestResult(null)
+    setEmbyTested(false)
+  }, [])
+
   const handleTestServer = useCallback(async (): Promise<void> => {
     if (!serverForm.url.trim()) return
     setServerTesting(true)
@@ -867,7 +874,7 @@ function Settings(): ReactElement {
               <input
                 type="text"
                 value={serverForm.url}
-                onChange={(e) => setServerForm(prev => ({ ...prev, url: e.target.value }))}
+                onChange={(e) => { setServerForm(prev => ({ ...prev, url: e.target.value })); invalidateServerTest() }}
                 placeholder="http://192.168.1.100:8096"
                 className="ios-input"
               />
@@ -879,7 +886,7 @@ function Settings(): ReactElement {
                 <input
                   type="password"
                   value={serverForm.token}
-                  onChange={(e) => setServerForm(prev => ({ ...prev, token: e.target.value }))}
+                  onChange={(e) => { setServerForm(prev => ({ ...prev, token: e.target.value })); invalidateServerTest() }}
                   placeholder={editingServer ? '留空则保持原 Token 不变' : '粘贴 API Token'}
                   className="ios-input"
                 />
@@ -893,7 +900,7 @@ function Settings(): ReactElement {
                   <input
                     type="text"
                     value={serverForm.username}
-                    onChange={(e) => setServerForm(prev => ({ ...prev, username: e.target.value }))}
+                    onChange={(e) => { setServerForm(prev => ({ ...prev, username: e.target.value })); invalidateServerTest() }}
                     placeholder="用户名"
                     className="ios-input"
                   />
@@ -902,7 +909,7 @@ function Settings(): ReactElement {
                   <input
                     type="password"
                     value={serverForm.password}
-                    onChange={(e) => setServerForm(prev => ({ ...prev, password: e.target.value }))}
+                    onChange={(e) => { setServerForm(prev => ({ ...prev, password: e.target.value })); invalidateServerTest() }}
                     placeholder="密码"
                     className="ios-input"
                   />
