@@ -42,6 +42,8 @@ const DEFAULT_SESSION_TTL_MS = 6 * 60 * 60 * 1000
 export class StreamProxyService {
   private server: http.Server | null = null
   private port = 0
+  /** 启动 Promise（幂等）：await 后端口一定已就绪，避免 createSession 拿到 port=0 */
+  private startPromise: Promise<void> | null = null
   private readonly sessions = new Map<string, StreamSession>()
   private readonly sessionTtlMs: number
   private readonly log: StreamProxyLogger
@@ -54,18 +56,31 @@ export class StreamProxyService {
     this.log = options.logger ?? console
   }
 
-  /** 启动回环代理（幂等） */
-  start(): void {
-    if (this.server) return
-    this.server = http.createServer((req, res) => this.handle(req, res))
-    this.server.on('error', (err) => this.log.error('[stream-proxy] server error:', err))
-    this.server.listen(0, '127.0.0.1', () => {
-      const addr = this.server?.address()
-      if (addr && typeof addr === 'object') {
-        this.port = addr.port
-        this.log.info(`[stream-proxy] listening on 127.0.0.1:${this.port}`)
-      }
+  /**
+   * 启动回环代理（幂等、可 await）。Promise resolve 时端口一定已就绪，
+   * 调用方（主进程启动 / createSession 前）await 后可安全签发 session。
+   */
+  start(): Promise<void> {
+    if (this.startPromise) return this.startPromise
+    this.startPromise = new Promise<void>((resolve, reject) => {
+      const server = http.createServer((req, res) => this.handle(req, res))
+      this.server = server
+      server.on('error', (err) => {
+        this.log.error('[stream-proxy] server error:', err)
+        this.startPromise = null
+        this.server = null
+        reject(err)
+      })
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address()
+        if (addr && typeof addr === 'object') {
+          this.port = addr.port
+          this.log.info(`[stream-proxy] listening on 127.0.0.1:${this.port}`)
+        }
+        resolve()
+      })
     })
+    return this.startPromise
   }
 
   stop(): void {
@@ -73,10 +88,15 @@ export class StreamProxyService {
     this.server?.close()
     this.server = null
     this.port = 0
+    this.startPromise = null
   }
 
   /** 为指定服务器的某个内网路径创建不透明会话，返回可交给渲染端的回环 URL */
   createSession(serverId: string, path: string): string {
+    // 未监听（port=0）时拒绝签发：否则会得到 http://127.0.0.1:0/s/... 这类不可用 URL
+    if (!this.server || this.port === 0) {
+      throw new Error('[stream-proxy] not listening: await start() before createSession')
+    }
     const id = crypto.randomUUID()
     const suffix = path.startsWith('/') ? path : `/${path}`
     this.sessions.set(id, { serverId, path: suffix, createdAt: Date.now() })

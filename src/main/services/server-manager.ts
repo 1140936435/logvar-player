@@ -94,18 +94,32 @@ export class ServerManager {
     return this.host.readActiveServerId()
   }
 
+  /**
+   * 设置活跃服务器。强制 invariant：已连接状态下活跃服务器必须与已连接服务器
+   * （connectedServerId）一致。若新的活跃 id 与当前连接不同，说明运行时凭据已与
+   * 新活跃服务器脱节，必须先断开连接，由调用方（connectToServer）用新服务器重建后再登记。
+   */
   setActiveServerId(id: string | null): void {
+    if (this.auth !== null && id !== this.connectedServerId) {
+      this.clearConnection()
+    }
     this.host.writeActiveServerId(id)
+    this.assertInvariant()
   }
 
   getServerById(id: string): ServerConfig | undefined {
     return this.getServers().find((s) => s.id === id)
   }
 
-  /** 连接成功：登记运行时凭据与对应的服务器 id（两者同时更新） */
+  /**
+   * 连接成功：登记运行时凭据，并原子地把 activeServerId 落为同一 id。
+   * 使「activeServerId === connectedServerId」在同一步内成立，无需调用方再补写。
+   */
   markConnected(id: string | null, auth: ServerAuth): void {
     this.connectedServerId = id
     this.auth = auth
+    this.host.writeActiveServerId(id)
+    this.assertInvariant()
   }
 
   /** 断开 / 清除连接：auth 与 connectedServerId 一并清空 */
@@ -116,6 +130,21 @@ export class ServerManager {
 
   isConnected(): boolean {
     return this.auth !== null
+  }
+
+  /**
+   * 不变式自检：已连接时 activeServerId 必须等于 connectedServerId。
+   * 由关键写入点调用，违反即抛错，避免「活跃服务器」与「运行时凭据」脱节的
+   * 带病状态被后续调用静默掩盖。
+   */
+  assertInvariant(): void {
+    if (this.auth === null) return
+    const active = this.host.readActiveServerId()
+    if (this.connectedServerId !== active) {
+      throw new Error(
+        `[ServerManager] invariant violated: connectedServerId=${String(this.connectedServerId)} !== activeServerId=${String(active)}`
+      )
+    }
   }
 
   /**
@@ -132,5 +161,6 @@ export class ServerManager {
       type: server.type === 'emby' ? 'emby' : 'jellyfin'
     }
     this.connectedServerId = server.id
+    this.assertInvariant()
   }
 }

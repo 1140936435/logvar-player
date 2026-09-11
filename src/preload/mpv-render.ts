@@ -557,8 +557,3 @@ export function onEvent(callback: EventCallback): () => void {
   // 返回独立 unsubscribe：仅移除本次注册的回调，不影响其他订阅者
   return () => { eventCallbacks.delete(callback) }
 }
-
-export function offEvent(): void {
-  // 兼容旧调用：清空全部回调
-  eventCallbacks.clear()
-}

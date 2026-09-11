@@ -315,7 +315,6 @@ export interface MpvRenderApi {
   destroy: () => Promise<ApiResponse<void>>
   /** 订阅事件，返回独立 unsubscribe（仅移除本次订阅） */
   onEvent: (callback: (event: string, data: MpvEvent) => void) => () => void
-  offEvent: () => void
 }
 
 // ===== API 类型定义 =====
@@ -348,7 +347,6 @@ export interface Api {
     hide: () => Promise<ApiResponse<void>>
     /** 订阅事件，返回独立 unsubscribe（仅移除本次订阅） */
     onEvent: (callback: (event: string, data: MpvEvent) => void) => () => void
-    offEvent: () => void
   }
 
   history: {

@@ -39,6 +39,8 @@ import {
   stripSensitiveFields,
   deepMerge,
   isAllowedDoubanImageUrl,
+  MAX_IMAGE_BYTES,
+  assertAllowedImageResponse,
   parseRangeHeader,
   maskSecret,
   resolveAppSecretInput,
@@ -410,6 +412,13 @@ const serverManager = new ServerManager({
   }
 })
 
+/**
+ * 服务器运行态配置键：只能经 server:* 专用 IPC 修改。
+ * 通用 store / data:import 触碰这些键时，必须重建运行时连接（clearConnection + connectToServer），
+ * 否则会出现 activeServerId 与 auth 脱节的带病状态。
+ */
+const SERVER_RUNTIME_KEYS = new Set(['jellyfin:servers', 'jellyfin:activeServerId'])
+
 function getServers(): JellyfinServerConfig[] {
   return serverManager.getServers()
 }
@@ -600,7 +609,10 @@ function takePendingEmbyLogin(url: string, username: string): { token: string; u
   if (normalizeUrl(pendingEmbyLogin.url) !== normalizeUrl(url) || pendingEmbyLogin.username !== username) {
     return null
   }
-  return { token: pendingEmbyLogin.token, userId: pendingEmbyLogin.userId }
+  // 一次性消费：取用后立即销毁暂存登录，杜绝同一份凭据被重复用于多次保存
+  const consumed = { token: pendingEmbyLogin.token, userId: pendingEmbyLogin.userId }
+  pendingEmbyLogin = null
+  return consumed
 }
 
 /** Emby 客户端标识，用于 X-Emby-Authorization 头 */
@@ -1068,14 +1080,33 @@ function getStreamProxy(): StreamProxyService {
   return streamProxy
 }
 
-function startStreamProxy(): void {
-  getStreamProxy().start()
+async function startStreamProxy(): Promise<void> {
+  await getStreamProxy().start()
+}
+
+/**
+ * 通用 store / data:import 触碰服务器运行态键后，强制按持久化配置重建运行时连接：
+ * 先断开旧凭据并失效播放会话，再重连活跃服务器，杜绝「改了 servers/activeServerId 但 auth 未重建」。
+ */
+async function rebuildServerRuntime(): Promise<void> {
+  serverManager.clearConnection()
+  getStreamProxy().invalidateAll()
+  const id = getActiveServerId()
+  if (id && serverManager.getServerById(id)) {
+    const r = await connectToServer(id).catch((err) => {
+      console.warn('[server] 运行时重建连接失败:', err)
+      return { success: false as const, error: String(err) }
+    })
+    if (!r.success) console.warn('[server] 运行时重建未成功:', r.error)
+  }
 }
 
 ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
   if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
 
   try {
+    // 确保回环代理已监听（幂等），否则 createSession 会拿到 port=0 的不可用 URL
+    await getStreamProxy().start()
     // 第1步：获取 item 详情，提取真实 MediaSourceId 和字幕轨道
     const item = await jellyfinRequest<{
       MediaSources?: {
@@ -1320,16 +1351,8 @@ ipcMain.handle('media:fetch-douban-poster', async (_event, params: { doubanId: s
   }
 
   try {
-    const imgRes = await fetch(params.posterUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://movie.douban.com/' },
-      signal: AbortSignal.timeout(15000)
-    }).catch(() => null)
-    
-    if (!imgRes || !imgRes.ok) {
-      return { success: false, error: '下载封面失败' }
-    }
-    
-    const buffer = Buffer.from(await imgRes.arrayBuffer())
+    // 统一走 redirect-safe 抓取：每跳校验豆瓣白名单 + MIME/大小校验
+    const { buffer } = await fetchDoubanImage(params.posterUrl, 15000)
     writeFileSync(localPath, buffer)
     console.log(`[douban] poster saved: ${localPath}`)
     return { success: true, data: { localPath } }
@@ -1770,6 +1793,12 @@ ipcMain.handle('store:set', async (_event, key: string, value: unknown) => {
     console.warn('[store:set] rejected credential namespace key:', key)
     return false
   }
+  // 服务器运行态键（servers / activeServerId）只能经 server:* 专用 IPC 修改，
+  // 禁止通用 store 直接写入造成 activeServerId 与 auth 脱节（无重建修改）
+  if (SERVER_RUNTIME_KEYS.has(key)) {
+    console.warn('[store:set] rejected server runtime key:', key)
+    return false
+  }
   configData[key] = value
   saveConfigFile()
   return true
@@ -1777,7 +1806,7 @@ ipcMain.handle('store:set', async (_event, key: string, value: unknown) => {
 
 ipcMain.handle('store:delete', async (_event, key: string) => {
   // 与 store:set 同理，敏感键的清除也走专用 handler（登出流程）
-  if (typeof key === 'string' && (ENCRYPTED_KEYS.has(key) || CREDENTIAL_NAMESPACES.has(key))) {
+  if (typeof key === 'string' && (ENCRYPTED_KEYS.has(key) || CREDENTIAL_NAMESPACES.has(key) || SERVER_RUNTIME_KEYS.has(key))) {
     console.warn('[store:delete] rejected sensitive key:', key)
     return false
   }
@@ -1923,6 +1952,8 @@ ipcMain.handle('data:import', async (_event, options?: { merge?: boolean; select
     const merge = options?.merge ?? true
     const skippedKeys: string[] = []
     const importedKeys: string[] = []
+    // 记录本次导入是否触碰服务器运行态键：命中则导入后必须重建运行时（不允许无重建修改）
+    let touchedServerRuntime = false
     
     for (const key of selectedKeys) {
       if (importedData[key] === undefined) {
@@ -1947,6 +1978,12 @@ ipcMain.handle('data:import', async (_event, options?: { merge?: boolean; select
         configData[key] = importedData[key]
       }
       importedKeys.push(key)
+      if (SERVER_RUNTIME_KEYS.has(key)) touchedServerRuntime = true
+    }
+
+    // 服务器运行态键被导入：强制按新持久化配置重建运行时连接，杜绝 auth/activeServerId 脱节
+    if (touchedServerRuntime) {
+      await rebuildServerRuntime()
     }
     
     saveConfigFile()
@@ -4254,6 +4291,44 @@ ipcMain.handle('danmaku:get-candidates', async (_event, meta: DanmakuMatchMeta):
 const DOUBAN_IMG_CACHE = new Map<string, { buffer: Buffer; mime: string }>()
 const DOUBAN_IMG_CACHE_MAX = 50
 
+/**
+ * 抓取豆瓣图片（协议与海报下载共用）：
+ * - 手动处理重定向，每一跳都必须仍命中豆瓣白名单域名，防止 302 跳到内网/任意主机（SSRF）
+ * - 校验响应 MIME 与大小上限，避免非图片/超大响应进入缓存或落盘
+ */
+async function fetchDoubanImage(
+  url: string,
+  timeoutMs: number
+): Promise<{ buffer: Buffer; mime: string }> {
+  let current = url
+  for (let hop = 0; ; hop++) {
+    if (!isAllowedDoubanImageUrl(current)) {
+      throw new Error('豆瓣图片重定向到非白名单地址')
+    }
+    const res = await fetch(current, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://movie.douban.com/'
+      },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+    if (res.status >= 300 && res.status < 400) {
+      if (hop >= 3) throw new Error('豆瓣图片重定向次数过多')
+      const loc = res.headers.get('location')
+      if (!loc) throw new Error('豆瓣图片重定向缺少 Location')
+      current = new URL(loc, current).toString()
+      continue
+    }
+    if (!res.ok) throw new Error(`下载失败: ${res.status}`)
+    const declared = Number(res.headers.get('content-length') || '0')
+    if (declared > MAX_IMAGE_BYTES) throw new Error('图片超过大小上限')
+    const buffer = Buffer.from(await res.arrayBuffer())
+    const mime = assertAllowedImageResponse(res.headers.get('content-type'), buffer.length)
+    return { buffer, mime }
+  }
+}
+
 function registerDoubanImageProtocol(): void {
   protocol.handle('douban-img', (request) => {
     const url = decodeURIComponent(request.url.replace('douban-img://', ''))
@@ -4272,17 +4347,8 @@ function registerDoubanImageProtocol(): void {
         return
       }
       
-      fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Referer': 'https://movie.douban.com/'
-        },
-        signal: AbortSignal.timeout(10000)
-      })
-      .then(async (res) => {
-        if (!res.ok) throw new Error('fetch failed')
-        const buffer = Buffer.from(await res.arrayBuffer())
-        const mime = res.headers.get('content-type') || 'image/jpeg'
+      fetchDoubanImage(url, 10000)
+      .then(({ buffer, mime }) => {
         // 写入前若已达上限，淘汰最旧条目，防止内存无限增长
         if (DOUBAN_IMG_CACHE.size >= DOUBAN_IMG_CACHE_MAX && !DOUBAN_IMG_CACHE.has(url)) {
           const oldestKey = DOUBAN_IMG_CACHE.keys().next().value
@@ -4446,8 +4512,13 @@ function makeServerImageHandler(proto: 'jellyfin-image' | 'emby-image') {
             throw new Error(`${response.status} ${response.statusText}`)
           }
 
-          const mimeType = response.headers.get('content-type') || 'image/png'
+          const declared = Number(response.headers.get('content-length') || '0')
+          if (declared > MAX_IMAGE_BYTES) {
+            throw new Error(`image too large: ${declared} bytes`)
+          }
           const buffer = Buffer.from(await response.arrayBuffer())
+          // 校验 MIME/大小：非图片或超限直接失败，不写入缓存
+          const mimeType = assertAllowedImageResponse(response.headers.get('content-type'), buffer.length)
           await posterCache.set(cacheKey, buffer, realUrl, mimeType)
 
           return new Response(buffer, {
@@ -4724,7 +4795,7 @@ app.whenReady().then(() => {
   registerDoubanImageProtocol()
 
   // 启动播放流代理：Renderer 只拿回环 URL，凭据留在主进程
-  startStreamProxy()
+  startStreamProxy().catch(err => console.warn('[stream-proxy] 启动失败:', err))
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

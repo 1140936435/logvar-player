@@ -314,8 +314,8 @@ function Player(): ReactElement {
         }
       }
     }
-    engine.onEvent(onMpvEvent)
-    return () => { engine.offEvent() }
+    const unsubscribe = engine.onEvent(onMpvEvent)
+    return () => { unsubscribe() }
   }, [engineMode, playerActions])
 
   // 窗口级全屏：隐藏顶栏（TopBar），主内容占满窗口；退出全屏时恢复

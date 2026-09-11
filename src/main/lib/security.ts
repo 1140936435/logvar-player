@@ -118,6 +118,50 @@ export function isAllowedDoubanImageUrl(raw: string): boolean {
   return DOUBAN_IMAGE_HOST_SUFFIXES.some(s => host === s || host.endsWith('.' + s))
 }
 
+// ==================== 图片响应校验（MIME / 大小） ====================
+// 所有图片抓取路径（豆瓣 / Jellyfin / Emby）统一经此校验，防止非图片内容被
+// 当作图片缓存/展示，以及超大响应撑爆内存与缓存磁盘。
+
+/** 单张图片允许的最大字节数（20 MiB） */
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+const ALLOWED_IMAGE_MIMES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'image/bmp',
+  'image/avif'
+])
+
+/** 归一化 content-type：去掉 charset 等参数并转小写 */
+function normalizeImageMime(contentType: string | null | undefined): string {
+  return (contentType ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
+}
+
+/** content-type 是否为受支持的图片类型（忽略 charset 等参数） */
+export function isAllowedImageMime(contentType: string | null | undefined): boolean {
+  return ALLOWED_IMAGE_MIMES.has(normalizeImageMime(contentType))
+}
+
+/**
+ * 校验图片响应：MIME 必须是受支持图片类型，且大小不超过 MAX_IMAGE_BYTES。
+ * 通过返回规范化 MIME；不合规则抛错，由调用方转成失败结果 / 4xx。
+ */
+export function assertAllowedImageResponse(
+  contentType: string | null | undefined,
+  byteLength: number
+): string {
+  const mime = normalizeImageMime(contentType)
+  if (!ALLOWED_IMAGE_MIMES.has(mime)) {
+    throw new Error(`非图片内容类型: ${contentType ?? 'unknown'}`)
+  }
+  if (byteLength > MAX_IMAGE_BYTES) {
+    throw new Error(`图片超过大小上限 ${MAX_IMAGE_BYTES} 字节`)
+  }
+  return mime
+}
+
 // ==================== HTTP Range 解析 ====================
 
 export interface ByteRange {

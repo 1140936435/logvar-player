@@ -39,8 +39,7 @@ const api: Api = {
     getFrame: async (lastSeq: number) => mpvRender.getFrame(lastSeq),
     setTargetSize: (width: number, height: number) => mpvRender.setTargetSize(width, height),
     destroy: async () => { mpvRender.destroy(); return { success: true, data: undefined } },
-    onEvent: (callback) => mpvRender.onEvent(callback as (event: string, data: unknown) => void),
-    offEvent: () => mpvRender.offEvent()
+    onEvent: (callback) => mpvRender.onEvent(callback as (event: string, data: unknown) => void)
   },
 
   // mpv 播放控制
@@ -74,11 +73,7 @@ const api: Api = {
       ipcRenderer.on('mpv:event', listener)
       // 返回独立 unsubscribe：仅移除本次注册的监听，不影响其他订阅者
       return () => { ipcRenderer.removeListener('mpv:event', listener) }
-    }) as Api['mpv']['onEvent'],
-    offEvent: (): void => {
-      // 兼容旧调用：清空该通道全部监听
-      ipcRenderer.removeAllListeners('mpv:event')
-    }
+    }) as Api['mpv']['onEvent']
   },
 
   // 播放历史
