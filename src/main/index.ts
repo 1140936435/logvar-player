@@ -27,6 +27,8 @@ import * as https from 'https'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { posterCache } from './services/poster-cache'
 import { StreamProxyService } from './services/stream-proxy-service'
+import { ServerManager, toPublicServer } from './services/server-manager'
+import type { ServerAuth as JellyfinAuth, ServerConfig as JellyfinServerConfig } from './services/server-manager'
 import { MpvController } from './mpv-controller'
 import {
   ENCRYPTED_KEYS,
@@ -315,13 +317,6 @@ ipcMain.handle('log:toggle', () => {
 
 // ==================== Jellyfin API 辅助函数 ====================
 
-interface JellyfinAuth {
-  url: string
-  token: string
-  userId: string
-  type: ServerType
-}
-
 function buildJellyfinHeaders(token: string, serverType: ServerType): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: 'application/json'
@@ -390,7 +385,6 @@ async function jellyfinRequest<T>(
 
 // ==================== IPC: Jellyfin ====================
 
-let jellyfinAuth: JellyfinAuth | null = null
 
 // ==================== 多服务器管理 ====================
 
@@ -399,54 +393,29 @@ let jellyfinAuth: JellyfinAuth | null = null
 let configPath = ''
 let configData: Record<string, unknown> = {}
 
-interface JellyfinServerConfig {
-  id: string
-  name: string
-  url: string
-  token: string
-  userId?: string
-  /** 服务器类型，旧配置无该字段时默认按 'jellyfin' 处理 */
-  type?: ServerType
-  /** Emby 专属：登录账号 */
-  username?: string
-  /** Emby 专属：加密保存的密码（密文） */
-  password?: string
-}
+// 服务器状态唯一真源：统一 servers / activeServerId（持久化）与 auth / connectedServerId（运行时）
+const serverManager = new ServerManager({
+  readServers: () => {
+    const raw = configData['jellyfin:servers']
+    return Array.isArray(raw) ? (raw as JellyfinServerConfig[]) : []
+  },
+  writeServers: (servers) => {
+    configData['jellyfin:servers'] = servers
+    saveConfigFile()
+  },
+  readActiveServerId: () => (configData['jellyfin:activeServerId'] as string) || null,
+  writeActiveServerId: (id) => {
+    configData['jellyfin:activeServerId'] = id ?? ''
+    saveConfigFile()
+  }
+})
 
 function getServers(): JellyfinServerConfig[] {
-  const raw = configData['jellyfin:servers']
-  if (Array.isArray(raw)) return raw as JellyfinServerConfig[]
-  return []
+  return serverManager.getServers()
 }
 
 function saveServers(servers: JellyfinServerConfig[]): void {
-  configData['jellyfin:servers'] = servers
-  saveConfigFile()
-}
-
-/** Renderer 可见的服务器公开信息：绝不包含 token/password 等凭据 */
-interface PublicServerConfig {
-  id: string
-  name: string
-  url: string
-  type?: 'jellyfin' | 'emby'
-  username?: string
-  userId?: string
-  hasToken: boolean
-  hasPassword: boolean
-}
-
-function toPublicServer(s: JellyfinServerConfig): PublicServerConfig {
-  return {
-    id: s.id,
-    name: s.name,
-    url: s.url,
-    type: s.type,
-    username: s.username,
-    userId: s.userId,
-    hasToken: !!s.token,
-    hasPassword: !!s.password
-  }
+  serverManager.saveServers(servers)
 }
 
 /** 按 URL 匹配已配置服务器（实现见 ./lib/security.ts 的 matchServerByUrlPrefix）：
@@ -457,12 +426,11 @@ function findServerByUrlPrefix(url: string): { server: JellyfinServerConfig; pre
 }
 
 function getActiveServerId(): string | null {
-  return (configData['jellyfin:activeServerId'] as string) || null
+  return serverManager.getActiveServerId()
 }
 
 function setActiveServerId(id: string): void {
-  configData['jellyfin:activeServerId'] = id
-  saveConfigFile()
+  serverManager.setActiveServerId(id)
 }
 
 function generateServerId(): string {
@@ -559,7 +527,7 @@ async function connectToServer(id: string): Promise<{ success: boolean; data?: J
       const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
         auth, '/System/Info'
       )
-      jellyfinAuth = auth
+      serverManager.markConnected(id, auth)
       setActiveServerId(id)
       // 同步旧 key（兼容 Home.tsx 的 connectedServer/token 读取逻辑）
       configData['jellyfin'] = { url: server.url, token: server.token }
@@ -582,7 +550,7 @@ async function connectToServer(id: string): Promise<{ success: boolean; data?: J
     // 用户解析：/Users/Me 优先；API Key 多用户服务器禁止静默选第一个
     const userId = await resolveJellyfinUserId(server, auth)
     auth.userId = userId
-    jellyfinAuth = auth
+    serverManager.markConnected(id, auth)
 
     // 更新 userId
     server.userId = auth.userId
@@ -749,7 +717,7 @@ ipcMain.handle('jellyfin:connect', async (_event, url: string, token: string) =>
       auth.userId = await resolveJellyfinUserId(matchedServer, auth)
     }
 
-    jellyfinAuth = auth
+    serverManager.markConnected(matchedServer?.id ?? null, auth)
     console.log(`Jellyfin connected: ${info.ServerName} v${info.Version}, userId=${auth.userId}`)
     return { success: true, data: info }
   } catch (err) {
@@ -778,7 +746,7 @@ ipcMain.handle('server:get-active', async () => {
 
 /** Renderer 请求重连：主进程用自持凭据连接活跃服务器，Renderer 不接触 token */
 ipcMain.handle('server:ensure-connected', async () => {
-  if (jellyfinAuth) return { success: true }
+  if (serverManager.auth) return { success: true }
   const id = getActiveServerId()
   if (!id) return { success: false, error: '无活跃服务器，请在设置中配置' }
   return connectToServer(id)
@@ -840,16 +808,12 @@ ipcMain.handle('server:update', async (_event, params: {
   // 校验全部通过后才提交：用 next 替换目标项后一次性保存
   saveServers(servers.map(s => (s.id === params.id ? next : s)))
 
-  // 一致性：当前活跃服务器的 url/token/userId/type 变化必须同步到 jellyfinAuth，
+  // 一致性：当前活跃服务器的 url/token/userId/type 变化必须同步到 serverManager.auth，
   // 保证下一次 API 调用立即使用新凭据（而不是等重连）
-  if (wasActive && jellyfinAuth) {
-    jellyfinAuth = {
-      url: next.url,
-      token: next.token,
-      userId: next.userId || '',
-      type: next.type === 'emby' ? 'emby' : 'jellyfin'
-    }
-    console.log(`[server] 活跃服务器配置已更新，auth 已同步 (type=${jellyfinAuth.type})`)
+  if (wasActive && serverManager.auth) {
+    // 一致性：当前活跃服务器的 url/token/userId/type 变化后，立即同步运行时凭据
+    serverManager.syncAuthFromServer(next)
+    console.log(`[server] 活跃服务器配置已更新，auth 已同步 (type=${serverManager.auth.type})`)
   }
   return { success: true, data: toPublicServer(next) }
 })
@@ -869,12 +833,12 @@ ipcMain.handle('server:remove', async (_event, id: string) => {
         return { success: false as const, error: String(err) }
       })
       if (!connectResult.success) {
-        jellyfinAuth = null
+        serverManager.clearConnection()
         return { success: true, warning: `已删除服务器，但切换到 "${next.name}" 失败：${connectResult.error}` }
       }
     } else {
       setActiveServerId('')
-      jellyfinAuth = null
+      serverManager.clearConnection()
     }
   }
   return { success: true }
@@ -908,8 +872,8 @@ ipcMain.handle('server:set-user', async (_event, id: string, userId: string) => 
   server.userId = userId
   saveServers(servers)
   // 若是当前活跃服务器，立即同步 auth，保证下一次 API 使用所选用户
-  if (getActiveServerId() === id && jellyfinAuth) {
-    jellyfinAuth = { ...jellyfinAuth, userId }
+  if (getActiveServerId() === id && serverManager.auth) {
+    serverManager.auth = { ...serverManager.auth, userId }
   }
   return { success: true, data: toPublicServer(server) }
 })
@@ -995,11 +959,11 @@ ipcMain.handle('server:add-emby', async (_event, params: {
 })
 
 ipcMain.handle('jellyfin:get-libraries', async () => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
   try {
     const data = await jellyfinRequest<{ Items: unknown[] }>(
-      jellyfinAuth,
-      `/Users/${jellyfinAuth.userId}/Views`
+      serverManager.auth,
+      `/Users/${serverManager.auth.userId}/Views`
     )
     return { success: true, data }
   } catch (err) {
@@ -1009,7 +973,7 @@ ipcMain.handle('jellyfin:get-libraries', async () => {
 })
 
 ipcMain.handle('jellyfin:get-items', async (_event, parentId: string, startIndex = 0, limit = 50) => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
   try {
     const params = new URLSearchParams({
       parentId: parentId,
@@ -1022,8 +986,8 @@ ipcMain.handle('jellyfin:get-items', async (_event, parentId: string, startIndex
       fields: 'Overview,PremiereDate,CommunityRating'
     })
     const data = await jellyfinRequest<{ Items: unknown[]; TotalRecordCount: number }>(
-      jellyfinAuth,
-      `/Users/${jellyfinAuth.userId}/Items?${params.toString()}`
+      serverManager.auth,
+      `/Users/${serverManager.auth.userId}/Items?${params.toString()}`
     )
     return { success: true, data }
   } catch (err) {
@@ -1033,7 +997,7 @@ ipcMain.handle('jellyfin:get-items', async (_event, parentId: string, startIndex
 })
 
 ipcMain.handle('jellyfin:get-children', async (_event, parentId: string) => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
   try {
     const params = new URLSearchParams({
       parentId: parentId,
@@ -1044,8 +1008,8 @@ ipcMain.handle('jellyfin:get-children', async (_event, parentId: string) => {
       limit: '200'
     })
     const data = await jellyfinRequest<{ Items: unknown[]; TotalRecordCount: number }>(
-      jellyfinAuth,
-      `/Users/${jellyfinAuth.userId}/Items?${params.toString()}`
+      serverManager.auth,
+      `/Users/${serverManager.auth.userId}/Items?${params.toString()}`
     )
     return { success: true, data }
   } catch (err) {
@@ -1055,7 +1019,7 @@ ipcMain.handle('jellyfin:get-children', async (_event, parentId: string) => {
 })
 
 ipcMain.handle('jellyfin:search', async (_event, query: string) => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
   try {
     const params = new URLSearchParams({
       searchTerm: query,
@@ -1064,8 +1028,8 @@ ipcMain.handle('jellyfin:search', async (_event, query: string) => {
       limit: '30'
     })
     const data = await jellyfinRequest<{ Items: unknown[] }>(
-      jellyfinAuth,
-      `/Users/${jellyfinAuth.userId}/Items?${params.toString()}`
+      serverManager.auth,
+      `/Users/${serverManager.auth.userId}/Items?${params.toString()}`
     )
     return { success: true, data }
   } catch (err) {
@@ -1075,11 +1039,11 @@ ipcMain.handle('jellyfin:search', async (_event, query: string) => {
 })
 
 ipcMain.handle('jellyfin:get-item-details', async (_event, itemId: string) => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
   try {
     const data = await jellyfinRequest(
-      jellyfinAuth,
-      `/Users/${jellyfinAuth.userId}/Items/${itemId}?Fields=MediaSources,MediaStreams,People,Genres,Studios,OfficialRating,CommunityRating,VoteCount`
+      serverManager.auth,
+      `/Users/${serverManager.auth.userId}/Items/${itemId}?Fields=MediaSources,MediaStreams,People,Genres,Studios,OfficialRating,CommunityRating,VoteCount`
     )
     return { success: true, data }
   } catch (err) {
@@ -1109,7 +1073,7 @@ function startStreamProxy(): void {
 }
 
 ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
 
   try {
     // 第1步：获取 item 详情，提取真实 MediaSourceId 和字幕轨道
@@ -1118,7 +1082,7 @@ ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
         Id: string; Name?: string; Container?: string
         MediaStreams?: { Index: number; Type: string; DisplayTitle?: string; Language?: string; Codec?: string; IsExternal?: boolean; DeliveryUrl?: string }[]
       }[]
-    }>(jellyfinAuth, `/Users/${jellyfinAuth.userId}/Items/${itemId}?Fields=MediaSources,MediaStreams`)
+    }>(serverManager.auth, `/Users/${serverManager.auth.userId}/Items/${itemId}?Fields=MediaSources,MediaStreams`)
 
     const mediaSources = item?.MediaSources
     if (!mediaSources || mediaSources.length === 0) {
@@ -1169,7 +1133,7 @@ ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
 // 注意：不能用 jellyfinRequest，因为它强制 Accept: application/json，
 // 而字幕接口返回 text/vtt，Jellyfin 会因无法返回 JSON 而 404
 ipcMain.handle('jellyfin:fetch-subtitle', async (_event, endpoint: string) => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
   try {
     console.log(`fetch-subtitle: requesting endpoint=${endpoint}`)
     // 如果 endpoint 是完整 URL（DeliveryUrl），提取路径部分
@@ -1178,11 +1142,11 @@ ipcMain.handle('jellyfin:fetch-subtitle', async (_event, endpoint: string) => {
       const u = new URL(endpoint)
       path = u.pathname + u.search
     }
-    const baseUrl = normalizeUrl(jellyfinAuth.url)
+    const baseUrl = normalizeUrl(serverManager.auth.url)
     const url = `${baseUrl}${path}`
     console.log(`fetch-subtitle: full url=${url}`)
     const response = await fetch(url, {
-      headers: { 'X-Emby-Token': jellyfinAuth.token }
+      headers: { 'X-Emby-Token': serverManager.auth.token }
     })
     if (!response.ok) {
       const text = await response.text().catch(() => '')
@@ -1199,9 +1163,9 @@ ipcMain.handle('jellyfin:fetch-subtitle', async (_event, endpoint: string) => {
 })
 
 ipcMain.handle('jellyfin:report-progress', async (_event, itemId: string, position: number, isPaused: boolean) => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
   try {
-    await jellyfinRequest(jellyfinAuth, `/Sessions/Playing/Progress`, {
+    await jellyfinRequest(serverManager.auth, `/Sessions/Playing/Progress`, {
       method: 'POST',
       body: JSON.stringify({
         ItemId: itemId,
@@ -1218,16 +1182,16 @@ ipcMain.handle('jellyfin:report-progress', async (_event, itemId: string, positi
 })
 
 ipcMain.handle('jellyfin:toggle-favorite', async (_event, itemId: string) => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
   try {
     const item = await jellyfinRequest<{ UserData?: { IsFavorite?: boolean } }>(
-      jellyfinAuth,
-      `/Users/${jellyfinAuth.userId}/Items/${itemId}`
+      serverManager.auth,
+      `/Users/${serverManager.auth.userId}/Items/${itemId}`
     )
     const isFav = item?.UserData?.IsFavorite ?? false
     await jellyfinRequest(
-      jellyfinAuth,
-      `/Users/${jellyfinAuth.userId}/FavoriteItems/${itemId}`,
+      serverManager.auth,
+      `/Users/${serverManager.auth.userId}/FavoriteItems/${itemId}`,
       { method: isFav ? 'DELETE' : 'POST' }
     )
     return { success: true, data: { isFavorite: !isFav } }
@@ -1377,7 +1341,7 @@ ipcMain.handle('media:fetch-douban-poster', async (_event, params: { doubanId: s
 // ==================== IPC: 剧集列表 ====================
 
 ipcMain.handle('jellyfin:get-episodes', async (_event, seriesId: string, seasonId?: string) => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
   try {
     if (seasonId) {
       const params = new URLSearchParams({
@@ -1389,8 +1353,8 @@ ipcMain.handle('jellyfin:get-episodes', async (_event, seriesId: string, seasonI
         limit: '500'
       })
       const data = await jellyfinRequest<{ Items: unknown[]; TotalRecordCount: number }>(
-        jellyfinAuth,
-        `/Users/${jellyfinAuth.userId}/Items?${params.toString()}`
+        serverManager.auth,
+        `/Users/${serverManager.auth.userId}/Items?${params.toString()}`
       )
       return { success: true, data }
     }
@@ -1405,8 +1369,8 @@ ipcMain.handle('jellyfin:get-episodes', async (_event, seriesId: string, seasonI
       limit: '100'
     })
     const seasonsData = await jellyfinRequest<{ Items: Array<{ Id: string; Name: string; IndexNumber?: number; ChildCount?: number }> }>(
-      jellyfinAuth,
-      `/Users/${jellyfinAuth.userId}/Items?${seasonsParams.toString()}`
+      serverManager.auth,
+      `/Users/${serverManager.auth.userId}/Items?${seasonsParams.toString()}`
     )
 
     const seasons = seasonsData.Items || []
@@ -1420,8 +1384,8 @@ ipcMain.handle('jellyfin:get-episodes', async (_event, seriesId: string, seasonI
         limit: '500'
       })
       const epsData = await jellyfinRequest<{ Items: unknown[] }>(
-        jellyfinAuth,
-        `/Users/${jellyfinAuth.userId}/Items?${epsParams.toString()}`
+        serverManager.auth,
+        `/Users/${serverManager.auth.userId}/Items?${epsParams.toString()}`
       )
       return { success: true, data: { seasons: [], episodes: epsData.Items || [] } }
     }
@@ -1437,8 +1401,8 @@ ipcMain.handle('jellyfin:get-episodes', async (_event, seriesId: string, seasonI
         limit: '500'
       })
       const epsData = await jellyfinRequest<{ Items: unknown[] }>(
-        jellyfinAuth,
-        `/Users/${jellyfinAuth.userId}/Items?${epsParams.toString()}`
+        serverManager.auth,
+        `/Users/${serverManager.auth.userId}/Items?${epsParams.toString()}`
       )
       for (const ep of (epsData.Items || [])) {
         allEpisodes.push(ep)
@@ -1454,9 +1418,9 @@ ipcMain.handle('jellyfin:get-episodes', async (_event, seriesId: string, seasonI
 
 ipcMain.handle('jellyfin:get-genres', async () => {
   try {
-    if (!jellyfinAuth) return { success: false, error: '未连接 Jellyfin' }
+    if (!serverManager.auth) return { success: false, error: '未连接 Jellyfin' }
     const result = await jellyfinRequest<{ Items?: Array<{ Id: string; Name: string }> }>(
-      jellyfinAuth, '/Genres?userId=' + jellyfinAuth.userId
+      serverManager.auth, '/Genres?userId=' + serverManager.auth.userId
     )
     return { success: true, data: result.Items || [] }
   } catch (err) {
@@ -1467,11 +1431,11 @@ ipcMain.handle('jellyfin:get-genres', async () => {
 
 ipcMain.handle('jellyfin:get-genre-items', async (_event, genre: string, startIndex?: number) => {
   try {
-    if (!jellyfinAuth) return { success: false, error: '未连接 Jellyfin' }
-    const baseUrl = normalizeUrl(jellyfinAuth.url)
-    const url = `${baseUrl}/Items?userId=${jellyfinAuth.userId}&genres=${encodeURIComponent(genre)}&recursive=true&includeItemTypes=Movie,Series&sortBy=SortName&startIndex=${startIndex || 0}&limit=50`
+    if (!serverManager.auth) return { success: false, error: '未连接 Jellyfin' }
+    const baseUrl = normalizeUrl(serverManager.auth.url)
+    const url = `${baseUrl}/Items?userId=${serverManager.auth.userId}&genres=${encodeURIComponent(genre)}&recursive=true&includeItemTypes=Movie,Series&sortBy=SortName&startIndex=${startIndex || 0}&limit=50`
     console.log(`[jellyfin:get-genre-items] GET ${url}`)
-    const response = await fetch(url, { headers: buildJellyfinHeaders(jellyfinAuth.token, jellyfinAuth.type) })
+    const response = await fetch(url, { headers: buildJellyfinHeaders(serverManager.auth.token, serverManager.auth.type) })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const buffer = await response.arrayBuffer()
     const text = new TextDecoder('utf-8').decode(buffer)
@@ -1486,7 +1450,7 @@ ipcMain.handle('jellyfin:get-genre-items', async (_event, genre: string, startIn
 // ==================== IPC: Jellyfin 最近入库（官方 getLatestMedia 接口） ====================
 
 ipcMain.handle('jellyfin:get-latest-media', async (_event, limit: number = 16) => {
-  if (!jellyfinAuth) return { success: false, error: '未连接到 Jellyfin 服务器' }
+  if (!serverManager.auth) return { success: false, error: '未连接到 Jellyfin 服务器' }
   try {
     const params = new URLSearchParams({
       limit: String(limit),
@@ -1496,10 +1460,10 @@ ipcMain.handle('jellyfin:get-latest-media', async (_event, limit: number = 16) =
       groupItems: 'false',
       fields: 'Overview,PremiereDate,CommunityRating,DateCreated'
     })
-    const endpoint = `/Users/${jellyfinAuth.userId}/Items/Latest?${params.toString()}`
-    console.log(`[jellyfin:get-latest-media] 请求参数: userId=${jellyfinAuth.userId}, limit=${limit}, includeItemTypes=Movie,Series`)
+    const endpoint = `/Users/${serverManager.auth.userId}/Items/Latest?${params.toString()}`
+    console.log(`[jellyfin:get-latest-media] 请求参数: userId=${serverManager.auth.userId}, limit=${limit}, includeItemTypes=Movie,Series`)
 
-    const data = await jellyfinRequest<unknown[]>(jellyfinAuth, endpoint)
+    const data = await jellyfinRequest<unknown[]>(serverManager.auth, endpoint)
 
     if (!Array.isArray(data)) {
       console.warn('[jellyfin:get-latest-media] 接口返回非数组，返回空列表')
