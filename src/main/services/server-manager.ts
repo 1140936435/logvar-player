@@ -133,12 +133,24 @@ export class ServerManager {
   }
 
   /**
-   * 不变式自检：已连接时 activeServerId 必须等于 connectedServerId。
-   * 由关键写入点调用，违反即抛错，避免「活跃服务器」与「运行时凭据」脱节的
-   * 带病状态被后续调用静默掩盖。
+   * 不变式自检：auth 与 connectedServerId 必须同生同灭，且已连接时
+   * activeServerId 必须等于 connectedServerId。由关键写入点调用，违反即抛错，
+   * 避免「活跃服务器」与「运行时凭据」脱节、或残留旧 id 的带病状态被静默掩盖。
    */
   assertInvariant(): void {
-    if (this.auth === null) return
+    if (this.auth === null) {
+      // 断开态必须彻底：connectedServerId 不得残留旧 id
+      if (this.connectedServerId !== null) {
+        throw new Error(
+          `[ServerManager] invariant violated: auth is null but connectedServerId=${String(this.connectedServerId)}`
+        )
+      }
+      return
+    }
+    // 连接态必须有确定的 connectedServerId，且与 activeServerId 一致
+    if (this.connectedServerId === null) {
+      throw new Error('[ServerManager] invariant violated: connected but connectedServerId is null')
+    }
     const active = this.host.readActiveServerId()
     if (this.connectedServerId !== active) {
       throw new Error(

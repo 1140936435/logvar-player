@@ -86,7 +86,6 @@ const api: Api = {
 
   // Jellyfin API
   jellyfin: {
-    connect: (url: string, token: string) => ipcRenderer.invoke('jellyfin:connect', url, token),
     getLibraries: () => ipcRenderer.invoke('jellyfin:get-libraries'),
     getItems: (parentId: string, startIndex?: number, limit?: number) =>
       ipcRenderer.invoke('jellyfin:get-items', parentId, startIndex, limit),
@@ -193,7 +192,7 @@ const api: Api = {
 
   // 数据导入导出
   data: {
-    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[]; includeSensitive?: boolean }) =>
+    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[] }) =>
       ipcRenderer.invoke('data:export', options),
     import: (options?: { merge?: boolean; selectedKeys?: string[] }) =>
       ipcRenderer.invoke('data:import', options),

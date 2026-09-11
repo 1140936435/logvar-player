@@ -12,13 +12,6 @@ export interface ApiResponse<T = unknown> {
 }
 
 // ===== Jellyfin 相关类型 =====
-export interface JellyfinConnectResponse {
-  success: boolean
-  connected: boolean
-  serverName?: string
-  error?: string
-}
-
 export interface JellyfinLibrariesResponse {
   success: boolean
   // 修复 X-S2: 主进程 get-libraries 返回 { Items: [...] }，类型对齐真实响应结构
@@ -357,7 +350,6 @@ export interface Api {
   }
 
   jellyfin: {
-    connect: (url: string, token: string) => Promise<JellyfinConnectResponse>
     getLibraries: () => Promise<JellyfinLibrariesResponse>
     getItems: (parentId: string, startIndex?: number, limit?: number) => Promise<JellyfinItemsResponse>
     getChildren: (parentId: string) => Promise<JellyfinItemsResponse>
@@ -449,7 +441,7 @@ export interface Api {
   }
 
   data: {
-    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[]; includeSensitive?: boolean }) => Promise<ApiResponse<{ filePath: string; keyCount: number; size: number; excludedSensitive?: string[] }>>
+    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[] }) => Promise<ApiResponse<{ filePath: string; keyCount: number; size: number; excludedSensitive?: string[] }>>
     import: (options?: { merge?: boolean; selectedKeys?: string[] }) => Promise<ApiResponse<{ importedCount: number; skippedCount: number; warnings: string[]; importedKeys: string[]; skippedKeys: string[] }>>
     listKeys: () => Promise<ApiResponse<Array<{ key: string; hasSensitive: boolean }>>>
   }

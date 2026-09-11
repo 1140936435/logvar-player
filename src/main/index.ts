@@ -45,6 +45,8 @@ import {
   maskSecret,
   resolveAppSecretInput,
   matchServerByUrlPrefix,
+  isSameServerOrigin,
+  readBodyWithLimit,
   isPlainObject
 } from './lib/security'
 
@@ -699,49 +701,6 @@ async function embyLogin(
   }
 }
 
-ipcMain.handle('jellyfin:connect', async (_event, url: string, token: string) => {
-  if (isUnresolvedEncrypted(url) || isUnresolvedEncrypted(token)) {
-    console.warn('[server] Jellyfin 凭据未解密，请在设置中重新输入')
-    return { success: false, error: 'Jellyfin 服务器凭据无法解密（safeStorage 版本变更），请在设置中重新输入 URL 和 Token' }
-  }
-  try {
-    console.log(`Attempting Jellyfin connection to ${url}`)
-    const normalizedUrl = normalizeUrl(url)
-    
-    // 检查是否为 Emby 服务器（通过 URL 匹配已保存的服务器配置）
-    const servers = getServers()
-    const matchedServer = servers.find(s => normalizeUrl(s.url) === normalizedUrl)
-    const serverType: ServerType = matchedServer?.type === 'emby' ? 'emby' : 'jellyfin'
-    
-    const auth: JellyfinAuth = { url: normalizedUrl, token, userId: '', type: serverType }
-
-    const info = await jellyfinRequest<{ ServerName?: string; Version?: string; Id?: string }>(
-      auth,
-      '/System/Info'
-    )
-
-    if (serverType === 'emby' && matchedServer?.userId) {
-      // Emby 服务器：使用登录时保存的 userId（Emby 不支持 /Users/Me 接口）
-      auth.userId = matchedServer.userId
-      console.log(`[server][emby] 使用已保存的 userId: ${auth.userId}`)
-    } else {
-      // 用户解析统一走 resolveJellyfinUserId：多用户 API Key 禁止静默选第一个
-      auth.userId = await resolveJellyfinUserId(matchedServer, auth)
-    }
-
-    serverManager.markConnected(matchedServer?.id ?? null, auth)
-    console.log(`Jellyfin connected: ${info.ServerName} v${info.Version}, userId=${auth.userId}`)
-    return { success: true, data: info }
-  } catch (err) {
-    if (err instanceof MultiUserError) {
-      return { success: false, error: 'MULTI_USER', users: err.users }
-    }
-    const msg = err instanceof Error ? err.message : String(err)
-    console.error(`Jellyfin connect failed: ${msg}`)
-    return { success: false, error: msg }
-  }
-})
-
 // ==================== 多服务器 IPC ====================
 
 ipcMain.handle('server:list', async () => {
@@ -1175,6 +1134,18 @@ ipcMain.handle('jellyfin:fetch-subtitle', async (_event, endpoint: string) => {
     }
     const baseUrl = normalizeUrl(serverManager.auth.url)
     const url = `${baseUrl}${path}`
+    // capability 限制：本通道会带上服务器 token，只允许取字幕资源，
+    // 防止 Renderer 把它当作“带 token 的任意服务器请求”跳板
+    if (!isSameServerOrigin(url, serverManager.auth.url)) {
+      console.warn(`fetch-subtitle: 目标越权，已拒绝 endpoint=${endpoint}`)
+      return { success: false, error: '字幕请求越权：目标不属于当前服务器' }
+    }
+    const looksLikeSubtitle =
+      /\/Subtitles\//i.test(path) || /\.(vtt|srt|ass|ssa|sub)([?#]|$)/i.test(path)
+    if (!looksLikeSubtitle) {
+      console.warn(`fetch-subtitle: 非字幕资源，已拒绝 path=${path}`)
+      return { success: false, error: '字幕请求越权：非字幕资源' }
+    }
     console.log(`fetch-subtitle: full url=${url}`)
     const response = await fetch(url, {
       headers: { 'X-Emby-Token': serverManager.auth.token }
@@ -1818,7 +1789,7 @@ ipcMain.handle('store:delete', async (_event, key: string) => {
 // ==================== 数据导入导出 ====================
 
 // 导出配置数据
-ipcMain.handle('data:export', async (_event, options?: { format?: 'json' | 'csv'; includeKeys?: string[]; includeSensitive?: boolean }) => {
+ipcMain.handle('data:export', async (_event, options?: { format?: 'json' | 'csv'; includeKeys?: string[] }) => {
   if (!mainWindow) return { success: false, error: '主窗口未创建' }
   
   try {
@@ -1843,14 +1814,13 @@ ipcMain.handle('data:export', async (_event, options?: { format?: 'json' | 'csv'
     }
     
     const keysToExport = options?.includeKeys || Object.keys(configData)
-    const includeSensitive = options?.includeSensitive === true
     const excludedSensitive: string[] = []
 
     for (const key of keysToExport) {
       if (configData[key] === undefined) continue
-      // 白名单原则：凭据命名空间（服务器 token/密码、弹幕 AppSecret 等）默认禁止导出，
-      // 即使 Renderer 显式勾选也只认 includeSensitive 开关，防止凭据混进导出文件
-      if (!includeSensitive && isCredentialKey(key)) {
+      // 凭据边界：导出文件永不含凭据命名空间（服务器 token/密码、弹幕 AppSecret 等），
+      // 不接受 includeSensitive 之类旁路开关，杜绝凭据以明文落到导出文件
+      if (isCredentialKey(key)) {
         excludedSensitive.push(key)
         continue
       }
@@ -4321,9 +4291,8 @@ async function fetchDoubanImage(
       continue
     }
     if (!res.ok) throw new Error(`下载失败: ${res.status}`)
-    const declared = Number(res.headers.get('content-length') || '0')
-    if (declared > MAX_IMAGE_BYTES) throw new Error('图片超过大小上限')
-    const buffer = Buffer.from(await res.arrayBuffer())
+    // 只信任实际字节数：边读边计数，超限立即中止（防缺 content-length 的无限流撑爆内存）
+    const buffer = await readBodyWithLimit(res.body, MAX_IMAGE_BYTES)
     const mime = assertAllowedImageResponse(res.headers.get('content-type'), buffer.length)
     return { buffer, mime }
   }
@@ -4512,11 +4481,8 @@ function makeServerImageHandler(proto: 'jellyfin-image' | 'emby-image') {
             throw new Error(`${response.status} ${response.statusText}`)
           }
 
-          const declared = Number(response.headers.get('content-length') || '0')
-          if (declared > MAX_IMAGE_BYTES) {
-            throw new Error(`image too large: ${declared} bytes`)
-          }
-          const buffer = Buffer.from(await response.arrayBuffer())
+          // 只信任实际字节数：边读边计数，超限立即中止（防缺 content-length 的无限流撑爆内存）
+          const buffer = await readBodyWithLimit(response.body, MAX_IMAGE_BYTES)
           // 校验 MIME/大小：非图片或超限直接失败，不写入缓存
           const mimeType = assertAllowedImageResponse(response.headers.get('content-type'), buffer.length)
           await posterCache.set(cacheKey, buffer, realUrl, mimeType)

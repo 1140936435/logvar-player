@@ -256,3 +256,42 @@ export function matchServerByUrlPrefix<T extends { url: string }>(
   }
   return best
 }
+
+/** 目标 URL 是否与服务器 basePath 前缀同源（含 scheme，防把带 token 的请求带向他站/降级） */
+export function isSameServerOrigin(target: string, serverUrl: string): boolean {
+  const prefix = serverUrlPrefix(serverUrl)
+  if (!prefix) return false
+  const t = normalizeServerUrl(target)
+  return t === prefix || t.startsWith(prefix + '/')
+}
+
+/**
+ * 边读边计数地消费响应体，累计超过 maxBytes 立即中止并抛错。
+ * Content-Length 可能缺失、被省略或被伪造，只信任实际字节数，
+ * 防止“无 content-length 的无限流式响应”把内存/磁盘撑爆。
+ */
+export async function readBodyWithLimit(
+  body: ReadableStream<Uint8Array> | null | undefined,
+  maxBytes: number
+): Promise<Buffer> {
+  if (!body) return Buffer.alloc(0)
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {})
+        throw new Error(`响应体超过大小上限 ${maxBytes} 字节`)
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return Buffer.concat(chunks, total)
+}

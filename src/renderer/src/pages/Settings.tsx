@@ -203,8 +203,7 @@ function Settings(): ReactElement {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
   const [exportFormat, setExportFormat] = useState<'json' | 'csv'>('json')
   const [importMerge, setImportMerge] = useState(true)
-  // 是否在导出中包含服务器/弹幕凭据（明文，默认关闭，主进程默认也会强制排除）
-  const [includeSensitive, setIncludeSensitive] = useState(false)
+  // 凭据边界：导出文件永不含凭据，主进程强制排除凭据命名空间，Renderer 不再提供开关
   const [exportResult, setExportResult] = useState<{ success: boolean; message: string } | null>(null)
   const [importResult, setImportResult] = useState<{ success: boolean; message: string; details?: string } | null>(null)
 
@@ -263,8 +262,7 @@ function Settings(): ReactElement {
     try {
       const result = await window.api.data.export({
         format: exportFormat,
-        includeKeys: Array.from(selectedKeys),
-        includeSensitive
+        includeKeys: Array.from(selectedKeys)
       })
 
       if (result.success && result.data) {
@@ -289,7 +287,7 @@ function Settings(): ReactElement {
       })
     }
     setExporting(false)
-  }, [selectedKeys, exportFormat, includeSensitive])
+  }, [selectedKeys, exportFormat])
 
   // 导入数据
   const handleImport = useCallback(async (): Promise<void> => {
@@ -1376,20 +1374,7 @@ function Settings(): ReactElement {
             </div>
           </div>
 
-          <label className="flex items-start gap-3 cursor-pointer px-1">
-            <input
-              type="checkbox"
-              checked={includeSensitive}
-              onChange={(e) => setIncludeSensitive(e.target.checked)}
-              className="w-4 h-4 mt-0.5 rounded border-[var(--separator)] text-[var(--accent)] focus:ring-[var(--accent)]"
-            />
-            <span className="text-[13px] text-[var(--text-secondary)] leading-relaxed">
-              在导出中包含服务器与弹幕凭据
-              <span className="block text-[11px] text-amber-500 mt-0.5">
-                凭据将以明文写入导出文件，仅建议在受信任的迁移场景下开启；默认开启时主进程也会强制排除
-              </span>
-            </span>
-          </label>
+          {/* 凭据边界：导出永不含凭据，主进程强制排除，Renderer 不再提供开关 */}
 
           <button
             onClick={handleExport}
