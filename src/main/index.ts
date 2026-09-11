@@ -26,6 +26,7 @@ import * as http from 'http'
 import * as https from 'https'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { posterCache } from './services/poster-cache'
+import { StreamProxyService } from './services/stream-proxy-service'
 import { MpvController } from './mpv-controller'
 import {
   ENCRYPTED_KEYS,
@@ -869,7 +870,7 @@ ipcMain.handle('server:remove', async (_event, id: string) => {
       })
       if (!connectResult.success) {
         jellyfinAuth = null
-        return { success: true, warning: `已删除服务器，但切换到 "${next.name}" 失败：${connectResult.error}` } }
+        return { success: true, warning: `已删除服务器，但切换到 "${next.name}" 失败：${connectResult.error}` }
       }
     } else {
       setActiveServerId('')
@@ -1088,94 +1089,23 @@ ipcMain.handle('jellyfin:get-item-details', async (_event, itemId: string) => {
 })
 
 // ==================== 播放流代理（凭据不出主进程） ====================
-// Renderer 只拿到 127.0.0.1 回环 URL，真正的服务器地址与 token 由主进程注入。
-// mpv（独立/画布）与 html5 各引擎都只是普通 http 客户端，因此统一走本代理，
-// 避免 api_key 明文出现在渲染端（也无需各引擎单独适配请求头）。
-let streamProxyServer: http.Server | null = null
-let streamProxyPort = 0
+// 实现见 ./services/stream-proxy-service。渲染端只拿到不透明 session URL，
+// 真实服务器地址与 token 由主进程解析注入；URL 中不含 serverId，渲染端无法自造指向任意服务器的地址。
+let streamProxy: StreamProxyService | null = null
+
+function getStreamProxy(): StreamProxyService {
+  if (!streamProxy) {
+    streamProxy = new StreamProxyService((serverId) => {
+      const server = getServers().find(s => s.id === serverId)
+      if (!server || !server.token) return null
+      return { url: normalizeUrl(server.url), token: server.token }
+    })
+  }
+  return streamProxy
+}
 
 function startStreamProxy(): void {
-  if (streamProxyServer) return
-  streamProxyServer = http.createServer((req, res) => {
-    handleStreamProxyRequest(req, res)
-  })
-  streamProxyServer.on('error', (err) => {
-    console.error('[stream-proxy] server error:', err)
-  })
-  streamProxyServer.listen(0, '127.0.0.1', () => {
-    const addr = streamProxyServer?.address()
-    if (addr && typeof addr === 'object') {
-      streamProxyPort = addr.port
-      console.log(`[stream-proxy] listening on 127.0.0.1:${streamProxyPort}`)
-    }
-  })
-}
-
-/** 构造回环播放 URL：/__stream/<serverId>/<内网路径与查询>，不含任何凭据 */
-function buildStreamUrl(serverId: string, path: string): string {
-  const suffix = path.startsWith('/') ? path : `/${path}`
-  return `http://127.0.0.1:${streamProxyPort}/__stream/${encodeURIComponent(serverId)}${suffix}`
-}
-
-function handleStreamProxyRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-  const fail = (code: number, msg: string): void => {
-    if (!res.headersSent) res.writeHead(code)
-    res.end(msg)
-  }
-  // 仅接受本机回环请求，防止被同机其他进程以外的来源当作跳板
-  const remote = req.socket.remoteAddress || ''
-  if (remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
-    fail(403, 'Forbidden')
-    return
-  }
-  const m = (req.url || '').match(/^\/__stream\/([^/]+)(\/.*)?$/)
-  if (!m) {
-    fail(404, 'Not Found')
-    return
-  }
-  const serverId = decodeURIComponent(m[1])
-  const rest = m[2] || '/'
-  const server = getServers().find(s => s.id === serverId)
-  if (!server || !server.token) {
-    fail(404, 'Server Not Found')
-    return
-  }
-  let target: URL
-  try {
-    target = new URL(`${normalizeUrl(server.url)}${rest}`)
-  } catch {
-    fail(400, 'Bad Target')
-    return
-  }
-  const headers: Record<string, string> = { 'X-Emby-Token': server.token }
-  if (req.headers.range) headers['Range'] = String(req.headers.range)
-  if (req.headers['user-agent']) headers['User-Agent'] = String(req.headers['user-agent'])
-  const transport = target.protocol === 'https:' ? https : http
-  const proxyReq = transport.request(
-    {
-      protocol: target.protocol,
-      hostname: target.hostname,
-      port: target.port || (target.protocol === 'https:' ? 443 : 80),
-      path: `${target.pathname}${target.search}`,
-      method: req.method === 'HEAD' ? 'HEAD' : 'GET',
-      headers
-    },
-    (upstream) => {
-      const out: Record<string, string | string[]> = {}
-      for (const key of ['content-type', 'content-length', 'accept-ranges', 'content-range', 'etag', 'last-modified']) {
-        const v = upstream.headers[key]
-        if (v !== undefined) out[key] = v
-      }
-      res.writeHead(upstream.statusCode || 502, out)
-      upstream.pipe(res)
-    }
-  )
-  proxyReq.on('error', (err) => {
-    console.error('[stream-proxy] upstream error:', err)
-    fail(502, 'Bad Gateway')
-  })
-  res.on('close', () => proxyReq.destroy())
-  proxyReq.end()
+  getStreamProxy().start()
 }
 
 ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
@@ -1195,7 +1125,7 @@ ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
       console.warn(`No MediaSources for item ${itemId}, trying itemId as fallback`)
       const activeId = getActiveServerId()
       if (!activeId) return { success: false, error: '未找到活跃服务器' }
-      const url = buildStreamUrl(activeId, `/Videos/${itemId}/stream?Static=true`)
+      const url = getStreamProxy().createSession(activeId, `/Videos/${itemId}/stream?Static=true`)
       console.log(`get-playback-url (fallback): ${url}`)
       return { success: true, data: { url, subtitles: [] } }
     }
@@ -1225,7 +1155,7 @@ ipcMain.handle('jellyfin:get-playback-url', async (_event, itemId: string) => {
 
     const activeId = getActiveServerId()
     if (!activeId) return { success: false, error: '未找到活跃服务器' }
-    const url = buildStreamUrl(activeId, `/Videos/${itemId}/stream?Static=true&MediaSourceId=${mediaSourceId}`)
+    const url = getStreamProxy().createSession(activeId, `/Videos/${itemId}/stream?Static=true&MediaSourceId=${mediaSourceId}`)
     console.log(`get-playback-url (final): ${url}, subtitles: ${subtitles.length}`)
     return { success: true, data: { url, subtitles } }
   } catch (err) {
@@ -4445,7 +4375,7 @@ async function fetchImageWithToken(realUrl: string, headers: Record<string, stri
  *    scheme 必须与服务器配置一致（https 配置拒绝 http 请求）
  * 匹配失败返回 null（协议层回 403），防止协议被滥用于任意内网探测 */
 /** 仅允许访问图片 API：Jellyfin/Emby 图片端点形如 /Items/{id}/Images/{type}[/...]。
- * 协议不得被当作任意 API 代理（如 /Videos/*/stream、/Users 等），
+ * 协议不得被当作任意 API 代理（如 /Videos/…/stream、/Users 等），
  * 否则持凭据的请求可越过图片范围访问其他接口。 */
 function isImageApiPath(pathname: string): boolean {
   return /\/Items\/[^/]+\/Images\//i.test(pathname)
