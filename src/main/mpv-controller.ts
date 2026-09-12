@@ -209,6 +209,9 @@ export class MpvController extends EventEmitter {
   private timePollTimer: ReturnType<typeof setInterval> | null = null
   private mpvBinaryPath: string = ''
   private isRunning: boolean = false
+
+  /** dispose 幂等守卫：destroy() 只允许完整执行一次 */
+  private disposed: boolean = false
   private loadedFilePath: string = ''
   // 互斥锁：防止 embed/play 并发调用 start() 时重复 spawn 进程
   private startingPromise: Promise<void> | null = null
@@ -218,6 +221,8 @@ export class MpvController extends EventEmitter {
   private mpvWindowRevealed = false
   /** 已挂过窗口同步监听的 BrowserWindow（防重复绑定） */
   private winListenersAttachedFor: BrowserWindow | null = null
+  /** 已挂载的窗口监听器引用：窗口切换/销毁时精确移除，避免监听器泄漏 */
+  private winListeners: Array<{ event: string; handler: (...args: unknown[]) => void }> = []
 
   constructor(options: MpvControllerOptions) {
     super()
@@ -373,26 +378,49 @@ export class MpvController extends EventEmitter {
   /** 主窗口移动/缩放/全屏/最小化时同步渲染窗口（一次性绑定） */
   private attachWindowListeners(win: BrowserWindow): void {
     if (this.winListenersAttachedFor === win) return
+    // 切换到新的主窗口时先精确移除旧窗口上的监听器（防泄漏 / 旧窗口销毁后发事件报错）
+    this.detachWindowListeners()
     this.winListenersAttachedFor = win
     const sync = (): void => { if (this.childHwnd) this.syncMpvWindowPosition() }
-    win.on('move', sync)
-    win.on('resize', sync)
-    win.on('maximize', sync)
-    win.on('enter-full-screen', sync)
-    win.on('leave-full-screen', sync)
-    win.on('restore', () => {
+    const onRestore = (): void => {
       if (!this.childHwnd) return
       if (this.mpvWindowRevealed) {
         try { win32?.ShowWindow(this.childHwnd, 8) } catch { /* ignore */ }
       }
       sync()
-    })
-    win.on('minimize', () => {
+    }
+    const onMinimize = (): void => {
       if (this.childHwnd) {
         try { win32?.ShowWindow(this.childHwnd, 0) } catch { /* ignore */ } // SW_HIDE
       }
-    })
-    win.on('closed', () => { this.winListenersAttachedFor = null })
+    }
+    const onClosed = (): void => { this.detachWindowListeners() }
+    const entries: Array<[string, (...args: unknown[]) => void]> = [
+      ['move', sync],
+      ['resize', sync],
+      ['maximize', sync],
+      ['enter-full-screen', sync],
+      ['leave-full-screen', sync],
+      ['restore', onRestore],
+      ['minimize', onMinimize],
+      ['closed', onClosed]
+    ]
+    for (const [event, handler] of entries) {
+      win.on(event as Parameters<BrowserWindow['on']>[0], handler as Parameters<BrowserWindow['on']>[1])
+      this.winListeners.push({ event, handler })
+    }
+  }
+
+  /** 移除已挂载的窗口监听器（窗口切换 / 关闭时调用） */
+  private detachWindowListeners(): void {
+    const win = this.winListenersAttachedFor
+    if (win && !win.isDestroyed()) {
+      for (const { event, handler } of this.winListeners) {
+        try { win.removeListener(event as Parameters<BrowserWindow['on']>[0], handler as Parameters<BrowserWindow['on']>[1]) } catch { /* ignore */ }
+      }
+    }
+    this.winListeners = []
+    this.winListenersAttachedFor = null
   }
 
   /** 更新渲染窗口位置和大小（DIP 视口坐标，随主窗口移动自动跟随） */
@@ -994,9 +1022,15 @@ export class MpvController extends EventEmitter {
     }
   }
 
-  /** 销毁控制器 */
+  /** 销毁控制器（幂等：hide / close / error / recreate 等所有退出路径统一走这里） */
   async destroy(): Promise<void> {
+    if (this.disposed) return
+    this.disposed = true
+
     this.stopTimePolling()
+    // 关键：destroy 必须摘除主窗口监听，否则重复进出播放页会累积
+    // move/resize/maximize 回调（对象无法 GC、重复 reposition、ERR_MAX_LISTENERS）
+    this.detachWindowListeners()
     this.destroyChildWindow()
 
     if (this.mpvProcess) {
@@ -1039,6 +1073,8 @@ export class MpvController extends EventEmitter {
 
   /** 退出钩子用：同步强制结束 mpv 进程树（destroy() 是异步的，will-quit 不等异步） */
   killSync(): void {
+    // 退出前同样摘除窗口监听，避免销毁中的窗口继续派发事件
+    this.detachWindowListeners()
     if (this.mpvProcess && this.mpvProcess.pid && !this.mpvProcess.killed) {
       const pid = this.mpvProcess.pid
       try {

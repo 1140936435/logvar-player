@@ -46,6 +46,9 @@ export class PosterCacheService {
   /** 磁盘占用估算值：写入累加、删除扣减，cleanup 全量扫描后校准 */
   private approxDiskBytes: number;
   private writesSinceCleanup: number;
+  /** 初始化（建目录 + 迁移）完成前 resolve 的 ready Promise：
+   * 外部可 await ready()，避免早期读写与 v1→v2 迁移清理竞争（ready race） */
+  private readyPromise: Promise<void>;
 
   constructor() {
     this.cacheDir = path.join(app.getPath('userData'), 'poster-cache');
@@ -56,7 +59,12 @@ export class PosterCacheService {
     this.currentMemoryBytes = 0;
     this.approxDiskBytes = 0;
     this.writesSinceCleanup = 0;
-    void this.ensureCacheDir().then(() => this.migrateIfNeeded());
+    this.readyPromise = this.ensureCacheDir().then(() => this.migrateIfNeeded());
+  }
+
+  /** 等待缓存初始化完成（建目录 + v1→v2 迁移），避免与迁移清理竞争 */
+  ready(): Promise<void> {
+    return this.readyPromise;
   }
 
   private async ensureCacheDir(): Promise<void> {

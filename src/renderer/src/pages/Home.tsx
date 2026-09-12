@@ -10,7 +10,6 @@ import { formatTimeAgo } from '../utils/time'
 import { useHomeStore } from '../providers/HomeStoreProvider'
 import { RecentlyAddedRow } from '../components/RecentlyAddedRow'
 import { MediaCard } from '../components/MediaCard'
-import { VirtualMediaGrid } from '../components/VirtualMediaGrid'
 import { LazyImage } from '../components/LazyImage'
 import { getPosterUrl as buildPosterUrl, getOptimalPosterHeight } from '../utils/posterUrl'
 import {
@@ -822,13 +821,14 @@ function Home(): ReactElement {
 
   const getPosterUrl = useCallback((item: MediaItem): string | null => {
     return buildPosterUrl({
+      serverId: activeServerId || undefined,
       baseUrl: connectedServer || 'http://localhost:8096',
       serverType,
       itemId: item.Id,
       imageTag: item.ImageTags?.Primary,
       doubanPosterPath: doubanPosters[item.Id],
     })
-  }, [connectedServer, serverType, doubanPosters])
+  }, [activeServerId, connectedServer, serverType, doubanPosters])
 
   const breadcrumb = drillStack.map((d) => d.parentName)
   const currentDrill = drillStack.length > 0 ? drillStack[drillStack.length - 1] : null
@@ -1306,6 +1306,7 @@ function Home(): ReactElement {
             <RecentlyAddedRow
               items={recentlyAddedItems}
               onItemClick={handleRecentlyAddedClick}
+              serverId={activeServerId || undefined}
               baseUrl={connectedServer || 'http://localhost:8096'}
               serverType={serverType}
               scrollSpeed={recentlyAddedScrollSpeed}
@@ -1323,6 +1324,7 @@ function Home(): ReactElement {
             hasMore={hasMore}
             isLoading={recommendationLoading}
             isColdStart={isColdStart}
+            serverId={activeServerId || undefined}
             serverType={serverType}
             connectedServer={connectedServer}
             onItemClick={(item) => handleRecommendationClick(item)}

@@ -29,32 +29,6 @@ function observeElement(el: Element, onVisible: (visible: boolean) => void): () 
   }
 }
 
-const MAX_CONCURRENT = 6
-let activeLoads = 0
-const pendingQueue: Array<() => void> = []
-
-function acquireLoadSlot(): Promise<void> {
-  if (activeLoads < MAX_CONCURRENT) {
-    activeLoads++
-    return Promise.resolve()
-  }
-  return new Promise<void>((resolve) => {
-    pendingQueue.push(() => {
-      activeLoads++
-      resolve()
-    })
-  })
-}
-
-function releaseLoadSlot(): void {
-  activeLoads--
-  if (activeLoads < 0) activeLoads = 0
-  if (pendingQueue.length > 0 && activeLoads < MAX_CONCURRENT) {
-    const next = pendingQueue.shift()
-    if (next) next()
-  }
-}
-
 interface LazyImageProps {
   src: string | null
   alt: string
@@ -71,6 +45,12 @@ const DEFAULT_PLACEHOLDER = (
   <div className="w-full h-full bg-[var(--bg-elevated)] animate-pulse" />
 )
 
+/**
+ * 懒加载图片：共享 IntersectionObserver 控制挂载时机 + 原生 loading="lazy" 控制下载。
+ * 注意：不要试图用 AbortController 取消 <img> 的下载 —— img 请求不走 fetch、
+ * 无法被 signal 取消，那套 semaphore + abort 是伪取消（下载照常进行，白增复杂度）。
+ * 可见性门控 + 原生懒加载已足够限制滚动时的无效请求/解码。
+ */
 export const LazyImage = memo(function LazyImage({
   src,
   alt,
@@ -83,85 +63,29 @@ export const LazyImage = memo(function LazyImage({
   style,
 }: LazyImageProps): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null)
-  const imgRef = useRef<HTMLImageElement>(null)
   const [isVisible, setIsVisible] = useState(false)
-  const [loadState, setLoadState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
-  const slotAcquiredRef = useRef(false)
-  const abortControllerRef = useRef<AbortController | null>(null)
+  const [loadState, setLoadState] = useState<'loading' | 'loaded' | 'error'>('loading')
 
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-
-    const unobserve = observeElement(el, (visible) => {
-      if (visible) {
-        setIsVisible(true)
-      } else {
-        setIsVisible(false)
-        if (loadState === 'loading') {
-          abortControllerRef.current?.abort()
-          if (slotAcquiredRef.current) {
-            releaseLoadSlot()
-            slotAcquiredRef.current = false
-          }
-          setLoadState('idle')
-        }
-      }
-    })
-
-    return unobserve
+    return observeElement(el, (visible) => setIsVisible(visible))
   }, [])
 
+  // src 变化时重置加载状态（避免上一个 src 的 loaded 状态盖住新图的加载过程）
   useEffect(() => {
-    if (!isVisible || !src) return
-
-    let cancelled = false
-    slotAcquiredRef.current = false
-    abortControllerRef.current = new AbortController()
-
-    acquireLoadSlot().then(() => {
-      if (cancelled) {
-        releaseLoadSlot()
-        return
-      }
-      slotAcquiredRef.current = true
-      setLoadState('loading')
-    })
-
-    return () => {
-      cancelled = true
-      abortControllerRef.current?.abort()
-      if (slotAcquiredRef.current && loadState !== 'loaded' && loadState !== 'error') {
-        releaseLoadSlot()
-        slotAcquiredRef.current = false
-      }
-    }
-  }, [isVisible, src])
+    setLoadState('loading')
+  }, [src])
 
   const handleLoad = useCallback(() => {
     setLoadState('loaded')
-    if (slotAcquiredRef.current) {
-      releaseLoadSlot()
-      slotAcquiredRef.current = false
-    }
     onLoad?.()
   }, [onLoad])
 
   const handleError = useCallback(() => {
     setLoadState('error')
-    if (slotAcquiredRef.current) {
-      releaseLoadSlot()
-      slotAcquiredRef.current = false
-    }
     onError?.()
   }, [onError])
-
-  useEffect(() => {
-    if (loadState === 'loaded' && !isVisible && imgRef.current) {
-      imgRef.current.src = ''
-      setLoadState('idle')
-    }
-  }, [isVisible, loadState])
 
   if (!src) {
     return (
@@ -171,15 +95,10 @@ export const LazyImage = memo(function LazyImage({
     )
   }
 
-  const showImg = loadState === 'loading' || loadState === 'loaded'
-  const showPlaceholder = !isVisible || (isVisible && loadState === 'idle') || loadState === 'loading'
-  const showFallback = loadState === 'error'
-
   return (
     <div ref={containerRef} className={className} style={style}>
-      {showImg && (
+      {isVisible && (
         <img
-          ref={imgRef}
           src={src}
           alt={alt}
           decoding="async"
@@ -189,11 +108,11 @@ export const LazyImage = memo(function LazyImage({
           onError={handleError}
         />
       )}
-      {showPlaceholder && !showFallback && (
-        <div className="absolute inset-0">{placeholder}</div>
-      )}
-      {showFallback && (
+      {loadState === 'error' && (
         <div className="absolute inset-0">{fallback || placeholder}</div>
+      )}
+      {loadState !== 'error' && (!isVisible || loadState === 'loading') && (
+        <div className="absolute inset-0">{placeholder}</div>
       )}
     </div>
   )

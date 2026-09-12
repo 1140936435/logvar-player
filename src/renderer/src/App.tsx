@@ -163,24 +163,10 @@ function useTheme(): { dark: boolean; toggle: () => void } {
   return { dark, toggle }
 }
 
-/* 应用 backdrop-filter 内联样式（绕过 Lightning CSS） */
-const GLASS_SELECTORS = '.glass, .glass-thick, .glass-card, .media-card'
-function applyGlassStyles() {
-  document.querySelectorAll(GLASS_SELECTORS).forEach((el) => {
-    const html = el as HTMLElement
-    const isDark = document.documentElement.classList.contains('dark')
-    if (el.classList.contains('glass')) {
-      html.style.backdropFilter = isDark ? 'blur(30px) saturate(180%)' : 'blur(24px) saturate(160%)'
-    } else if (el.classList.contains('glass-thick')) {
-      html.style.backdropFilter = isDark ? 'blur(50px) saturate(200%)' : 'blur(40px) saturate(180%)'
-    } else if (el.classList.contains('glass-card') || el.classList.contains('media-card')) {
-      html.style.backdropFilter = isDark ? 'blur(24px) saturate(160%)' : 'blur(20px) saturate(150%)'
-    }
-    if ('webkitBackdropFilter' in html.style) {
-      ;(html.style as any).webkitBackdropFilter = html.style.backdropFilter
-    }
-  })
-}
+/* glass 效果全部由 CSS（globals.css）实现：.glass / .glass-thick / .glass-card /
+   .media-card 的 backdrop-filter 与 .dark 变体都已在样式表定义。
+   过去这里用全局 MutationObserver 监听 body 再写 inline style，虚拟列表滚动时
+   每次增删节点都会触发一轮 querySelectorAll + style recalculation，纯属负优化 */
 
 /* Router 内部布局 — useLocation 必须在 BrowserRouter 内 */
 function AppLayout(): ReactElement {
@@ -194,13 +180,6 @@ function AppLayout(): ReactElement {
     if (p.includes('://') || /^[A-Z]:/i.test(p) || p.endsWith('.html')) {
       window.location.hash = '#/'
     }
-  }, [])
-
-  useEffect(() => {
-    applyGlassStyles()
-    const observer = new MutationObserver(() => applyGlassStyles())
-    observer.observe(document.body, { childList: true, subtree: true })
-    return () => observer.disconnect()
   }, [])
 
   return (

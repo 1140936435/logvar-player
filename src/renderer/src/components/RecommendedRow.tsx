@@ -18,6 +18,8 @@ interface RecommendedRowProps {
   hasMore: boolean
   isLoading: boolean
   isColdStart: boolean
+  /** 服务器 ID：serverId 格式协议 URL（精确匹配服务器，无 host 冲突） */
+  serverId?: string
   serverType: 'jellyfin' | 'emby'
   connectedServer?: string
   onItemClick: (item: RecommendationItem) => void
@@ -234,6 +236,7 @@ export function RecommendedRow({
   hasMore,
   isLoading,
   isColdStart,
+  serverId,
   serverType,
   connectedServer,
   onItemClick,
@@ -266,13 +269,14 @@ export function RecommendedRow({
   const getPosterForItem = useCallback((item: RecommendationItem): string | null => {
     if (!item.posterUrl) return null
     return buildPosterUrl({
+      serverId,
       baseUrl,
       serverType,
       itemId: item.itemId,
       imageTag: item.posterUrl,
       maxHeight: 400
     })
-  }, [serverType, baseUrl])
+  }, [serverId, serverType, baseUrl])
 
   if (isLoading && items.length === 0) {
     return (

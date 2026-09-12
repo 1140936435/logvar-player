@@ -55,9 +55,15 @@ const FMT = { FLAG: 3, INT64: 4, DOUBLE: 5 } as const
 /** SW 像素格式："rgb0" = 内存字节序 R,G,B,X（X 为未初始化字节），直接按 RGBA 上传 WebGL，着色器强制 alpha=1 */
 const SW_FORMAT = 'rgb0'
 
-/** 渲染目标尺寸上限（防止超大窗口导致 SW 渲染爆内存/CPU） */
-const MAX_TARGET_W = 3840
-const MAX_TARGET_H = 2160
+/**
+ * 渲染目标尺寸上限：canvas 模式是 CPU 软件渲染 YUV→RGB，帧数据还要经
+ * contextBridge 结构化克隆搬进 renderer。4K 目标 ≈ 995 MB/s（3840×2160×4×30），
+ * 跨边界搬运 + 解码 + 纹理上传在 4K 下必然掉帧。
+ * 上限压到 1440p：libmpv 内部等比缩放 + 黑边，MpvCanvasView 的 canvas 是
+ * CSS 拉伸（w-full h-full），backing store 小于显示尺寸仍会铺满 4K 屏。
+ */
+const MAX_TARGET_W = 2560
+const MAX_TARGET_H = 1440
 
 /** 轮询间隔：渲染帧检测 8ms（~120Hz，覆盖 60fps 内容），属性/时钟 96ms（~10Hz） */
 const RENDER_POLL_MS = 8
@@ -552,10 +558,8 @@ export function setTargetSize(width: number, height: number): void {
   targetH = h
 }
 
-export function onEvent(callback: EventCallback): void {
+export function onEvent(callback: EventCallback): () => void {
   eventCallbacks.add(callback)
-}
-
-export function offEvent(): void {
-  eventCallbacks.clear()
+  // 返回独立 unsubscribe：仅移除本次注册的回调，不影响其他订阅者
+  return () => { eventCallbacks.delete(callback) }
 }

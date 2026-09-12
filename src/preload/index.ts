@@ -39,8 +39,7 @@ const api: Api = {
     getFrame: async (lastSeq: number) => mpvRender.getFrame(lastSeq),
     setTargetSize: (width: number, height: number) => mpvRender.setTargetSize(width, height),
     destroy: async () => { mpvRender.destroy(); return { success: true, data: undefined } },
-    onEvent: (callback) => mpvRender.onEvent(callback as (event: string, data: unknown) => void),
-    offEvent: () => mpvRender.offEvent()
+    onEvent: (callback) => mpvRender.onEvent(callback as (event: string, data: unknown) => void)
   },
 
   // mpv 播放控制
@@ -69,11 +68,12 @@ const api: Api = {
     updateEmbed: (x: number, y: number, width: number, height: number) => ipcRenderer.invoke('mpv:update-embed', x, y, width, height),
     hide: () => ipcRenderer.invoke('mpv:hide'),
     onEvent: ((callback: (event: string, data: unknown) => void) => {
-      ipcRenderer.on('mpv:event', (_event, msg) => callback(msg.event, msg.data))
-    }) as Api['mpv']['onEvent'],
-    offEvent: (): void => {
-      ipcRenderer.removeAllListeners('mpv:event')
-    }
+      const listener = (_event: unknown, msg: { event: string; data: unknown }): void =>
+        callback(msg.event, msg.data)
+      ipcRenderer.on('mpv:event', listener)
+      // 返回独立 unsubscribe：仅移除本次注册的监听，不影响其他订阅者
+      return () => { ipcRenderer.removeListener('mpv:event', listener) }
+    }) as Api['mpv']['onEvent']
   },
 
   // 播放历史
@@ -86,7 +86,6 @@ const api: Api = {
 
   // Jellyfin API
   jellyfin: {
-    connect: (url: string, token: string) => ipcRenderer.invoke('jellyfin:connect', url, token),
     getLibraries: () => ipcRenderer.invoke('jellyfin:get-libraries'),
     getItems: (parentId: string, startIndex?: number, limit?: number) =>
       ipcRenderer.invoke('jellyfin:get-items', parentId, startIndex, limit),
@@ -167,14 +166,12 @@ const api: Api = {
     addEmby: (params: import('../shared/preload-types').EmbyAddServerParams) =>
       ipcRenderer.invoke('server:add-emby', params),
     testEmby: (params: import('../shared/preload-types').EmbyTestParams) =>
-      ipcRenderer.invoke('server:test-emby', params)
+      ipcRenderer.invoke('server:test-emby', params),
+    listUsers: (id: string) => ipcRenderer.invoke('server:list-users', id),
+    setUser: (id: string, userId: string) => ipcRenderer.invoke('server:set-user', id, userId)
   },
 
-  // Emby API
-  emby: {
-    login: (url: string, username: string, password: string) =>
-      ipcRenderer.invoke('emby:login', url, username, password)
-  },
+  // Emby API 已移除独立登录通道：登录统一走 server.testEmby，token 只留在主进程
 
   // 最近入库
   recentlyAdded: {
@@ -195,7 +192,7 @@ const api: Api = {
 
   // 数据导入导出
   data: {
-    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[]; includeSensitive?: boolean }) =>
+    export: (options?: { format?: 'json' | 'csv'; includeKeys?: string[] }) =>
       ipcRenderer.invoke('data:export', options),
     import: (options?: { merge?: boolean; selectedKeys?: string[] }) =>
       ipcRenderer.invoke('data:import', options),
