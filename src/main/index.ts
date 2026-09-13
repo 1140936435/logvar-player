@@ -2237,7 +2237,22 @@ ipcMain.handle('mpv:load-subtitle', (_event, subtitlePath: string) => {
   return runMpv((c) => c.loadExternalSubtitle(subtitlePath))
 })
 ipcMain.handle('mpv:get-property', (_event, name: string) => runMpv((c) => c.getProperty(name)))
-ipcMain.handle('mpv:set-property', (_event, name: string, value: unknown) => runMpv((c) => c.setProperty(name, value)))
+// mpv:set-property 白名单：仅允许设置「播放状态类」属性。
+// mpv 的 set_property 会把属性名当作命令参数执行，sub-file / audio-file /
+// external-file / script 等属性可被渲染端滥用为文件读取或脚本加载原语；
+// 因此显式只放行已知安全的播放控制属性，其余一律拒绝。
+const MPV_SET_PROPERTY_ALLOWLIST = new Set<string>([
+  'pause', 'volume', 'speed', 'mute', 'fullscreen',
+  'sid', 'aid', 'vid',
+  'audio-delay', 'sub-delay', 'sub-visibility', 'sub-scale', 'sub-pos'
+])
+ipcMain.handle('mpv:set-property', (_event, name: string, value: unknown) => {
+  if (typeof name !== 'string' || !MPV_SET_PROPERTY_ALLOWLIST.has(name)) {
+    console.warn('[mpv:set-property] rejected property:', name)
+    return { success: false, error: '不允许设置该属性' }
+  }
+  return runMpv((c) => c.setProperty(name, value))
+})
 ipcMain.handle('mpv:screenshot', (_event, filePath: string) => {
   // 截图是任意路径写原语，只允许写入已授权目录 / userData
   if (!isPathAllowed(filePath)) {
@@ -2798,6 +2813,16 @@ const pathAccess = new PathAccessService({
   persist: saveConfigFile,
   implicitRoots: () => [app.getPath('userData')]
 })
+
+/**
+ * 路径访问统一入口（M1 纵深防御）。
+ * 委托 PathAccessService：该服务对「目标路径」与「授权根目录」都先做
+ * realpath canonicalize，再比较前缀，因此 symlink / Windows junction 无法把
+ * 校验结果跳到授权范围之外。所有路径类 IPC 必须经此函数放行。
+ */
+function isPathAllowed(p: string): boolean {
+  return pathAccess.isPathAllowed(p)
+}
 
 function denyPath(reason = '路径不在允许目录内（请通过"打开文件/文件夹"重新授权访问）'): { success: false; error: string } {
   return { success: false, error: reason }

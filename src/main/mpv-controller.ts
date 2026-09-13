@@ -432,6 +432,10 @@ export class MpvController extends EventEmitter {
 
   /** 销毁渲染窗口 */
   destroyChildWindow(): void {
+    // 销毁渲染窗口的同时摘除主窗口监听器：hide / 退出 / recreate 都汇聚到这里，
+    // 否则残留的 move/resize/maximize 回调会累积（对象无法 GC、重复 reposition、
+    // ERR_MAX_LISTENERS），这是子窗口生命周期的关键收尾步骤。
+    this.detachWindowListeners()
     if (this.childHwnd && win32) {
       try {
         win32.DestroyWindow(this.childHwnd)
