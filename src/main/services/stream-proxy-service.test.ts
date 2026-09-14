@@ -5,7 +5,13 @@ import { StreamProxyService } from './stream-proxy-service'
 
 const UPSTREAM_URL = 'http://127.0.0.1:9876'
 const UPSTREAM_SERVER = http.createServer((req, res) => {
-  req.pipe(res) // 简单回环，便于验证数据
+  // 代理只转发 GET/HEAD（播放语义），GET 返回固定 payload 供断言；
+  // 其余方法原样回环（仅用于手动验证）
+  if (req.method === 'GET') {
+    res.end('test data')
+    return
+  }
+  req.pipe(res)
 }).listen(9876)
 
 afterEach(() => {
@@ -60,10 +66,8 @@ describe('StreamProxyService', () => {
   it('session 创建成功后回环 URL 可访问（真实代理）', async () => {
     const sessionUrl = svc.createSession('upstream-123', '/movie.mkv')
     expect(sessionUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/s\/.*$/)
-    const resp = await fetch(sessionUrl, {
-      method: 'POST',
-      body: Buffer.from('test data', 'binary')
-    })
+    // 代理按播放语义把请求转为 GET（携带 Range/UA 等头），上游返回 payload
+    const resp = await fetch(sessionUrl)
     expect(resp.status).toBe(200)
     expect(await resp.text()).toBe('test data')
   })
@@ -90,13 +94,23 @@ describe('StreamProxyService', () => {
   })
 
   it('sessionTtlMs <= 0 时，session 永不过期', async () => {
-    const sessionUrl = svc.createSession('upstream-123', '/test')
-    // 等待多次 sweep 循环（默认 50ms × 3 = 150ms，远大于普通超时）
-    await new Promise(r => setTimeout(r, 200))
-    expect(getSessions(svc).size).toBe(1)
-    // 仍可访问
-    const resp = await fetch(sessionUrl)
-    expect(resp.status).toBe(200)
+    // beforeEach 的实例 TTL=100ms，这里必须用独立的无 TTL 实例验证语义
+    const noTtlSvc = new StreamProxyService(
+      () => ({ url: UPSTREAM_URL, token: 'test-token' }),
+      { sessionTtlMs: 0, sweepIntervalMs: 50 }
+    )
+    await noTtlSvc.start()
+    try {
+      const sessionUrl = noTtlSvc.createSession('upstream-123', '/test')
+      // 等待多次 sweep 循环（50ms × 4 = 200ms）
+      await new Promise(r => setTimeout(r, 200))
+      expect(getSessions(noTtlSvc).size).toBe(1)
+      // 仍可访问
+      const resp = await fetch(sessionUrl)
+      expect(resp.status).toBe(200)
+    } finally {
+      noTtlSvc.stop()
+    }
   })
 
   it('maxSessions 达限时，先清扫过期，再逐出最旧的 session', async () => {

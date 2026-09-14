@@ -38,9 +38,48 @@ describe('canonicalizePath', () => {
     }
   })
 
-  it('父目录也不可用时退化为字符串 resolve', () => {
+  it('父目录也不存在时，上溯到最深已存在祖先再拼回剩余段', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pas-'))
+    try {
+      const p = join(dir, 'sub', 'deep', 'file.bin')
+      expect(canonicalizePath(p, realpathSync)).toBe(
+        join(realpathSync(dir), 'sub', 'deep', 'file.bin')
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('整条路径均不存在时退化为字符串 resolve（无链接可解析）', () => {
     const p = join(tmpdir(), 'no-such-parent-xyz', 'no-such-child.bin')
-    expect(canonicalizePath(p, () => { throw new Error('boom') })).toBe(p)
+    // tmpdir 自身也可能是链接（如 macOS /tmp），故用其 realpath 作期望基準
+    expect(canonicalizePath(p, realpathSync)).toBe(
+      join(realpathSync(tmpdir()), 'no-such-parent-xyz', 'no-such-child.bin')
+    )
+  })
+
+  it('目标 realpath 抛非 ENOENT 错误时直接抛出（无法确认真实路径，fail-closed）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pas-'))
+    try {
+      const file = join(dir, 'a.txt')
+      writeFileSync(file, 'x')
+      const eaccs = Object.assign(new Error('denied'), { code: 'EACCES' })
+      const inject = (p: string): string => {
+        if (p === file) throw eaccs
+        return realpathSync(p)
+      }
+      // 即使父目录可解析也不允许回退「父目录 + 文件名」：未解析的末段可能是
+      // 指向授权范围外的 symlink，静默回退等于字符串级比较（fail-open）
+      expect(() => canonicalizePath(file, inject)).toThrow('denied')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('所有层级 realpath 均抛非 ENOENT 错误时抛出（fail-closed，不再退化为字符串比较）', () => {
+    const eloop = Object.assign(new Error('loop'), { code: 'ELOOP' })
+    expect(() => canonicalizePath('C:\\x\\y', () => { throw eloop })).toThrow()
+    expect(() => canonicalizePath('C:\\x\\y', () => { throw new Error('boom') })).toThrow()
   })
 })
 
@@ -190,6 +229,29 @@ describe('PathAccessService', () => {
     svc.authorizeRoot(media) // 重复授权不重复写
     expect(persisted).toBe(1)
     expect(Array.isArray(store.data[KEY])).toBe(true)
+  })
+
+  it('isPathAllowed 在 canonicalize 抛错时拒绝（fail-closed）', () => {
+    const media = join(base, 'media')
+    const locked = join(media, 'locked')
+    mkdirSync(locked, { recursive: true })
+    const eaccs = Object.assign(new Error('denied'), { code: 'EACCES' })
+    const svc = new PathAccessService({
+      store,
+      storageKey: KEY,
+      realpath: (p: string): string => {
+        // locked 组件本身不可解析（EACCES），模拟无法确认真实路径的目录
+        if (p.includes('locked')) throw eaccs
+        return realpathSync(p)
+      }
+    })
+    svc.authorizeRoot(media)
+    // locked 下的目标无法确认真实路径 → 必须拒绝，而不是按字符串前缀放行
+    expect(svc.isPathAllowed(join(locked, 'secret.txt'))).toBe(false)
+    // 可正常解析的文件不受影响
+    const ok = join(media, 'video.mkv')
+    writeFileSync(ok, 'x')
+    expect(svc.isPathAllowed(ok)).toBe(true)
   })
 
   it('非法输入（空串 / 非字符串数组）不抛异常', () => {

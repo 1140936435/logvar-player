@@ -17,7 +17,7 @@ import {
 } from 'electron'
 import * as crypto from 'crypto'
 import { join, dirname, basename, resolve as pathResolve, sep as pathSep } from 'path'
-import { pathToFileURL, fileURLToPath } from 'url'
+import { pathToFileURL } from 'url'
 
 import { readdirSync, readFileSync, realpathSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, renameSync, copyFileSync, createReadStream } from 'fs'
 import { stat as fsStat, readdir as fsReaddir, realpath as fsRealpath, open as fsOpen, appendFile as fsAppendFile, type FileHandle } from 'fs/promises'
@@ -30,7 +30,7 @@ import { StreamProxyService } from './services/stream-proxy-service'
 import { PathAccessService, canonicalizePath } from './services/path-access-service'
 import { ServerManager, toPublicServer } from './services/server-manager'
 import type { ServerAuth as JellyfinAuth, ServerConfig as JellyfinServerConfig } from './services/server-manager'
-import { MpvController } from './mpv-controller'
+import { PlaybackEngine } from './playback-engine'
 import {
   ENCRYPTED_KEYS,
   CREDENTIAL_NAMESPACES,
@@ -2062,20 +2062,16 @@ function toggleWindowFullscreen(): boolean {
 
 ipcMain.handle('window:toggle-fullscreen', () => ({ success: true, data: toggleWindowFullscreen() }))
 
-// ==================== MPV 播放引擎 ====================
-// 与 HTML5 <video> 并存的第二条播放链路：主进程 spawn mpv.exe，
-// 通过命名管道 JSON IPC 控制；Windows 下用 koffi 创建子窗口（--wid）嵌入主窗口。
-// 渲染端传入的坐标均为 CSS 像素（视口左上角原点），主进程按显示器 DPI 换算物理像素。
+// ==================== MPV 播放引擎（实现见 ./playback-engine） ====================
 
-let mpvController: MpvController | null = null
-
-/** 需要转发到渲染进程的 mpv 事件 */
-const MPV_FORWARD_EVENTS = [
-  'ready', 'quit', 'error',
-  'time', 'duration', 'pause', 'volume', 'speed',
-  'track-list', 'fullscreen',
-  'file-loaded', 'start', 'stop', 'seek', 'idle'
-]
+const playbackEngine = new PlaybackEngine({
+  getMainWindow: () => mainWindow,
+  getPlayerSettings: getMpvPlayerSettings,
+  isPathAllowed,
+  denyPath,
+  toggleWindowFullscreen
+})
+playbackEngine.registerIpc()
 
 function getMpvPlayerSettings(): { hardwareDecode: boolean; hdrToneMapping: boolean; debugLog: boolean } {
   const saved = configData['player'] as { hardwareDecode?: boolean; hdrToneMapping?: boolean; debugLog?: boolean } | undefined
@@ -2085,230 +2081,6 @@ function getMpvPlayerSettings(): { hardwareDecode: boolean; hdrToneMapping: bool
     debugLog: saved?.debugLog === true
   }
 }
-
-/** 获取（惰性创建）mpv 控制器单例，并转发事件到渲染进程 */
-function getMpvController(): MpvController {
-  if (!mpvController) {
-    const controller = new MpvController(getMpvPlayerSettings())
-    for (const ev of MPV_FORWARD_EVENTS) {
-      controller.on(ev, (data: unknown) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('mpv:event', { event: ev, data })
-        }
-      })
-    }
-    mpvController = controller
-  }
-  return mpvController
-}
-
-/** 统一执行 mpv 操作，未运行/异常时返回标准失败响应 */
-async function runMpv<T>(fn: (c: MpvController) => Promise<T> | T): Promise<{ success: boolean; data?: T; error?: string }> {
-  try {
-    if (!mpvController || !mpvController.isMpvRunning()) {
-      return { success: false, error: 'mpv 未运行' }
-    }
-    const data = await fn(mpvController)
-    return { success: true, data }
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) }
-  }
-}
-
-// mpv 是否可用（二进制存在性检查）
-ipcMain.handle('mpv:is-available', async () => {
-  try {
-    return { success: true, data: getMpvController().isAvailable() }
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) }
-  }
-})
-
-// 嵌入：创建 mpv 渲染窗口（主窗口身后打孔架构）并启动 mpv（--wid 只能在启动时传入）；
-// 已运行时仅更新渲染窗口位置。坐标为渲染端视口 DIP（主进程换算屏幕物理像素）
-ipcMain.handle('mpv:embed', async (_event, x: number, y: number, width: number, height: number) => {
-  try {
-    if (!mainWindow) return { success: false, error: '主窗口未创建' }
-    const controller = getMpvController()
-    if (!controller.isAvailable()) return { success: false, error: '未找到 mpv 可执行文件' }
-
-    if (!controller.isMpvRunning()) {
-      // 复用已有渲染窗口：渲染端在挂载 effect 与起播流程会各调用一次 embed，
-      // 若第二次重建窗口，mpv --wid 仍指向已销毁的旧句柄 → 音频正常但画面黑屏
-      if (!controller.hasChildWindow()) {
-        const ok = controller.createChildWindow(mainWindow, x, y, width, height)
-        if (!ok) return { success: false, error: '创建 mpv 嵌入窗口失败' }
-      } else {
-        controller.updateChildWindowPosition(x, y, width, height)
-      }
-      await controller.start()
-    } else {
-      controller.updateChildWindowPosition(x, y, width, height)
-    }
-    return { success: true }
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) }
-  }
-})
-
-// 更新嵌入窗口位置/大小（窗口缩放、全屏、布局变化；DIP 视口坐标）
-ipcMain.handle('mpv:update-embed', async (_event, x: number, y: number, width: number, height: number) => {
-  if (mpvController && mpvController.isMpvRunning()) {
-    mpvController.updateChildWindowPosition(x, y, width, height)
-  }
-  return { success: true }
-})
-
-// 加载并播放（URL 或本地路径；未嵌入时以独立窗口模式启动）
-ipcMain.handle('mpv:play', async (_event, url: string) => {
-  try {
-    // L1: scheme 白名单 —— 防止渲染端被控时借 mpv 进程访问任意协议/内网
-    const s = String(url)
-    const lower = s.toLowerCase()
-    const isHttp = lower.startsWith('http://') || lower.startsWith('https://')
-    const isFileUrl = lower.startsWith('file://')
-    const isLocalPath = /^[a-z]:[\\/]/.test(lower) || lower.startsWith('\\\\')
-    if (!isHttp && !isFileUrl && !isLocalPath) {
-      return { success: false, error: 'mpv:play 仅支持 http/https/file 或本地磁盘路径' }
-    }
-    // L2: 本地文件必须经过 PathAccessService（realpath 后前缀校验），
-    // 否则渲染端被控时可借 mpv 进程读取任意文件
-    if (isFileUrl) {
-      try {
-        if (!isPathAllowed(fileURLToPath(s))) {
-          console.warn('[mpv:play] rejected file url:', s)
-          return denyPath()
-        }
-      } catch {
-        return { success: false, error: 'file:// URL 无法解析为本地路径' }
-      }
-    } else if (isLocalPath && !isPathAllowed(s)) {
-      console.warn('[mpv:play] rejected local path:', s)
-      return denyPath()
-    }
-    const controller = getMpvController()
-    if (!controller.isAvailable()) return { success: false, error: '未找到 mpv 可执行文件' }
-    if (!controller.isMpvRunning()) {
-      await controller.start()
-    }
-    await controller.loadFile(url)
-    return { success: true }
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) }
-  }
-})
-
-// 离开播放页：销毁子窗口与 mpv 进程（原生子窗口会覆盖其他页面，必须回收）
-ipcMain.handle('mpv:hide', async () => {
-  if (mpvController) {
-    const controller = mpvController
-    mpvController = null
-    try { await controller.destroy() } catch { /* ignore */ }
-  }
-  return { success: true }
-})
-
-ipcMain.handle('mpv:stop', () => runMpv((c) => c.stop()))
-ipcMain.handle('mpv:pause', () => runMpv((c) => c.pause_()))
-ipcMain.handle('mpv:resume', () => runMpv((c) => c.play()))
-ipcMain.handle('mpv:seek', (_event, position: number) => runMpv((c) => c.seek(position)))
-ipcMain.handle('mpv:set-volume', (_event, volume: number) => runMpv((c) => c.setVolume(volume)))
-ipcMain.handle('mpv:set-speed', (_event, speed: number) => runMpv((c) => c.setSpeed(speed)))
-
-// 嵌入模式下全屏由 Electron 页面控制（子窗口跟随几何更新）；
-// 独立窗口模式才切换 mpv 自身全屏
-ipcMain.handle('mpv:toggle-fullscreen', () => {
-  // 打孔架构下不能 cycle mpv 自身 fullscreen（--wid 下 mpv 会调整渲染窗口尺寸导致错位），
-  // 嵌入与否都统一切换 Electron 主窗口的窗口级全屏
-  return { success: true, data: toggleWindowFullscreen() }
-})
-
-ipcMain.handle('mpv:get-state', () => runMpv((c) => c.getState()))
-ipcMain.handle('mpv:get-tracks', () => runMpv((c) => c.getTrackList()))
-ipcMain.handle('mpv:select-track', (_event, trackId: number) => runMpv((c) => c.selectTrack(trackId)))
-ipcMain.handle('mpv:select-subtitle', (_event, trackId: number) => runMpv((c) => c.selectSubtitle(trackId)))
-ipcMain.handle('mpv:disable-subtitle', () => runMpv((c) => c.disableSubtitle()))
-ipcMain.handle('mpv:load-subtitle', (_event, subtitlePath: string) => {
-  // 字幕路径同样是文件读取原语，必须经 PathAccessService 校验
-  if (!isPathAllowed(subtitlePath)) {
-    console.warn('[mpv:load-subtitle] rejected path:', subtitlePath)
-    return denyPath()
-  }
-  return runMpv((c) => c.loadExternalSubtitle(subtitlePath))
-})
-ipcMain.handle('mpv:get-property', (_event, name: string) => runMpv((c) => c.getProperty(name)))
-// mpv:set-property 白名单：仅允许设置「播放状态类」属性。
-// mpv 的 set_property 会把属性名当作命令参数执行，sub-file / audio-file /
-// external-file / script 等属性可被渲染端滥用为文件读取或脚本加载原语；
-// 因此显式只放行已知安全的播放控制属性，其余一律拒绝。
-const MPV_SET_PROPERTY_ALLOWLIST = new Set<string>([
-  'pause', 'volume', 'speed', 'mute', 'fullscreen',
-  'sid', 'aid', 'vid',
-  'audio-delay', 'sub-delay', 'sub-visibility', 'sub-scale', 'sub-pos'
-])
-ipcMain.handle('mpv:set-property', (_event, name: string, value: unknown) => {
-  if (typeof name !== 'string' || !MPV_SET_PROPERTY_ALLOWLIST.has(name)) {
-    console.warn('[mpv:set-property] rejected property:', name)
-    return { success: false, error: '不允许设置该属性' }
-  }
-  return runMpv((c) => c.setProperty(name, value))
-})
-ipcMain.handle('mpv:screenshot', (_event, filePath: string) => {
-  // 截图是任意路径写原语，只允许写入已授权目录 / userData
-  if (!isPathAllowed(filePath)) {
-    console.warn('[mpv:screenshot] rejected path:', filePath)
-    return denyPath()
-  }
-  return runMpv((c) => c.screenshot(filePath))
-})
-
-// 截图保存 — 弹保存对话框；mpv 运行中由 mpv 原生截图，
-// 否则返回 use-canvas-fallback 让渲染端走 Canvas 截图
-ipcMain.handle('mpv:screenshot-save', async () => {
-  if (!mainWindow) return { success: false, error: '主窗口未创建' }
-  try {
-    const result = await dialog.showSaveDialog(mainWindow, {
-      title: '保存截图',
-      defaultPath: `screenshot_${Date.now()}.png`,
-      filters: [
-        { name: 'PNG 图片', extensions: ['png'] },
-        { name: 'JPEG 图片', extensions: ['jpg', 'jpeg'] },
-        { name: '所有文件', extensions: ['*'] }
-      ]
-    })
-    if (result.canceled || !result.filePath) return { success: false, error: '用户取消' }
-    if (mpvController && mpvController.isMpvRunning()) {
-      await mpvController.screenshot(result.filePath)
-      return { success: true, data: result.filePath }
-    }
-    // mpv 未运行：渲染端用 Canvas 截图后写入该路径
-    return { success: false, filePath: result.filePath, error: 'use-canvas-fallback' }
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) }
-  }
-})
-
-// 画布引擎（方案 C）截图保存：preload 取当前帧（已转 BGRA）→ nativeImage 存 PNG
-ipcMain.handle('mpv:save-frame-png', async (_event, payload: { width: number; height: number; pixels: Uint8Array }) => {
-  if (!mainWindow) return { success: false, error: '主窗口未创建' }
-  try {
-    const { width, height, pixels } = payload
-    if (!width || !height || !pixels || pixels.length < width * height * 4) {
-      return { success: false, error: '帧数据无效' }
-    }
-    const result = await dialog.showSaveDialog(mainWindow, {
-      title: '保存截图',
-      defaultPath: `screenshot_${Date.now()}.png`,
-      filters: [{ name: 'PNG 图片', extensions: ['png'] }]
-    })
-    if (result.canceled || !result.filePath) return { success: false, error: '用户取消' }
-    const image = nativeImage.createFromBitmap(Buffer.from(pixels), { width, height })
-    writeFileSync(result.filePath, image.toPNG())
-    return { success: true, data: result.filePath }
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) }
-  }
-})
 
 // ==================== IPC: 播放历史 ====================
 
@@ -4908,7 +4680,7 @@ process.on('unhandledRejection', (reason) => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   // 同步强杀 mpv 子进程，避免退出后 mpv.exe 残留（--wid 子窗口一起销毁）
-  try { mpvController?.killSync() } catch { /* ignore */ }
+  try { playbackEngine.killSync() } catch { /* ignore */ }
 })
 
 

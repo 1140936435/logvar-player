@@ -19,6 +19,16 @@ function hwndToString(hwnd: unknown): string {
   return typeof hwnd === 'bigint' ? hwnd.toString() : String(hwnd)
 }
 
+/**
+ * 子进程是否仍存活。exitCode/signalCode 在进程退出时即置位（伴随 exit 事件），
+ * 是判断「PID 是否仍属于我们的 mpv」的权威信号——进程退出后 PID 可能被系统
+ * 复用，此时再 taskkill 会误杀无关进程。
+ */
+type SpawnedProcess = ReturnType<typeof import('child_process').spawn>
+function isProcAlive(proc: SpawnedProcess | null): proc is SpawnedProcess {
+  return !!proc && proc.exitCode === null && proc.signalCode === null
+}
+
 // ==================== IPC 路径工具 ====================
 // mpv 在 Windows 上使用命名管道 (named pipe)，不是 Unix socket 文件
 // Node.js net.createConnection 需要 \\.\\pipe\\ 前缀来连接 Windows 命名管道
@@ -604,6 +614,9 @@ export class MpvController extends EventEmitter {
       this.mpvProcess.on('exit', (code) => {
         console.log(`[MpvController] Process exited with code ${code}`)
         this.isRunning = false
+        // 进程已死，立即丢弃引用：否则后续 destroy()/killSync() 会对一个
+        // 可能已被系统复用的 PID 执行 taskkill，误杀无关进程
+        this.mpvProcess = null
         this.emit('quit')
         this.cleanup()
         this.destroyChildWindow()
@@ -620,8 +633,8 @@ export class MpvController extends EventEmitter {
       console.log('[MpvController] Started successfully')
     } catch (err) {
       console.error('[MpvController] Failed to start:', err)
-      // spawn 失败时清理可能残留的 mpv 僵尸进程
-      if (this.mpvProcess && this.mpvProcess.pid) {
+      // spawn 失败时清理可能残留的 mpv 僵尸进程（已退出的不碰，PID 可能已复用）
+      if (isProcAlive(this.mpvProcess) && this.mpvProcess.pid) {
         try {
           if (isWin32) {
             require('child_process').execSync(
@@ -1039,28 +1052,37 @@ export class MpvController extends EventEmitter {
 
     if (this.mpvProcess) {
       const proc = this.mpvProcess
-      const exitPromise = new Promise<void>((resolve) => {
-        const timeout = setTimeout(() => {
-          if (process.platform === 'win32') {
-            // Windows 不支持 SIGKILL，需要用 taskkill
-            try {
-              require('child_process').execSync(`taskkill /pid ${proc.pid} /f /t`, { timeout: 3000 })
-            } catch { /* taskkill 可能因进程已退出而报错 */ }
-          } else {
-            proc.kill('SIGKILL')
+      // 已退出的进程：'exit' 监听器不会再触发（事件早已派发），等下去只会
+      // 白等 2s 超时，然后对已复用的 PID 下 taskkill——直接跳过
+      if (!isProcAlive(proc)) {
+        this.mpvProcess = null
+      } else {
+        const exitPromise = new Promise<void>((resolve) => {
+          const timeout = setTimeout(() => {
+            // 超时前复查存活：进程可能恰在此时退出，PID 已不可信
+            if (isProcAlive(proc) && proc.pid) {
+              try {
+                if (process.platform === 'win32') {
+                  // Windows 不支持 SIGKILL，需要用 taskkill
+                  require('child_process').execSync(`taskkill /pid ${proc.pid} /f /t`, { timeout: 3000 })
+                } else {
+                  proc.kill('SIGKILL')
+                }
+              } catch { /* taskkill 可能因进程已退出而报错 */ }
+            }
+            resolve()
+          }, 2000)
+          proc.once('exit', () => { clearTimeout(timeout); resolve() })
+        })
+        try {
+          // 优先通过 IPC 优雅退出
+          if (this.ipcConnection) {
+            await this.sendCommand(['quit']).catch(() => {})
           }
-          resolve()
-        }, 2000)
-        proc.once('exit', () => { clearTimeout(timeout); resolve() })
-      })
-      try {
-        // 优先通过 IPC 优雅退出
-        if (this.ipcConnection) {
-          await this.sendCommand(['quit']).catch(() => {})
-        }
-      } catch { /* ignore */ }
-      await exitPromise
-      this.mpvProcess = null
+        } catch { /* ignore */ }
+        await exitPromise
+        this.mpvProcess = null
+      }
     }
 
     if (this.ipcConnection) {
@@ -1079,7 +1101,9 @@ export class MpvController extends EventEmitter {
   killSync(): void {
     // 退出前同样摘除窗口监听，避免销毁中的窗口继续派发事件
     this.detachWindowListeners()
-    if (this.mpvProcess && this.mpvProcess.pid && !this.mpvProcess.killed) {
+    // killed 标志只表示「调用过 kill()」，不代表进程已退出；只有 exitCode/signalCode
+    // 仍为 null 才说明 PID 还属于我们的 mpv，否则 taskkill 可能命中已复用 PID 的无关进程
+    if (isProcAlive(this.mpvProcess) && this.mpvProcess.pid && !this.mpvProcess.killed) {
       const pid = this.mpvProcess.pid
       try {
         if (isWin32) {
@@ -1089,6 +1113,7 @@ export class MpvController extends EventEmitter {
         }
       } catch { /* 进程可能已退出 */ }
     }
+    this.mpvProcess = null
     this.isRunning = false
     this.stopTimePolling()
   }

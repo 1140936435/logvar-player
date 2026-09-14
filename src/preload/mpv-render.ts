@@ -23,6 +23,7 @@
 
 import { join, dirname } from 'path'
 import { existsSync } from 'fs'
+import { isLoopbackHttpUrl } from '../shared/playback-url'
 
 // ==================== libmpv 常量（与 mpv/include/mpv/*.h 对齐） ====================
 
@@ -491,6 +492,12 @@ export function destroy(): void {
 
 export async function play(filePath: string, options: MpvRenderOptions = {}): Promise<ApiRes<void>> {
   try {
+    // URL 收紧（与主进程 mpv:play 的 L1.5 一致）：http(s) 仅允许回环 StreamProxy
+    // 地址，防止渲染端被控时借 libmpv 探测内网 / 访问任意站点
+    const lower = String(filePath).toLowerCase()
+    if ((lower.startsWith('http://') || lower.startsWith('https://')) && !isLoopbackHttpUrl(filePath)) {
+      return { success: false, error: 'mpv 播放 http 地址仅允许回环代理（StreamProxy）' }
+    }
     ensureStarted(options)
     const argv = buildArgv(['loadfile', filePath, 'replace'])
     const ret = mpv.command(mpvHandle, argv)

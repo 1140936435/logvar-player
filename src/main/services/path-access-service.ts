@@ -32,9 +32,18 @@ export interface PathAccessServiceOptions {
   platform?: NodeJS.Platform
 }
 
+/** realpath 错误是否属于「路径不存在」——只有这类错误允许走回退，其余一律视为不可信 */
+function isNotFoundError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
 /**
  * canonicalize：用 realpath 解析 symlink / junction 后返回真实路径。
- * 目标不存在时回退「父目录 realpath + 文件名」（新建文件场景），仍失败则退化为字符串 resolve。
+ * 目标不存在（新建文件场景）时，沿父目录上溯到最深「已存在」的祖先，取其 realpath
+ * 再拼回剩余段——已存在部分中的链接仍被解析，不存在的部分不可能藏链接。
+ * 其余错误（EACCES / ELOOP / EIO 等）直接抛出：无法确认真实路径时必须由调用方
+ * 拒绝访问（fail-closed），绝不能退化为字符串级前缀比较（fail-open）。
  */
 export function canonicalizePath(
   p: string,
@@ -44,11 +53,23 @@ export function canonicalizePath(
   const resolved = pathResolve(p)
   try {
     return realpath(resolved)
-  } catch { /* 目标不存在 → 尝试父目录 */ }
-  try {
-    return join(realpath(dirname(resolved)), basename(resolved))
-  } catch { /* 父目录也不可用 → 字符串级兜底 */ }
-  return resolved
+  } catch (err) {
+    if (!isNotFoundError(err)) throw err
+  }
+  let dir = dirname(resolved)
+  const tail: string[] = [basename(resolved)]
+  for (;;) {
+    try {
+      return join(realpath(dir), ...[...tail].reverse())
+    } catch (err) {
+      if (!isNotFoundError(err)) throw err
+      const parent = dirname(dir)
+      // 上溯到根仍不存在：整条路径没有任何可解析的链接，字符串 resolve 即真实形态
+      if (parent === dir) return resolved
+      tail.push(basename(dir))
+      dir = parent
+    }
+  }
 }
 
 export class PathAccessService {
@@ -85,12 +106,16 @@ export class PathAccessService {
       if (typeof value === 'string' && value) {
         // 根目录本身若是链接（用户经 junction 授权），必须解析为真实目标再比较，
         // 否则目标文件 realpath 后与字符串形式的根目录前缀不匹配，造成误拒
-        this.roots.add(this.normCanonical(value))
+        try {
+          this.roots.add(this.normCanonical(value))
+        } catch { /* 不可解析的条目直接丢弃（fail-closed），不阻断启动 */ }
       }
     }
   }
 
   authorizeRoot(p: string): void {
+    // 空串经 pathResolve 会变成 cwd，绝不能作为授权根目录
+    if (!p) return
     try {
       const norm = this.normCanonical(p)
       if (!norm) return
@@ -103,7 +128,15 @@ export class PathAccessService {
   }
 
   revokeRoot(p: string): boolean {
-    const norm = this.normCanonical(p)
+    if (!p) return false
+    let norm: string
+    try {
+      norm = this.normCanonical(p)
+    } catch {
+      // 无法确认真实路径时按字符串形态尝试移除——删除条目只会收紧权限，不会放权
+      norm = this.norm(p)
+    }
+    if (!norm) return false
     if (!this.roots.delete(norm)) return false
     this.options.store.set(this.options.storageKey, Array.from(this.roots))
     this.options.persist?.()
@@ -111,22 +144,31 @@ export class PathAccessService {
   }
 
   isPathAllowed(p: string): boolean {
+    // 空串经 pathResolve 会变成 cwd，不属于任何授权路径
+    if (!p) return false
+    let norm: string
     try {
-      const norm = this.normCanonical(p)
-      if (!norm) return false
-      // 隐式根（userData 等应用自有目录）始终放行
-      for (const implicit of this.options.implicitRoots?.() ?? []) {
-        if (!implicit) continue
-        const rn = this.normCanonical(implicit)
-        if (norm === rn || norm.startsWith(rn + pathSep)) return true
-      }
-      for (const root of this.roots) {
-        if (norm === root || norm.startsWith(root + pathSep)) return true
-      }
-      return false
+      norm = this.normCanonical(p)
     } catch {
+      // canonicalize 失败（EACCES / ELOOP 等）＝ 无法确认真实路径 → 拒绝
       return false
     }
+    if (!norm) return false
+    // 隐式根（userData 等应用自有目录）始终放行
+    for (const implicit of this.options.implicitRoots?.() ?? []) {
+      if (!implicit) continue
+      let rn: string
+      try {
+        rn = this.normCanonical(implicit)
+      } catch {
+        continue // 单个隐式根不可解析时跳过，不影响其余根与授权根的判断
+      }
+      if (norm === rn || norm.startsWith(rn + pathSep)) return true
+    }
+    for (const root of this.roots) {
+      if (norm === root || norm.startsWith(root + pathSep)) return true
+    }
+    return false
   }
 
   /** 仅供诊断 / 测试：当前内存中的授权根目录 */
