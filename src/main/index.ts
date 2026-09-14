@@ -2071,15 +2071,10 @@ const playbackEngine = new PlaybackEngine({
   denyPath,
   toggleWindowFullscreen,
   // 新增：StreamProxy 校验（playback-source-guard L1.5 组件）
+  getStreamProxy: () => streamProxy,
   isValidStreamSessionUrl: (url) => streamProxy.ownsSessionUrl(url)
 })
 playbackEngine.registerIpc()
-
-// ==================== 画布引擎播放源校验（与 mpv:play 共用守卫） ====================
-
-ipcMain.handle('mpv:validate-playback-source', (_event, url: string) => {
-  return playbackEngine.validatePlaybackSource(url)
-})
 
 function getMpvPlayerSettings(): { hardwareDecode: boolean; hdrToneMapping: boolean; debugLog: boolean } {
   const saved = configData['player'] as { hardwareDecode?: boolean; hdrToneMapping?: boolean; debugLog?: boolean } | undefined

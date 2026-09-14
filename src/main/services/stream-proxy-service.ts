@@ -231,26 +231,35 @@ export class StreamProxyService {
     if (req.headers.range) headers['Range'] = String(req.headers.range)
     if (req.headers['user-agent']) headers['User-Agent'] = String(req.headers['user-agent'])
     if (req.headers.accept) headers['Accept'] = String(req.headers.accept)
-    const transport = upstreamUrl.protocol === 'https:' ? https : http
-    const proxyReq = transport.request(
-      {
-        protocol: upstreamUrl.protocol,
-        hostname: upstreamUrl.hostname,
-        port: upstreamUrl.port || (upstreamUrl.protocol === 'https:' ? 443 : 80),
-        path: `${upstreamUrl.pathname}${upstreamUrl.search}`,
-        method: req.method === 'HEAD' ? 'HEAD' : 'GET',
-        headers
-      },
-      (upstream) => {
-        const out: Record<string, string | string[]> = {}
-        for (const key of ['content-type', 'content-length', 'accept-ranges', 'content-range', 'etag', 'last-modified']) {
-          const v = upstream.headers[key]
-          if (v !== undefined) out[key] = v
-        }
-        res.writeHead(upstream.statusCode || 502, out)
-        upstream.pipe(res)
-      }
-    )
+        const transport = upstreamUrl.protocol === 'https:' ? https : http
+        const proxyReq = transport.request(
+          {
+            protocol: upstreamUrl.protocol,
+            hostname: upstreamUrl.hostname,
+            port: upstreamUrl.port || (upstreamUrl.protocol === 'https:' ? 443 : 80),
+            path: `${upstreamUrl.pathname}${upstreamUrl.search}`,
+            method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+            headers
+          },
+          (upstream) => {
+            const out: Record<string, string | string[]> = {}
+            for (const key of ['content-type', 'content-length', 'accept-ranges', 'content-range', 'etag', 'last-modified']) {
+              const v = upstream.headers[key]
+              if (v !== undefined) out[key] = v
+            }
+            res.writeHead(upstream.statusCode || 502, out)
+            upstream.pipe(res)
+            // upstream stream 事件必须放在 pipe 回调内，确保真正有响应
+            upstream.on('aborted', () => {
+              this.log.error('[stream-proxy] upstream aborted, destroying request')
+              res.destroy()
+            })
+            upstream.on('error', (err) => {
+              this.log.error('[stream-proxy] upstream error after headers:', err)
+              res.destroy()
+            })
+          }
+        )
     // 上游不活动超时：坏连接 / 无响应服务器不能一直占用 socket 与主进程资源
     if (this.upstreamTimeoutMs > 0) {
       proxyReq.setTimeout(this.upstreamTimeoutMs, () => {
@@ -265,15 +274,6 @@ export class StreamProxyService {
       fail(502, 'Bad Gateway')
     })
     res.on('close', () => proxyReq.destroy())
-    // 上游 stream 事件更可靠——response 不发 body（如头错误）也能及时断开
-    upstream.on('aborted', () => {
-      this.log.error('[stream-proxy] upstream aborted, destroying request')
-      res.destroy()
-    })
-    upstream.on('error', (err) => {
-      this.log.error('[stream-proxy] upstream error after headers:', err)
-      res.destroy()
-    })
     proxyReq.end()
   }
 }

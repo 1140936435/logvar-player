@@ -21,14 +21,16 @@ export type ApiResult<T = unknown> = { success: true; data?: T } | { success: fa
 
 /** 引擎对宿主（index.ts）的依赖注入点 */
 export interface PlaybackEngineHost {
-  /** 当前主窗口（可能未创建 / 已销毁） */
+  /** 获取主窗口 */
   getMainWindow(): BrowserWindow | null
-  /** player 设置（configData['player']），引擎启动 mpv 时使用 */
+  /** 获取播放配置（硬件解码、HDR、调试日志） */
   getPlayerSettings(): { hardwareDecode: boolean; hdrToneMapping: boolean; debugLog: boolean }
-  /** PathAccessService 路径授权检查 */
+  /** 检查路径是否允许播放（L2 本地文件授权） */
   isPathAllowed(p: string): boolean
   /** 标准拒绝响应 */
   denyPath(): ApiResult<never>
+  /** 获取 StreamProxy 实例（L1.5 http session 校验） */
+  getStreamProxy(): StreamProxyService | null
   /** URL 是否为当前 StreamProxy 签发且未过期的有效 session URL */
   isValidStreamSessionUrl(url: string): boolean
   /** 切换主窗口窗口级全屏（打孔架构下 mpv 全屏统一走这里） */
@@ -82,7 +84,10 @@ export class PlaybackEngine {
   private validatePlaybackSource(url: string): { ok: true } | { ok: false; response: ApiResult<never> } {
     const verdict = checkPlaybackSource(url, {
       isPathAllowed: (p) => this.host.isPathAllowed(p),
-      isValidStreamSessionUrl: (u) => this.host.isValidStreamSessionUrl(u)
+      isValidStreamSessionUrl: (u) => {
+        const proxy = this.host.getStreamProxy()
+        return proxy ? proxy.ownsSessionUrl(u) : false
+      }
     })
     if (verdict.ok) return { ok: true }
     console.warn('[mpv:play] rejected playback source:', verdict.kind, url)
