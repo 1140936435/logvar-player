@@ -29,8 +29,6 @@ export interface PlaybackEngineHost {
   isPathAllowed(p: string): boolean
   /** 标准拒绝响应 */
   denyPath(): ApiResult<never>
-  /** 获取 StreamProxy 实例（L1.5 http session 校验） */
-  getStreamProxy(): StreamProxyService | null
   /** URL 是否为当前 StreamProxy 签发且未过期的有效 session URL */
   isValidStreamSessionUrl(url: string): boolean
   /** 切换主窗口窗口级全屏（打孔架构下 mpv 全屏统一走这里） */
@@ -84,10 +82,7 @@ export class PlaybackEngine {
   private validatePlaybackSource(url: string): { ok: true } | { ok: false; response: ApiResult<never> } {
     const verdict = checkPlaybackSource(url, {
       isPathAllowed: (p) => this.host.isPathAllowed(p),
-      isValidStreamSessionUrl: (u) => {
-        const proxy = this.host.getStreamProxy()
-        return proxy ? proxy.ownsSessionUrl(u) : false
-      }
+      isValidStreamSessionUrl: (u) => this.host.isValidStreamSessionUrl(u)
     })
     if (verdict.ok) return { ok: true }
     console.warn('[mpv:play] rejected playback source:', verdict.kind, url)

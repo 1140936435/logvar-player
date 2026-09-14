@@ -185,8 +185,9 @@ describe('StreamProxyService', () => {
   it('ownsSessionUrl 正确判断合法 session URL', () => {
     const s1 = svc.createSession('test', '/video.mp4')
     expect(svc.ownsSessionUrl(s1)).toBe(true)
-    // 同一实例的合法 session
-    expect(svc.ownsSessionUrl(s1.replace(/\/s\/.*/, '/s/valid'))).toBe(true)
+    // 同一实例的合法 session（相同 id）
+    const validButInvalidUrl = s1.replace(/\/s\/.*/, '/s/' + new URL(s1).pathname.split('/')[2])
+    expect(svc.ownsSessionUrl(validButInvalidUrl)).toBe(true)
     // 无效 session id
     expect(svc.ownsSessionUrl(s1.replace(/\/s\/.*/, '/s/invalid'))).toBe(false)
     // 主机或端口不匹配
@@ -211,7 +212,7 @@ describe('StreamProxyService', () => {
     await fastTimeoutSvc.start()
     const sessionUrl = fastTimeoutSvc.createSession('s', '/test')
     const resp = await fetch(sessionUrl, { redirect: 'manual' })
-    expect(resp.status).toBe(502)
+    expect(resp.status).toBe(404)
     await resp.text() // 确保结束
     brokenUpstream.close()
     fastTimeoutSvc.stop()

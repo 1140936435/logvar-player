@@ -2071,8 +2071,7 @@ const playbackEngine = new PlaybackEngine({
   denyPath,
   toggleWindowFullscreen,
   // 新增：StreamProxy 校验（playback-source-guard L1.5 组件）
-  getStreamProxy: () => streamProxy,
-  isValidStreamSessionUrl: (url) => streamProxy.ownsSessionUrl(url)
+  isValidStreamSessionUrl: (url) => getStreamProxy().ownsSessionUrl(url)
 })
 playbackEngine.registerIpc()
 
