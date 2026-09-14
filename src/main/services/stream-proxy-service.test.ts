@@ -3,7 +3,7 @@ import { once } from 'events'
 import http from 'http'
 import { StreamProxyService } from './stream-proxy-service'
 
-const UPSTREAM_URL = 'http://127.0.0.1:9876/test'
+const UPSTREAM_URL = 'http://127.0.0.1:9876'
 const UPSTREAM_SERVER = http.createServer((req, res) => {
   req.pipe(res) // 简单回环，便于验证数据
 }).listen(9876)
@@ -12,15 +12,24 @@ afterEach(() => {
   UPSTREAM_SERVER.closeAllConnections()
 })
 
+// 测试专用桥接：源码中 port/server/sessions 为私有，这里用最小可见类型读取
+type SessionMap = Map<string, { serverId: string; path: string; createdAt: number }>
+const getPort = (s: StreamProxyService): number =>
+  (s as unknown as { port: number }).port
+const getServer = (s: StreamProxyService): http.Server | null =>
+  (s as unknown as { server: http.Server | null }).server
+const getSessions = (s: StreamProxyService): SessionMap =>
+  (s as unknown as { sessions: SessionMap }).sessions
+
 describe('StreamProxyService', () => {
   let svc: StreamProxyService
   let port: number
 
   beforeEach(async () => {
-    // 模拟 resolveTarget，返回我们可控的测试服务器 URL
-    const mockResolve: StreamProxyService['resolveTarget'] = (serverId, path) => {
-      expect(serverId).toBe('upstream-123')
-      return new URL(path, UPSTREAM_URL).toString()
+    // 模拟 resolveTarget：返回可控的测试上游（真实代理链路会据此回环）
+    const mockResolve: StreamProxyService['resolveTarget'] = (serverId) => {
+      expect(serverId).toBeTruthy()
+      return { url: UPSTREAM_URL, token: 'test-token' }
     }
     svc = new StreamProxyService(mockResolve, {
       sessionTtlMs: 100, // 100ms TTL 方便测 sweep
@@ -28,10 +37,13 @@ describe('StreamProxyService', () => {
       maxSessions: 2 // 方便测 session cap
     })
     await svc.start()
-    port = svc.port
+    port = getPort(svc)
     if (!port) {
-      await once(svc.server, 'listening')
-      port = svc.port!
+      const server = getServer(svc)
+      if (server) {
+        await once(server, 'listening')
+        port = getPort(svc)
+      }
     }
   })
 
@@ -56,7 +68,7 @@ describe('StreamProxyService', () => {
     expect(await resp.text()).toBe('test data')
   })
 
-  it(' session 404，不存在时回 404（非 403，不提示外泄）', async () => {
+  it('session 404，不存在时回 404（非 403，不提示外泄）', async () => {
     const resp = await fetch(`http://127.0.0.1:${port}/s/invalid-id`, { redirect: 'manual' })
     expect(resp.status).toBe(404)
     await resp.text() // 确保结束
@@ -66,7 +78,7 @@ describe('StreamProxyService', () => {
     // 创建 session 并等待过期
     const sessionUrl = svc.createSession('upstream-123', '/test')
     const id = sessionUrl.split('/s/')[1]
-    expect(svc['_sessions'].size).toBe(1)
+    expect(getSessions(svc).size).toBe(1)
 
     // 等待过期
     await new Promise(r => setTimeout(r, 150))
@@ -74,14 +86,14 @@ describe('StreamProxyService', () => {
     // 访问过期 session 会被清除并 404
     const resp = await fetch(sessionUrl, { redirect: 'manual' })
     expect(resp.status).toBe(404)
-    expect(svc['_sessions'].size).toBe(0)
+    expect(getSessions(svc).size).toBe(0)
   })
 
   it('sessionTtlMs <= 0 时，session 永不过期', async () => {
     const sessionUrl = svc.createSession('upstream-123', '/test')
     // 等待多次 sweep 循环（默认 50ms × 3 = 150ms，远大于普通超时）
     await new Promise(r => setTimeout(r, 200))
-    expect(svc['_sessions'].size).toBe(1)
+    expect(getSessions(svc).size).toBe(1)
     // 仍可访问
     const resp = await fetch(sessionUrl)
     expect(resp.status).toBe(200)
@@ -96,7 +108,7 @@ describe('StreamProxyService', () => {
     const s3 = svc.createSession('s', '/c')
 
     // 模拟 expire sweep：s1 已过期，s2/s3 有效，s1 被清除，容量达到上限
-    expect(svc['_sessions'].size).toBe(2)
+    expect(getSessions(svc).size).toBe(2)
 
     // 访问 s1 时应该报 404（已被淘汰）
     const resp1 = await fetch(s1.split('/s/')[0] + '/s/invalid', { redirect: 'manual' })
@@ -108,36 +120,31 @@ describe('StreamProxyService', () => {
     expect(resp3.status).toBe(200)
   })
 
-  it('upstreamTimeoutMs > 0 时，坏上游连接超时并报错', (done) => {
+  it('upstreamTimeoutMs > 0 时，坏上游连接超时并报错', async () => {
     // 超短超时，确保可测
     const fastTimeoutSvc = new StreamProxyService(
-      (serverId, path) => 'http://127.0.0.1:9999/delay',
+      () => ({ url: 'http://127.0.0.1:9999/delay', token: '' }),
       { upstreamTimeoutMs: 100, sessionTtlMs: 0 }
     )
-    fastTimeoutSvc.start().then(() => {
-      const sessionUrl = fastTimeoutSvc.createSession('s', '/test')
-      fetch(sessionUrl)
-        .then(r => {
-          expect(r.status).toBe(502)
-          fastTimeoutSvc.stop()
-          done()
-        })
-        .catch(done)
-    }).catch(done)
+    await fastTimeoutSvc.start()
+    const sessionUrl = fastTimeoutSvc.createSession('s', '/test')
+    const resp = await fetch(sessionUrl)
+    expect(resp.status).toBe(502)
+    fastTimeoutSvc.stop()
   })
 
   it('sweepExpiredSessions 返回删除数量', () => {
     svc.createSession('s', '/a')
     svc.createSession('s', '/b')
-    expect(svc['_sessions'].size).toBe(2)
+    expect(getSessions(svc).size).toBe(2)
 
     // 模拟过期
-    svc['_sessions'].forEach(v => {
+    getSessions(svc).forEach(v => {
       v.createdAt = Date.now() - 200
     })
 
     expect(svc.sweepExpiredSessions()).toBe(2)
-    expect(svc['_sessions'].size).toBe(0)
+    expect(getSessions(svc).size).toBe(0)
   })
 
   it('sweepExpiredSessions 不影响有效 session', () => {
@@ -147,7 +154,7 @@ describe('StreamProxyService', () => {
     const id = sessionUrl.split('/s/')[1]
 
     // 模拟全过期，但最后添加的不变
-    svc['_sessions'].forEach(v => {
+    getSessions(svc).forEach(v => {
       if (v.path === '/a') {
         v.createdAt = Date.now() - 200
       } else {
@@ -156,7 +163,7 @@ describe('StreamProxyService', () => {
     })
 
     expect(svc.sweepExpiredSessions()).toBe(1)
-    expect(svc['_sessions'].size).toBe(1)
-    expect(svc['_sessions'].get(id)).toBeTruthy()
+    expect(getSessions(svc).size).toBe(1)
+    expect(getSessions(svc).get(id)).toBeTruthy()
   })
 }, { timeout: 10000 })
