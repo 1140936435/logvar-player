@@ -14,7 +14,7 @@ import { ipcMain, dialog, nativeImage, type BrowserWindow } from 'electron'
 import { writeFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { MpvController } from './mpv-controller'
-import { isLoopbackHttpUrl } from '../shared/playback-url'
+import { checkPlaybackSource } from './lib/playback-source-guard'
 
 /** 标准化 IPC 响应（与 index.ts 其他 handler 一致） */
 export type ApiResult<T = unknown> = { success: true; data?: T } | { success: false; error?: string; filePath?: string }
@@ -29,6 +29,8 @@ export interface PlaybackEngineHost {
   isPathAllowed(p: string): boolean
   /** 标准拒绝响应 */
   denyPath(): ApiResult<never>
+  /** URL 是否为当前 StreamProxy 签发且未过期的有效 session URL */
+  isValidStreamSessionUrl(url: string): boolean
   /** 切换主窗口窗口级全屏（打孔架构下 mpv 全屏统一走这里） */
   toggleWindowFullscreen(): boolean
 }
@@ -73,6 +75,20 @@ export class PlaybackEngine {
       return { success: true, data }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /** 统一播放源守卫：两条 mpv 链路（打孔 mpv:play / 画布 mpvRender.play）共用 */
+  private validatePlaybackSource(url: string): { ok: true } | { ok: false; response: ApiResult<never> } {
+    const verdict = checkPlaybackSource(url, {
+      isPathAllowed: (p) => this.host.isPathAllowed(p),
+      isValidStreamSessionUrl: (u) => this.host.isValidStreamSessionUrl(u)
+    })
+    if (verdict.ok) return { ok: true }
+    console.warn('[mpv:play] rejected playback source:', verdict.kind, url)
+    return {
+      ok: false,
+      response: verdict.kind === 'path-denied' ? this.host.denyPath() : { success: false, error: verdict.error }
     }
   }
 
@@ -126,37 +142,10 @@ export class PlaybackEngine {
     // 加载并播放（URL 或本地路径；未嵌入时以独立窗口模式启动）
     ipcMain.handle('mpv:play', async (_event, url: string) => {
       try {
-        // L1: scheme 白名单 —— 防止渲染端被控时借 mpv 进程访问任意协议/内网
-        const s = String(url)
-        const lower = s.toLowerCase()
-        const isHttp = lower.startsWith('http://') || lower.startsWith('https://')
-        const isFileUrl = lower.startsWith('file://')
-        const isLocalPath = /^[a-z]:[\\/]/.test(lower) || lower.startsWith('\\\\')
-        if (!isHttp && !isFileUrl && !isLocalPath) {
-          return { success: false, error: 'mpv:play 仅支持 http/https/file 或本地磁盘路径' }
-        }
-        // L1.5: http(s) 仅允许回环 StreamProxy 地址 —— 渲染端合法拿到的 http 播放 URL
-        // 只有回环代理签发的 session URL（见 jellyfin:get-playback-url），
-        // 其余一律拒绝，防借 mpv 进程探测内网 / 访问任意站点
-        if (isHttp && !isLoopbackHttpUrl(s)) {
-          console.warn('[mpv:play] rejected non-loopback http url:', s)
-          return { success: false, error: 'mpv:play http 地址仅允许回环代理（StreamProxy）' }
-        }
-        // L2: 本地文件必须经过 PathAccessService（realpath 后前缀校验），
-        // 否则渲染端被控时可借 mpv 进程读取任意文件
-        if (isFileUrl) {
-          try {
-            if (!this.host.isPathAllowed(fileURLToPath(s))) {
-              console.warn('[mpv:play] rejected file url:', s)
-              return this.host.denyPath()
-            }
-          } catch {
-            return { success: false, error: 'file:// URL 无法解析为本地路径' }
-          }
-        } else if (isLocalPath && !this.host.isPathAllowed(s)) {
-          console.warn('[mpv:play] rejected local path:', s)
-          return this.host.denyPath()
-        }
+        // L1 scheme 白名单 + L1.5 有效 StreamProxy session + L2 路径授权
+        // 统一走 PlaybackSourceGuard（见 ./lib/playback-source-guard）
+        const guard = this.validatePlaybackSource(url)
+        if (!guard.ok) return guard.response
         const controller = this.getController()
         if (!controller.isAvailable()) return { success: false, error: '未找到 mpv 可执行文件' }
         if (!controller.isMpvRunning()) {
@@ -208,19 +197,44 @@ export class PlaybackEngine {
       return this.runMpv((c) => c.loadExternalSubtitle(subtitlePath))
     })
     ipcMain.handle('mpv:get-property', (_event, name: string) => this.runMpv((c) => c.getProperty(name)))
-    // mpv:set-property 白名单：仅允许设置「播放状态类」属性。
+    // 画布引擎（preload mpvRender.play）的播放源预检：与 mpv:play 走同一条
+    // PlaybackSourceGuard，校验通过后 preload 才会把源交给 libmpv 加载。
+    // 这样画布链路同样被 L1.5（有效 session URL）与 L2（本地路径授权）覆盖
+    ipcMain.handle('mpv:validate-playback-source', (_event, url: string) => {
+      const guard = this.validatePlaybackSource(url)
+      if (guard.ok) return { success: true }
+      return guard.response
+    })
+
+    // mpv:set-property 白名单：仅允许设置「播放状态类」属性并校验取值类型/范围。
     // mpv 的 set_property 会把属性名当作命令参数执行，sub-file / audio-file /
     // external-file / script 等属性可被渲染端滥用为文件读取或脚本加载原语；
     // 因此显式只放行已知安全的播放控制属性，其余一律拒绝。
-    const MPV_SET_PROPERTY_ALLOWLIST = new Set<string>([
-      'pause', 'volume', 'speed', 'mute', 'fullscreen',
-      'sid', 'aid', 'vid',
-      'audio-delay', 'sub-delay', 'sub-visibility', 'sub-scale', 'sub-pos'
-    ])
+    // fullscreen 不放行：打孔/画布架构下全屏统一由主窗口控制（mpv:toggle-fullscreen），
+    // 渲染端直接改 mpv 的 fullscreen 属性会让嵌入窗口几何与页面错位。
+    const numberInRange = (min: number, max: number) => (v: unknown): boolean =>
+      typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max
+    const isTrackId = (v: unknown): boolean =>
+      (typeof v === 'number' && Number.isInteger(v) && v >= 0) || v === 'no' || v === 'auto'
+    const MPV_SET_PROPERTY_SCHEMA: Record<string, (value: unknown) => boolean> = {
+      pause: (v) => typeof v === 'boolean',
+      mute: (v) => typeof v === 'boolean',
+      'sub-visibility': (v) => typeof v === 'boolean',
+      volume: numberInRange(0, 150),
+      speed: numberInRange(0.25, 16),
+      'audio-delay': numberInRange(-60, 60),
+      'sub-delay': numberInRange(-60, 60),
+      'sub-scale': numberInRange(0.1, 10),
+      'sub-pos': numberInRange(0, 100),
+      sid: isTrackId,
+      aid: isTrackId,
+      vid: isTrackId
+    }
     ipcMain.handle('mpv:set-property', (_event, name: string, value: unknown) => {
-      if (typeof name !== 'string' || !MPV_SET_PROPERTY_ALLOWLIST.has(name)) {
-        console.warn('[mpv:set-property] rejected property:', name)
-        return { success: false, error: '不允许设置该属性' }
+      const validate = typeof name === 'string' ? MPV_SET_PROPERTY_SCHEMA[name] : undefined
+      if (!validate || !validate(value)) {
+        console.warn('[mpv:set-property] rejected property or value:', name, typeof value)
+        return { success: false, error: '不允许设置该属性或取值非法' }
       }
       return this.runMpv((c) => c.setProperty(name, value))
     })

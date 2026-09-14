@@ -9,7 +9,12 @@ const api: Api = {
   // 与主进程打孔链路完全隔离；方法名与 api.mpv 对齐，Player 页按引擎分发）
   mpvRender: {
     play: (filePath: string, options?: import('../shared/preload-types').MpvRenderOptions) =>
-      mpvRender.play(filePath, options),
+      ipcRenderer.invoke('mpv:validate-playback-source', filePath).then((res) => {
+        if (res.success) return mpvRender.play(filePath, options)
+        // 防止渲染端被控时绕过守卫直接调用 libmpv（如 mpvRender.play(null, 'file:///etc/passwd')）。
+        // libmpv 允许 http/https/file 协议，必须经主进程 L1/L1.5/L2 检查。
+        return { success: false, error: '播放源未通过守卫校验' }
+      }),
     stop: () => mpvRender.stop(),
     pause: () => mpvRender.pause(),
     resume: () => mpvRender.resume(),
@@ -22,17 +27,19 @@ const api: Api = {
       const frame = mpvRender.getFrame(-1)
       if (!frame) return { success: false, error: '暂无可截图的画面帧' }
       const { width, height, stride, buffer } = frame
-      const px = Buffer.from(buffer.buffer, buffer.byteOffset, stride * height)
-      // rgb0 → BGRA：逐像素交换 R/B，并置 alpha=255
-      for (let i = 0; i + 2 < px.length; i += 4) {
-        const r = px[i]
-        px[i] = px[i + 2]
-        px[i + 2] = r
-        px[i + 3] = 255
+      const px = new Uint8Array(buffer.buffer, buffer.byteOffset, stride * height)
+      // rgb0 → BGRA：先拷贝，逐像素交换 R/B，并置 alpha=255（避免污染未拷贝的帧）
+      const swapped = new Uint8Array(px.length)
+      swapped.set(px)
+      for (let i = 0; i + 2 < swapped.length; i += 4) {
+        const r = swapped[i]
+        swapped[i] = swapped[i + 2]
+        swapped[i + 2] = r
+        swapped[i + 3] = 255
       }
       return ipcRenderer.invoke('mpv:save-frame-png', {
         width, height,
-        pixels: px
+        pixels: swapped
       })
     },
     isAvailable: async () => ({ success: true, data: mpvRender.isAvailable() }),

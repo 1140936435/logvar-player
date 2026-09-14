@@ -132,6 +132,27 @@ export class StreamProxyService {
     this.startPromise = null
   }
 
+  /**
+   * 校验 URL 是否为当前实例签发且未过期的有效 session URL。
+   * （playback-source-guard 的 L1.5 组件可复用此收紧校验）
+   */
+  ownsSessionUrl(raw: string): boolean {
+    let u: URL
+    try {
+      u = new URL(raw)
+    } catch {
+      return false
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+    // 主机不是 127.0.0.1 或 port 不匹配，直接拒绝（防假冒回环）
+    if (u.hostname.toLowerCase() !== '127.0.0.1' || u.port !== String(this.port)) {
+      return false
+    }
+    const m = u.pathname.match(/^\/s\/([^/?]+)/)
+    if (!m) return false
+    return this.sessions.has(m[1])
+  }
+
   /** 为指定服务器的某个内网路径创建不透明会话，返回可交给渲染端的回环 URL */
   createSession(serverId: string, path: string): string {
     // 未监听（port=0）时拒绝签发：否则会得到 http://127.0.0.1:0/s/... 这类不可用 URL
@@ -238,10 +259,21 @@ export class StreamProxyService {
       })
     }
     proxyReq.on('error', (err) => {
-      this.log.error('[stream-proxy] upstream error:', err)
+      // 上游错误已在 proxyReq.setTimeout 时处理（destroy），
+      // 正常情况下此分支不应触发
+      this.log.error('[stream-proxy] internal proxy error:', err)
       fail(502, 'Bad Gateway')
     })
     res.on('close', () => proxyReq.destroy())
+    // 上游 stream 事件更可靠——response 不发 body（如头错误）也能及时断开
+    upstream.on('aborted', () => {
+      this.log.error('[stream-proxy] upstream aborted, destroying request')
+      res.destroy()
+    })
+    upstream.on('error', (err) => {
+      this.log.error('[stream-proxy] upstream error after headers:', err)
+      res.destroy()
+    })
     proxyReq.end()
   }
 }

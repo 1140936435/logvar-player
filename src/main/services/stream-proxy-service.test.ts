@@ -55,6 +55,7 @@ describe('StreamProxyService', () => {
 
   afterEach(async () => {
     svc.stop()
+    UPSTREAM_SERVER.closeAllConnections()
   })
 
   it('未启动时无法创建 session', () => {
@@ -178,6 +179,41 @@ describe('StreamProxyService', () => {
 
     expect(svc.sweepExpiredSessions()).toBe(1)
     expect(getSessions(svc).size).toBe(1)
-    expect(getSessions(svc).get(id)).toBeTruthy()
+      expect(getSessions(svc).get(id)).toBeTruthy()
+  })
+
+  it('ownsSessionUrl 正确判断合法 session URL', () => {
+    const s1 = svc.createSession('test', '/video.mp4')
+    expect(svc.ownsSessionUrl(s1)).toBe(true)
+    // 同一实例的合法 session
+    expect(svc.ownsSessionUrl(s1.replace(/\/s\/.*/, '/s/valid'))).toBe(true)
+    // 无效 session id
+    expect(svc.ownsSessionUrl(s1.replace(/\/s\/.*/, '/s/invalid'))).toBe(false)
+    // 主机或端口不匹配
+    expect(svc.ownsSessionUrl(s1.replace('127.0.0.1', 'localhost'))).toBe(false)
+    expect(svc.ownsSessionUrl(s1.replace(`:${port}`, ':9999'))).toBe(false)
+    // 非 session 路径
+    expect(svc.ownsSessionUrl(`http://127.0.0.1:${port}/test`)).toBe(false)
+  })
+
+  it('上游错误（如 404）时代理回 502，不卡死连接', async () => {
+    // 起一个模拟上游 404 的临时服务
+    const brokenUpstream = http.createServer((_req, res) => {
+      res.writeHead(404)
+      res.end('Not Found')
+    }).listen(9877)
+    await once(brokenUpstream, 'listening')
+
+    const fastTimeoutSvc = new StreamProxyService(
+      () => ({ url: 'http://127.0.0.1:9877/test', token: '' }),
+      { upstreamTimeoutMs: 100, sessionTtlMs: 0 }
+    )
+    await fastTimeoutSvc.start()
+    const sessionUrl = fastTimeoutSvc.createSession('s', '/test')
+    const resp = await fetch(sessionUrl, { redirect: 'manual' })
+    expect(resp.status).toBe(502)
+    await resp.text() // 确保结束
+    brokenUpstream.close()
+    fastTimeoutSvc.stop()
   })
 }, { timeout: 10000 })
