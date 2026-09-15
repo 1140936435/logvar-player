@@ -129,9 +129,11 @@ describe('StreamProxyService', () => {
     await respHead.text()
   })
 
-  it('session path parser：请求行 path-only URL 统一解析（含 query 容错、畸形路径拒绝）', () => {
+  it('session path parser：请求行 path-only URL 统一解析（带 query/hash 拒绝，与 parseSessionUrl 口径一致）', () => {
     expect(parseSessionRequestUrl('/s/abc')).toBe('abc')
-    expect(parseSessionRequestUrl('/s/abc?range=0-100')).toBe('abc')
+    // query / hash 一律拒绝（不再容错），消除与 parseSessionUrl 的口径差异
+    expect(parseSessionRequestUrl('/s/abc?range=0-100')).toBeNull()
+    expect(parseSessionRequestUrl('/s/abc#frag')).toBeNull()
     expect(parseSessionRequestUrl('/other')).toBeNull()
     expect(parseSessionRequestUrl('/s/')).toBeNull()
     expect(parseSessionRequestUrl('/s/a/b')).toBeNull()

@@ -75,11 +75,10 @@ export function parseSessionUrl(raw: string, expectedPort: number): string | nul
   return parseSessionPath(u.pathname)
 }
 
-/** 解析 HTTP 请求行 URL（path-only，可能带 query）→ sessionId；非法返回 null */
+/** 解析 HTTP 请求行 URL（path-only）→ sessionId；带 query/hash 或非法路径返回 null（与 parseSessionUrl 口径一致） */
 export function parseSessionRequestUrl(rawUrl: string): string | null {
-  const q = rawUrl.indexOf('?')
-  const pathname = q === -1 ? rawUrl : rawUrl.slice(0, q)
-  return parseSessionPath(pathname)
+  if (rawUrl.includes('?') || rawUrl.includes('#')) return null
+  return parseSessionPath(rawUrl)
 }
 
 /**
