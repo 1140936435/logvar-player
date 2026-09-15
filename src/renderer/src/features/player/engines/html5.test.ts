@@ -183,6 +183,30 @@ describe('Html5PlaybackEngine', () => {
     expect(video.muted).toBe(true)
   })
 
+  it('setVolume(150) 越界调用：DOM 与 volumechange 事件同口径收敛为 100，不出现 150', async () => {
+    const video = createMockVideo()
+    const ref = { current: video as unknown as HTMLVideoElement } as React.RefObject<HTMLVideoElement | null>
+    const engine = new Html5PlaybackEngine(ref)
+    const events = collectEvents(engine)
+
+    await engine.setVolume(50)
+    expect(video.volume).toBe(0.5)
+
+    // 入口越界 150 → 引擎 clamp 到 100（DOM 1.0），事件回环也必须报 100 而非 150
+    await engine.setVolume(150)
+    expect(video.volume).toBe(1.0)
+    video.dispatch('volumechange')
+    expect(events.filter((e) => e.type === 'volume').at(-1)).toEqual({ type: 'volume', volume: 100 })
+
+    // DOM 已处于 1.0 时再次越界调用：写 DOM 无变化、volumechange 可能不触发，
+    // 但引擎自身口径仍与 DOM 一致（100），不残留 150 语义
+    await engine.setVolume(150)
+    expect(video.volume).toBe(1.0)
+    expect(video.muted).toBe(false)
+    video.dispatch('volumechange')
+    expect(events.filter((e) => e.type === 'volume').at(-1)).toEqual({ type: 'volume', volume: 100 })
+  })
+
   it('muted 时 volume=0 由 volumechange 统一保证，toggleMute 不再手动发 volume 事件', async () => {
     const video = createMockVideo()
     const ref = { current: video as unknown as HTMLVideoElement } as React.RefObject<HTMLVideoElement | null>

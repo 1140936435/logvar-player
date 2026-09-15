@@ -38,7 +38,16 @@ export class MediaTimeBus {
     this.state.duration = video.duration || 0
     this.state.currentTime = video.currentTime || 0
     this.state.playbackRate = video.playbackRate || 1
+    this.state.buffered = video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0
     this.setupVideoListeners()
+    // P1-2: attach 前已播放 / 已有 currentTime 的 video 立即自举，不等到下一个 rAF/事件：
+    // - isPlaying 自举：play 事件在 attach 之前已触发过，若不回填 true 则 RAF 永不启动、进度停滞
+    // - 已播放则立即启动 RAF 循环推进时间；否则显式停住（等价 detach 后状态）
+    // - notify 立即推送当前 currentTime，避免进度显示从 0/旧值跳变
+    this.state.isPlaying = !video.paused && !video.ended
+    if (this.state.isPlaying) this.start()
+    else this.stop()
+    this.notify()
   }
 
   /** 手动模式：用于 mpv 等无 <video> 元素的播放引擎 */

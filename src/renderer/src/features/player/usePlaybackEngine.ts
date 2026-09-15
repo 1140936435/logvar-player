@@ -463,9 +463,15 @@ export function usePlaybackEngine(options: {
     playerActions.forceNotifyCurrentTime()
   }, [engine, playerActions, engineRef])
 
-  /** 设置音量 0-100+，HTML5 / mpv 家族共用 */
+  /** 设置音量：入口统一 clamp 引擎音量语义。
+   * - HTML5：DOM <video> volume 上限 100，入口即 clamp 到 100，store/DOM/volume 事件三者在
+   *   setVolume(150) 等越界调用时也不会出现「store 暂存 150、DOM 停在 1.0、事件回环才收敛」的中间态；
+   *   也避免 DOM 已处于 1.0 时 volumechange 不触发导致 store 永久停在越界值。
+   * - mpv 家族：原生支持 150 上限，保留放大能力。
+   */
   const engineSetVolume = useCallback((value: number): void => {
-    const v = Math.max(0, Math.min(150, Math.round(value)))
+    const max = engineModeRef.current === 'html5' ? 100 : 150
+    const v = Math.max(0, Math.min(max, Math.round(value)))
     playerActions.setVolume(v)
     void engine.setVolume(v)
   }, [engine, playerActions])
