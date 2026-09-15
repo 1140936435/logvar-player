@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { useSearchParams, useNavigate, Link } from 'react-router-dom'
-import { usePlayerStore } from '../../utils/playerStore'
 import {
   DanmakuSearchPanel,
   DanmakuSettingsPanel,
@@ -37,7 +36,7 @@ function PlayerPage(): ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const progress = usePlaybackProgress({ itemId, localFile, itemName, baseUrl, seriesName })
-  const { currentTime, duration, playbackRate, isPlaying, volume, buffered, loading, error } = progress
+  const { duration, playbackRate, isPlaying, volume, buffered, loading, error } = progress
   const { volumeRef, playbackRateRef, preMuteVolumeRef, playerActions } = progress
   const episodes = usePlayerEpisodes({
     itemId, localFile, seriesId, seasonId,
@@ -131,7 +130,7 @@ function PlayerPage(): ReactElement {
   mpvCtlRef.current = mpvCtl
   usePlayerHotkeys({
     videoRef, containerRef, isMpvFamily,
-    currentTime, duration, volume, windowFullscreen, infoOverlay,
+    windowFullscreen, infoOverlay,
     engineSeekTo, engineSetVolume, handlePlayPause, handleFullscreen,
     handleScreenshot, handlePictureInPicture,
     danmakuOffsetRef, handleOffsetChange,
@@ -331,7 +330,6 @@ function PlayerPage(): ReactElement {
           displayMode={displayMode}
           episodeCount={Math.max(episodeList.length, folderVideos.length)}
           currentEpisodeIndex={currentEpisodeIndex}
-          currentTime={currentTime}
           duration={duration}
           buffered={buffered}
           playbackRate={playbackRate}

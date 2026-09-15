@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef } from 'react'
-import { usePlayerStore } from '../../utils/playerStore'
+import { usePlayerStore, usePlayerStoreRaw } from '../../utils/playerStore'
 
 /**
  * 播放进度与基础状态（从 pages/Player.tsx 拆出）：
- * - 直接暴露 store 节流后的播放状态（约 200ms 更新一次，timeupdate 不带动整页重绘）
+ * - 按字段订阅 store（shallow）：currentTime 高频更新不触发本组件/PlayerPage 重渲染，
+ *   currentTime 仅经 ref 镜像供播放历史保存使用；低频字段（duration/isPlaying/volume 等）变化才重渲染
  * - 音量/倍速 ref 镜像（startPlayback / 控制分发读取最新值，不重建回调）
  * - 播放历史定时保存（30s 周期 + 卸载兜底）
  */
@@ -16,8 +17,25 @@ export function usePlaybackProgress(options: {
 }) {
   const { itemId, localFile, itemName, baseUrl, seriesName } = options
 
-  const [playerState, playerActions] = usePlayerStore()
-  const { currentTime, duration, playbackRate, isPlaying, volume, buffered, loading, error } = playerState
+  // 低频控制字段订阅（浅比较）：200ms 的 currentTime 通知不会命中这些字段变化 → PlayerPage 不重渲染
+  const [playerState, playerActions] = usePlayerStore(
+    (s) => ({
+      duration: s.duration,
+      playbackRate: s.playbackRate,
+      isPlaying: s.isPlaying,
+      volume: s.volume,
+      buffered: s.buffered,
+      loading: s.loading,
+      error: s.error
+    }),
+    true
+  )
+  const { duration, playbackRate, isPlaying, volume, buffered, loading, error } = playerState
+
+  // currentTime 只写 ref 不驱动 React 渲染：供播放历史定时保存读取最新进度
+  const store = usePlayerStoreRaw()
+  const currentTimeRef = useRef(store.getState().currentTime)
+  useEffect(() => store.subscribe((state) => { currentTimeRef.current = state.currentTime }), [store])
 
   const volumeRef = useRef(100)
   const playbackRateRef = useRef(1)
@@ -25,15 +43,10 @@ export function usePlaybackProgress(options: {
   playbackRateRef.current = playbackRate
   const preMuteVolumeRef = useRef(100)
 
-  // 用 ref 持有最新播放进度，避免 savePlayHistory 随 currentTime 变化而重建，
-  // 否则 30s 周期保存的 interval 会每 ~200ms 被销毁/重建，退化为高频写盘
-  const playHistoryTimeRef = useRef(currentTime)
-  playHistoryTimeRef.current = currentTime
-
   const savePlayHistory = useCallback(async () => {
     if (!itemId && !localFile) return
     if (duration <= 0) return
-    const t = playHistoryTimeRef.current
+    const t = currentTimeRef.current
     if (t < 5) return
     try {
       // 海报 URL 由主进程按服务器配置派生（协议链接，不含凭据），Renderer 只传 itemId + baseUrl
@@ -59,7 +72,7 @@ export function usePlaybackProgress(options: {
   }, [savePlayHistory])
 
   return {
-    currentTime, duration, playbackRate, isPlaying, volume, buffered, loading, error,
+    currentTimeRef, duration, playbackRate, isPlaying, volume, buffered, loading, error,
     volumeRef, playbackRateRef, preMuteVolumeRef, playerActions
   }
 }

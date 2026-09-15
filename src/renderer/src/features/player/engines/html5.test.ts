@@ -106,7 +106,7 @@ describe('Html5PlaybackEngine', () => {
   it('ref 为 null 时创建，随后 ref 挂载 → load() 仍能正常写入并绑定事件', async () => {
     const ref = { current: null } as React.RefObject<HTMLVideoElement | null>
     const engine = new Html5PlaybackEngine(ref)
-    // 创建时 ref 为 null，不绑定事件/rAF
+    // 创建时 ref 为 null，不绑定事件
     expect(rafCallbacks.length).toBe(0)
 
     // 挂载后 load：应解析真实 ref 并补绑定
@@ -183,7 +183,7 @@ describe('Html5PlaybackEngine', () => {
     expect(video.muted).toBe(true)
   })
 
-  it('muted 状态下 volume event 值必须为 0（volumechange 与 toggleMute 双路对齐）', async () => {
+  it('muted 时 volume=0 由 volumechange 统一保证，toggleMute 不再手动发 volume 事件', async () => {
     const video = createMockVideo()
     const ref = { current: video as unknown as HTMLVideoElement } as React.RefObject<HTMLVideoElement | null>
     const engine = new Html5PlaybackEngine(ref)
@@ -195,47 +195,24 @@ describe('Html5PlaybackEngine', () => {
     video.dispatch('volumechange')
     expect(events.filter((e) => e.type === 'volume').at(-1)).toEqual({ type: 'volume', volume: 0 })
 
-    // toggleMute 取消静音 → 恢复原音量 50
+    // toggleMute 取消静音：仅翻转 muted，不手动发 volume 事件（volumechange 负责）
     engine.toggleMute()
     expect(video.muted).toBe(false)
+    expect(events.filter((e) => e.type === 'volume').length).toBe(1) // 仍只有上面那一条
+
+    // DOM 随后触发 volumechange：恢复原音量 50
+    video.dispatch('volumechange')
     expect(events.filter((e) => e.type === 'volume').at(-1)).toEqual({ type: 'volume', volume: 50 })
 
-    // toggleMute 再次静音 → 事件 0
+    // toggleMute 再次静音 → 同样不发事件；volumechange 触发后才发 0
     engine.toggleMute()
     expect(video.muted).toBe(true)
+    expect(events.filter((e) => e.type === 'volume').length).toBe(2)
+    video.dispatch('volumechange')
     expect(events.filter((e) => e.type === 'volume').at(-1)).toEqual({ type: 'volume', volume: 0 })
   })
 
-  it('rAF 帧时钟：逐帧发 frame，time 事件按 200ms 节流', async () => {
-    // 精确控制 performance.now：帧1=10000（发 time）、帧2=10000（节流）、帧3=10200（再发 time）
-    const nowSpy = vi.spyOn(performance, 'now')
-      .mockReturnValueOnce(10000)
-      .mockReturnValueOnce(10000)
-      .mockReturnValueOnce(10200)
-    const video = createMockVideo()
-    const ref = { current: video as unknown as HTMLVideoElement } as React.RefObject<HTMLVideoElement | null>
-    const engine = new Html5PlaybackEngine(ref)
-    const events = collectEvents(engine)
-    video.currentTime = 12.3
-    video.playbackRate = 1.25
-
-    // 第一帧：frame + time（lastTimeEmit 初始为 0，必然超 200ms）
-    runRafFrame()
-    expect(events.some((e) => e.type === 'frame')).toBe(true)
-    expect(events.some((e) => e.type === 'time' && e.currentTime === 12.3)).toBe(true)
-    const timeCountAfterFirst = events.filter((e) => e.type === 'time').length
-
-    // 时间未前进：第二帧只发 frame，不发 time（节流）
-    runRafFrame()
-    expect(events.filter((e) => e.type === 'time').length).toBe(timeCountAfterFirst)
-
-    // 时间前进 200ms：第三帧再次发 time
-    runRafFrame()
-    expect(events.filter((e) => e.type === 'time').length).toBe(timeCountAfterFirst + 1)
-    nowSpy.mockRestore()
-  })
-
-  it('dispose 后停止事件发射与 rAF 注册', async () => {
+  it('dispose 后停止事件发射并解绑 video 事件', async () => {
     const video = createMockVideo()
     const ref = { current: video as unknown as HTMLVideoElement } as React.RefObject<HTMLVideoElement | null>
     const engine = new Html5PlaybackEngine(ref)

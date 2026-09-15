@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, Gauge, List, Volume1, Volume2, VolumeX } fro
 import { formatTime } from '../utils'
 import type { DanmakuComment } from '../../../../shared/types'
 import { DanmakuHeatmap } from './DanmakuHeatmap'
+import { usePlayerStore } from '../../utils/playerStore'
 
 interface PlayerControlsProps {
   visible: boolean
@@ -11,7 +12,6 @@ interface PlayerControlsProps {
   displayMode: 'contain' | 'cover'
   episodeCount: number
   currentEpisodeIndex: number
-  currentTime: number
   duration: number
   buffered: number
   playbackRate: number
@@ -50,7 +50,6 @@ export function PlayerControls({
   displayMode,
   episodeCount,
   currentEpisodeIndex,
-  currentTime,
   duration,
   buffered,
   playbackRate,
@@ -81,6 +80,8 @@ export function PlayerControls({
   onFullscreen,
   onToggleDisplayMode
 }: PlayerControlsProps): ReactElement {
+  // currentTime 高频更新（store 约 200ms 节流）只在控制栏内部订阅，避免带动 PlayerPage 整页重渲染
+  const [currentTime] = usePlayerStore((s) => s.currentTime)
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0
   const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0
 

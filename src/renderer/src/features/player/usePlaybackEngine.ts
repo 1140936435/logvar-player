@@ -58,8 +58,12 @@ export function usePlaybackEngine(options: {
     renderSubtitleAtTime, setSubtitleTracks, setSubtitleCues, setActiveSubtitleIndex
   } = subtitle
 
-  const [playerState, playerActions] = usePlayerStore()
-  const { isPlaying, duration, volume } = playerState
+  // 按字段订阅（shallow）：只依赖低频控制字段，currentTime 高频更新不带动本组件重渲染
+  const [playState, playerActions] = usePlayerStore(
+    (s) => ({ isPlaying: s.isPlaying, duration: s.duration, volume: s.volume }),
+    true
+  )
+  const { isPlaying, duration, volume } = playState
 
   const [engineMode, setEngineMode] = useState<EngineMode>('html5')
   const engineModeRef = useRef<EngineMode>('html5')
@@ -173,7 +177,8 @@ export function usePlaybackEngine(options: {
       case 'loaded':
         playerActions.setLoading(false)
         playerActions.setError('')
-        bus?.syncFromEngine({ isPlaying: true })
+        // P1：播放态单一真源 —— 不再在 loaded 处改写 isPlaying；
+        // 播放/暂停只由 play/pause 事件驱动（html5 的 DOM play / mpv 的 pause=false 归一化事件）
         // file-loaded 后主进程揭示 mpv 渲染窗口（打孔），视频区域需切透明
         if (event.active) setMpvActive(true)
         // 续播跳转（每次进入播放页仅一次）；HTML5 引擎 loaded 后自播放

@@ -2,23 +2,20 @@ import type { MediaSource, PlaybackEngine, PlaybackEvent, PlaybackEventHandler }
 
 /**
  * Html5PlaybackEngine：内置 <video> 引擎。
- * 事件归一化：DOM 事件 + rAF 帧时钟 → 统一 PlaybackEvent。
- * - 'frame' 每帧发射（弹幕引擎 / 竖屏模糊背景消费）
- * - 'time' 节流发射（约 5Hz，驱动 store 节流更新，不带动整页重绘）
+ * 事件归一化：DOM 事件 → 统一 PlaybackEvent；时间推进（frame/time）由外层 MediaTimeBus 统一负责，
+ * 本引擎不再自建 rAF 帧时钟与 200ms time 节流，避免与 MediaTimeBus 重复高频管道。
  *
  * 修复点：
- * - 不缓存 null ref：constructor 时 ref 未挂载也合法，load() 时再解析真实 DOM ref 并延迟绑定事件/rAF
+ * - 不缓存 null ref：constructor 时 ref 未挂载也合法，load() 时再解析真实 DOM ref 并延迟绑定事件
+ * - bind() 前先 unbind 旧 video：切换视频源时先解绑旧元素事件/ref，防止重复绑定与监听器泄漏
  * - setVolume 按 DOM 0~100 语义 clamp（写 volume=1.0 上限），杜绝 150 → 1.5 越界
- * - muted 时归一化 volume 事件恒为 0（volumechange 与 toggleMute 双路对齐）
+ * - muted 时归一化 volume 事件恒为 0：由 volumechange 监听统一保证，toggleMute 不再手动发 volume 事件
  * - load() 后自动 play（浏览器手势策略由 play() 内部 catch 忽略拒绝）
  */
 export class Html5PlaybackEngine implements PlaybackEngine {
   private readonly listeners = new Set<PlaybackEventHandler>()
-  private rafId = 0
   private disposed = false
-  private lastTimeEmit = 0
-  private frameCount = 0
-  /** 已绑定事件/rAF 的真实 <video> 元素（ref 挂载后第一次访问时绑定） */
+  /** 已绑定事件的真实 <video> 元素（ref 挂载后第一次访问时绑定） */
   private boundVideo: HTMLVideoElement | null = null
 
   constructor(private readonly videoRef: React.RefObject<HTMLVideoElement | null>) {
@@ -34,8 +31,24 @@ export class Html5PlaybackEngine implements PlaybackEngine {
     return video
   }
 
+  /** 解绑事件监听并清空 boundVideo；dispose 与 bind 前复用，防止重复绑定/泄漏 */
+  private unbind(video: HTMLVideoElement): void {
+    video.removeEventListener('loadedmetadata', this.onLoadedMetadata)
+    video.removeEventListener('waiting', this.onWaiting)
+    video.removeEventListener('canplay', this.onCanPlay)
+    video.removeEventListener('error', this.onError)
+    video.removeEventListener('volumechange', this.onVolumeChange)
+    video.removeEventListener('ratechange', this.onRateChange)
+    video.removeEventListener('play', this.onPlay)
+    video.removeEventListener('pause', this.onPause)
+    video.removeEventListener('seeked', this.onSeeked)
+    if (this.boundVideo === video) this.boundVideo = null
+  }
+
   private bind(video: HTMLVideoElement): void {
     if (this.boundVideo === video) return
+    // P3：先解绑旧 video，再绑新 video
+    if (this.boundVideo) this.unbind(this.boundVideo)
     this.boundVideo = video
     video.addEventListener('loadedmetadata', this.onLoadedMetadata)
     video.addEventListener('waiting', this.onWaiting)
@@ -46,7 +59,6 @@ export class Html5PlaybackEngine implements PlaybackEngine {
     video.addEventListener('play', this.onPlay)
     video.addEventListener('pause', this.onPause)
     video.addEventListener('seeked', this.onSeeked)
-    this.rafId = requestAnimationFrame(this.onFrame)
   }
 
   async load(source: MediaSource): Promise<void> {
@@ -90,12 +102,11 @@ export class Html5PlaybackEngine implements PlaybackEngine {
     if (video) video.playbackRate = speed
   }
 
-  /** 静音切换：muted 变化触发 volumechange → 归一化 volume 事件回 UI */
+  /** 静音切换：仅翻转 muted；volumechange 监听统一发射 volume 事件（muted 时 volume=0） */
   toggleMute(): void {
     const video = this.getVideo()
     if (!video) return
     video.muted = !video.muted
-    this.emit({ type: 'volume', volume: video.muted ? 0 : Math.round(video.volume * 100) })
   }
 
   /** 音轨切换：<video> 无通用 audioTracks 控制，预留接口 */
@@ -111,18 +122,9 @@ export class Html5PlaybackEngine implements PlaybackEngine {
 
   async dispose(): Promise<void> {
     this.disposed = true
-    cancelAnimationFrame(this.rafId)
     const video = this.boundVideo
     if (video) {
-      video.removeEventListener('loadedmetadata', this.onLoadedMetadata)
-      video.removeEventListener('waiting', this.onWaiting)
-      video.removeEventListener('canplay', this.onCanPlay)
-      video.removeEventListener('error', this.onError)
-      video.removeEventListener('volumechange', this.onVolumeChange)
-      video.removeEventListener('ratechange', this.onRateChange)
-      video.removeEventListener('play', this.onPlay)
-      video.removeEventListener('pause', this.onPause)
-      video.removeEventListener('seeked', this.onSeeked)
+      this.unbind(video)
       video.src = ''
       video.load()
     }
@@ -133,28 +135,6 @@ export class Html5PlaybackEngine implements PlaybackEngine {
   private emit(event: PlaybackEvent): void {
     if (this.disposed) return
     this.listeners.forEach(cb => { try { cb(event) } catch { /* 单个监听器异常不中断 */ } })
-  }
-
-  private onFrame = (): void => {
-    if (this.disposed) return
-    const video = this.getVideo()
-    if (video) {
-      const t = video.currentTime || 0
-      this.frameCount++
-      this.emit({ type: 'frame', currentTime: t, playbackRate: video.playbackRate || 1 })
-      // 节流 time 事件（约 5Hz），store 订阅端负责写入，避免 60fps 重渲染
-      const now = performance.now()
-      if (now - this.lastTimeEmit >= 200) {
-        this.lastTimeEmit = now
-        let buffered = 0
-        // 语义与 mediaTimeBus 一致：buffered 为缓冲末端秒数（非 0-1 比例）
-        if (video.buffered.length > 0) {
-          buffered = video.buffered.end(video.buffered.length - 1)
-        }
-        this.emit({ type: 'time', currentTime: t, buffered })
-      }
-    }
-    this.rafId = requestAnimationFrame(this.onFrame)
   }
 
   private onLoadedMetadata = (): void => {

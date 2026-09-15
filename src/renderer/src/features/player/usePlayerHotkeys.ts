@@ -1,17 +1,17 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
+import { usePlayerStoreRaw } from '../../utils/playerStore'
 
 /**
  * 播放页键盘快捷键（从 pages/Player.tsx 的 handleKeyDown 拆出）。
  * 行为与原实现逐键一致：方向键跳转/音量、空格播放暂停、f 全屏、s 截图、
  * p 置顶、d 画中画、[ ] 弹幕偏移、v 字幕循环、Esc 关闭信息覆盖层/退出全屏。
+ * 性能：currentTime/duration/volume 经 store ref 订阅（不驱动渲染），按键时读最新值，
+ * 避免每 ~200ms 时间更新重建 keydown 监听或带动 PlayerPage 重渲染。
  */
 export function usePlayerHotkeys(options: {
   videoRef: React.RefObject<HTMLVideoElement | null>
   containerRef: React.RefObject<HTMLDivElement | null>
   isMpvFamily: () => boolean
-  currentTime: number
-  duration: number
-  volume: number
   windowFullscreen: boolean
   infoOverlay: boolean
   engineSeekTo: (target: number) => void
@@ -30,12 +30,23 @@ export function usePlayerHotkeys(options: {
   showStatus: (msg: string) => void
 }) {
   const {
-    videoRef, containerRef, isMpvFamily, currentTime, duration, volume, windowFullscreen,
+    videoRef, containerRef, isMpvFamily, windowFullscreen,
     infoOverlay, engineSeekTo, engineSetVolume, handlePlayPause, handleFullscreen,
     handleScreenshot, handlePictureInPicture, danmakuOffsetRef, handleOffsetChange,
     subtitleTracks, activeSubtitleIndex, handleSubtitleSelect, handleCloseInfo,
     setAlwaysOnTop, showStatus
   } = options
+
+  // 低频控制值经 ref 镜像：按键处理器读取最新值，不订阅 React state 触发重渲染
+  const store = usePlayerStoreRaw()
+  const currentTimeRef = useRef(store.getState().currentTime)
+  const durationRef = useRef(store.getState().duration)
+  const volumeRef = useRef(store.getState().volume)
+  useEffect(() => store.subscribe((s) => {
+    currentTimeRef.current = s.currentTime
+    durationRef.current = s.duration
+    volumeRef.current = s.volume
+  }), [store])
 
   useEffect(() => {
     const container = containerRef.current
@@ -50,7 +61,7 @@ export function usePlayerHotkeys(options: {
         case 'ArrowLeft': {
           e.preventDefault()
           const delta = e.ctrlKey ? 30 : 5
-          if (useMpv) engineSeekTo(Math.max(0, currentTime - delta))
+          if (useMpv) engineSeekTo(Math.max(0, currentTimeRef.current - delta))
           else if (video) video.currentTime = Math.max(0, video.currentTime - delta)
           showStatus(e.ctrlKey ? '后退 30s' : '后退 5s')
           break
@@ -58,14 +69,15 @@ export function usePlayerHotkeys(options: {
         case 'ArrowRight': {
           e.preventDefault()
           const delta = e.ctrlKey ? 30 : 5
-          if (useMpv) engineSeekTo(Math.min(duration || currentTime + delta, currentTime + delta))
+          const ct = currentTimeRef.current
+          if (useMpv) engineSeekTo(Math.min(durationRef.current || ct + delta, ct + delta))
           else if (video) video.currentTime = Math.min(video.duration || 0, video.currentTime + delta)
           showStatus(e.ctrlKey ? '前进 30s' : '前进 5s')
           break
         }
         case ' ': e.preventDefault(); handlePlayPause(); break
-        case 'ArrowUp': e.preventDefault(); engineSetVolume((useMpv ? volume : Math.round((video?.volume ?? 0) * 100)) + 10); break
-        case 'ArrowDown': e.preventDefault(); engineSetVolume((useMpv ? volume : Math.round((video?.volume ?? 0) * 100)) - 10); break
+        case 'ArrowUp': e.preventDefault(); engineSetVolume((useMpv ? volumeRef.current : Math.round((video?.volume ?? 0) * 100)) + 10); break
+        case 'ArrowDown': e.preventDefault(); engineSetVolume((useMpv ? volumeRef.current : Math.round((video?.volume ?? 0) * 100)) - 10); break
         case 'f': case 'F': e.preventDefault(); handleFullscreen(); break
         case 's': case 'S': e.preventDefault(); handleScreenshot(); break
         case 'p': case 'P': e.preventDefault(); window.api.window.alwaysOnTop().then(result => { if (result.success) { setAlwaysOnTop(!!result.data); showStatus(result.data ? '窗口置顶' : '取消置顶') } }).catch(() => {}); break
@@ -79,7 +91,7 @@ export function usePlayerHotkeys(options: {
     container.addEventListener('keydown', handleKeyDown)
     return () => container.removeEventListener('keydown', handleKeyDown)
   }, [
-    containerRef, videoRef, isMpvFamily, currentTime, duration, volume, windowFullscreen,
+    containerRef, videoRef, isMpvFamily, windowFullscreen,
     infoOverlay, engineSeekTo, engineSetVolume, handlePlayPause, handleFullscreen,
     handleScreenshot, handlePictureInPicture, danmakuOffsetRef, handleOffsetChange,
     subtitleTracks, activeSubtitleIndex, handleSubtitleSelect, handleCloseInfo,

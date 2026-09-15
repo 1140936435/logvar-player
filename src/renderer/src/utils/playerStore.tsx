@@ -154,16 +154,48 @@ export const PlayerStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
   )
 }
 
-export function usePlayerStore(): [PlayerStoreState, PlayerStoreActions] {
+/** 浅比较：多字段 selector 返回值逐键比较，任一键引用/值变化才视为变更 */
+function isShallowEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+  const keysA = Object.keys(a as Record<string, unknown>)
+  const keysB = Object.keys(b as Record<string, unknown>)
+  if (keysA.length !== keysB.length) return false
+  return keysA.every((k) => Object.is((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
+}
+
+/**
+ * 订阅 PlayerStore（支持 selector 按字段订阅，避免全量订阅导致高频 state 更新带动整棵组件树渲染）。
+ * - 不传 selector：兼容旧行为，返回全量状态（高频字段场景慎用）
+ * - 传 selector：仅当选中字段变化时才触发组件重渲染；多字段用 shallow=true（如 useShallow 语义）
+ */
+export function usePlayerStore<T = PlayerStoreState>(
+  selector: (state: PlayerStoreState) => T = (state) => state as unknown as T,
+  shallow = false
+): [T, PlayerStoreActions] {
   const store = useContext(PlayerStoreContext)
   if (!store) {
     throw new Error('usePlayerStore must be used within PlayerStoreProvider')
   }
 
-  const [state, setState] = useState<PlayerStoreState>(store.getState())
+  // selector / shallow 通过 ref 读取：每次渲染都新建的 inline 箭头函数不会导致 effect 反复重建订阅
+  const selectorRef = useRef(selector)
+  selectorRef.current = selector
+  const shallowRef = useRef(shallow)
+  shallowRef.current = shallow
+
+  const [selected, setSelected] = useState<T>(() => selector(store.getState()))
 
   useEffect(() => {
-    const unsubscribe = store.subscribe(setState)
+    const unsubscribe = store.subscribe((state) => {
+      setSelected((prev) => {
+        const next = selectorRef.current(state)
+        if (shallowRef.current ? isShallowEqual(prev, next) : Object.is(prev, next)) {
+          return prev
+        }
+        return next
+      })
+    })
     return unsubscribe
   }, [store])
 
@@ -182,7 +214,15 @@ export function usePlayerStore(): [PlayerStoreState, PlayerStoreActions] {
     reset: () => store.reset()
   }), [])
 
-  return [state, actions]
+  return [selected, actions]
+}
+
+export function usePlayerStoreRaw(): PlayerStoreImpl {
+  const store = useContext(PlayerStoreContext)
+  if (!store) {
+    throw new Error('usePlayerStoreRaw must be used within PlayerStoreProvider')
+  }
+  return store
 }
 
 export function usePlayerTime(): number {
