@@ -210,9 +210,11 @@ export class MediaTimeBus {
     }
   }
 
+  // 只设置 RAF 调度，下一帧才进入 loop：attach/事件驱动的立即通知唯一来自 notify()，
+  // 避免 start() 同步执行 loop 首帧导致 bootstrap 值在极端时序下重复普通通知
   private start(): void {
     if (this.animationFrameId !== null) return
-    this.loop()
+    this.animationFrameId = requestAnimationFrame(this.loop)
   }
 
   private stop(): void {

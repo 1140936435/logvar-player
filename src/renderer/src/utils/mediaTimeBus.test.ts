@@ -86,13 +86,14 @@ describe('MediaTimeBus.attachVideo 自举（不受节流影响）', () => {
     bus.attachVideo(video as unknown as HTMLVideoElement)
 
     // 自举：subscribe 之后 attach 也能立刻拿到当前时间，不等到下一个 rAF/事件。
-    // notify() 同步刷新节流窗口 → loop 首帧（同帧 now）被节流跳过，seen 仅 bootstrap 一条
+    // start() 仅调度下一帧（不同步跑 loop），attach 后无同步 loop 帧，
+    // 普通通知仅 bootstrap 一条（attach 自举是唯一立即通知来源）
     expect(bus.getCurrentTime()).toBe(42)
     expect(bus.getState().isPlaying).toBe(true)
     expect(bus.getState().duration).toBe(120)
     expect(seen).toEqual([{ time: 42, isPlaying: true }])
 
-    // 已播放 → RAF 循环立即启动
+    // 已播放 → RAF 循环已调度（下一帧才开始 loop，当前无同步帧执行）
     expect(rafCallbacks.length).toBe(1)
 
     bus.destroy()
@@ -137,29 +138,29 @@ describe('MediaTimeBus 普通 observer 节流（约 5~10Hz）', () => {
     bus.subscribeRAF((time) => rafSeen.push(time))
 
     bus.attachVideo(video as unknown as HTMLVideoElement)
-    // attach 自举 1 条（不受节流）；loop 首帧同步执行时普通通知被节流跳过，RAF 首帧拿到 0
+    // attach 自举 1 条（不受节流）；start() 仅调度下一帧，RAF 首帧尚未运行（无同步帧）
     expect(seen).toEqual([0])
-    expect(rafSeen).toEqual([0])
+    expect(rafSeen).toEqual([])
 
-    // 帧1：+200ms → 普通 observer 收到（200 - 0 >= 150）
+    // 帧1：+200ms → RAF 首帧执行，普通 observer 收到（200 - 0 >= 150）
     advanceNow(200)
     video.currentTime = 0.5
     runRafFrame()
-    expect(rafSeen).toEqual([0, 0.5])
+    expect(rafSeen).toEqual([0.5])
     expect(seen).toEqual([0, 0.5])
 
     // 帧2：+50ms（距上次 200ms 通知仅 50ms）→ 普通 observer 跳过，RAF 每帧仍收到
     advanceNow(50)
     video.currentTime = 0.6
     runRafFrame()
-    expect(rafSeen).toEqual([0, 0.5, 0.6])
+    expect(rafSeen).toEqual([0.5, 0.6])
     expect(seen).toEqual([0, 0.5])
 
     // 帧3：再 +100ms（距上次通知共 150ms）→ 普通 observer 收到
     advanceNow(100)
     video.currentTime = 0.7
     runRafFrame()
-    expect(rafSeen).toEqual([0, 0.5, 0.6, 0.7])
+    expect(rafSeen).toEqual([0.5, 0.6, 0.7])
     expect(seen).toEqual([0, 0.5, 0.7])
 
     bus.destroy()
@@ -173,14 +174,15 @@ describe('MediaTimeBus 普通 observer 节流（约 5~10Hz）', () => {
     // 不订阅普通 observer，验证 RAF 通道独立每帧触发
 
     bus.attachVideo(video as unknown as HTMLVideoElement)
-    expect(rafSeen).toEqual([10]) // loop 首帧
+    // start() 不同步 loop：attach 后无同步帧，RAF 首帧从手动驱动开始
+    expect(rafSeen).toEqual([])
 
     for (let i = 1; i <= 3; i++) {
       advanceNow(16)
       video.currentTime = 10 + i * 0.2
       runRafFrame()
     }
-    expect(rafSeen).toEqual([10, 10.2, 10.4, 10.6])
+    expect(rafSeen).toEqual([10.2, 10.4, 10.6])
 
     bus.destroy()
   })
