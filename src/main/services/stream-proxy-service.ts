@@ -44,6 +44,44 @@ const DEFAULT_MAX_SESSIONS = 500
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 60 * 1000
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000
 
+/** session URL 路径前缀（单一来源：签发与所有解析共用，防路径漂移） */
+export const SESSION_PATH_PREFIX = '/s/'
+
+/**
+ * 从 pathname 提取 sessionId —— 所有 URL→sessionId 解析的统一底座。
+ * 必须精确匹配 /s/<id>：空 id、多余路径段（含尾斜杠 / 子路径）均返回 null。
+ */
+export function parseSessionPath(pathname: string): string | null {
+  if (!pathname.startsWith(SESSION_PATH_PREFIX)) return null
+  const id = pathname.slice(SESSION_PATH_PREFIX.length)
+  if (id === '' || id.includes('/')) return null
+  return id
+}
+
+/**
+ * 解析完整代理 URL → sessionId。scheme/host/port/query/hash 约束在此统一收敛：
+ * 仅 http:、hostname 精确 127.0.0.1、端口等于当前监听端口、无 query/hash。
+ */
+export function parseSessionUrl(raw: string, expectedPort: number): string | null {
+  let u: URL
+  try {
+    u = new URL(raw)
+  } catch {
+    return null
+  }
+  if (u.protocol !== 'http:') return null
+  if (u.hostname !== '127.0.0.1' || u.port !== String(expectedPort)) return null
+  if (u.search !== '' || u.hash !== '') return null
+  return parseSessionPath(u.pathname)
+}
+
+/** 解析 HTTP 请求行 URL（path-only，可能带 query）→ sessionId；非法返回 null */
+export function parseSessionRequestUrl(rawUrl: string): string | null {
+  const q = rawUrl.indexOf('?')
+  const pathname = q === -1 ? rawUrl : rawUrl.slice(0, q)
+  return parseSessionPath(pathname)
+}
+
 /**
  * 播放流代理：对渲染端只暴露「不透明 session URL」，真实服务器地址与凭据全部留在主进程。
  * 会话只能由主进程创建，URL 中不含 serverId / token，渲染端无法自造指向任意服务器的地址。
@@ -145,24 +183,8 @@ export class StreamProxyService {
    * （playback-source-guard 的 L1.5 组件可复用此收紧校验）
    */
   ownsSessionUrl(raw: string): boolean {
-    let u: URL
-    try {
-      u = new URL(raw)
-    } catch {
-      return false
-    }
-    if (u.protocol !== 'http:') return false
-    // hostname 精确 127.0.0.1 且端口必须等于实际端口（防假冒回环 / 固定错误端口）
-    if (u.hostname !== '127.0.0.1' || u.port !== String(this.port)) return false
-    // 拒绝额外 query / hash
-    if (u.search !== '' || u.hash !== '') return false
-    // pathname 精确匹配 /s/<id>：不允许子路径段 / 空 id
-    const prefix = '/s/'
-    if (!u.pathname.startsWith(prefix)) return false
-    const id = u.pathname.slice(prefix.length)
-    if (id === '' || id.includes('/')) return false
-    // 必须存在且未过期
-    return this.getValidSession(id) !== null
+    const id = parseSessionUrl(raw, this.port)
+    return id !== null && this.getValidSession(id) !== null
   }
 
   /** 为指定服务器的某个内网路径创建不透明会话，返回可交给渲染端的回环 URL */
@@ -183,7 +205,7 @@ export class StreamProxyService {
     const id = crypto.randomUUID()
     const suffix = path.startsWith('/') ? path : `/${path}`
     this.sessions.set(id, { serverId, path: suffix, createdAt: Date.now() })
-    return `http://127.0.0.1:${this.port}/s/${id}`
+    return `http://127.0.0.1:${this.port}${SESSION_PATH_PREFIX}${id}`
   }
 
   /** 显式失效会话（如切换服务器 / 退出登录时） */
@@ -218,12 +240,19 @@ export class StreamProxyService {
       fail(403, 'Forbidden')
       return
     }
-    const m = (req.url || '').match(/^\/s\/([^/?]+)/)
-    if (!m) {
+    // 只允许 GET/HEAD：代理是只读媒体流通道，其余 method（POST/PUT/DELETE 等）一律 405
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      if (!res.headersSent) res.writeHead(405, { Allow: 'GET, HEAD' })
+      res.end('Method Not Allowed')
+      return
+    }
+    // session 路径解析统一走 parseSessionRequestUrl（单一来源）
+    const id = parseSessionRequestUrl(req.url || '')
+    if (id === null) {
       fail(404, 'Not Found')
       return
     }
-    const session = this.getValidSession(m[1])
+    const session = this.getValidSession(id)
     if (!session) {
       fail(404, 'Session Not Found')
       return

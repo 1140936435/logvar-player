@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { once } from 'events'
 import http from 'http'
 import crypto from 'crypto'
-import { StreamProxyService } from './stream-proxy-service'
+import { StreamProxyService, parseSessionRequestUrl, parseSessionUrl } from './stream-proxy-service'
 
 /** 取一个随机空闲端口后立即释放，用于构造「端口上无服务监听」的上游地址 */
 function getFreePort(): Promise<number> {
@@ -109,6 +109,46 @@ describe('StreamProxyService', () => {
     const resp = await fetch(`http://127.0.0.1:${port}/s/invalid-id`, { redirect: 'manual' })
     expect(resp.status).toBe(404)
     await resp.text() // 确保结束
+  })
+
+  it('method 收紧：非 GET/HEAD 一律 405 并带 Allow 头，GET/HEAD 不受影响', async () => {
+    const sessionUrl = svc.createSession('upstream-123', '/movie.mkv')
+    // 其余 method 直接 405 拒绝（在代理层拦截，不转发上游）
+    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'] as const) {
+      const resp = await fetch(sessionUrl, { method, redirect: 'manual' })
+      expect(resp.status).toBe(405)
+      expect(resp.headers.get('allow')).toBe('GET, HEAD')
+      await resp.text()
+    }
+    // GET / HEAD 仍正常代理
+    const respGet = await fetch(sessionUrl)
+    expect(respGet.status).toBe(200)
+    expect(await respGet.text()).toBe('test data')
+    const respHead = await fetch(sessionUrl, { method: 'HEAD' })
+    expect(respHead.status).toBe(200)
+    await respHead.text()
+  })
+
+  it('session path parser：请求行 path-only URL 统一解析（含 query 容错、畸形路径拒绝）', () => {
+    expect(parseSessionRequestUrl('/s/abc')).toBe('abc')
+    expect(parseSessionRequestUrl('/s/abc?range=0-100')).toBe('abc')
+    expect(parseSessionRequestUrl('/other')).toBeNull()
+    expect(parseSessionRequestUrl('/s/')).toBeNull()
+    expect(parseSessionRequestUrl('/s/a/b')).toBeNull()
+    expect(parseSessionRequestUrl('')).toBeNull()
+  })
+
+  it('session path parser：完整 URL 约束统一收敛（scheme/host/port/query/hash/子路径）', async () => {
+    const sessionUrl = svc.createSession('upstream-123', '/video.mp4')
+    const id = sessionUrl.split('/s/')[1]
+    expect(parseSessionUrl(sessionUrl, port)).toBe(id)
+    // 安全收紧：HTTPS / 错误端口 / 非 127.0.0.1 / query / hash / 额外路径段均拒绝
+    expect(parseSessionUrl(sessionUrl.replace('http:', 'https:'), port)).toBeNull()
+    expect(parseSessionUrl(sessionUrl.replace(`:${port}`, ':9999'), port)).toBeNull()
+    expect(parseSessionUrl(sessionUrl.replace('127.0.0.1', 'localhost'), port)).toBeNull()
+    expect(parseSessionUrl(`${sessionUrl}?foo=bar`, port)).toBeNull()
+    expect(parseSessionUrl(`${sessionUrl}#frag`, port)).toBeNull()
+    expect(parseSessionUrl(`${sessionUrl}/extra`, port)).toBeNull()
   })
 
   it('sessionTtlMs > 0 时，过期的 session 在访问时自动删除', async () => {
