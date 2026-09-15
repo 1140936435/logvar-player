@@ -10,11 +10,12 @@
  * 使引擎可脱离 config / 窗口生命周期独立测试。
  */
 
-import { ipcMain, dialog, nativeImage, type BrowserWindow } from 'electron'
+import { dialog, nativeImage, type BrowserWindow } from 'electron'
 import { writeFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { MpvController } from './mpv-controller'
 import { checkPlaybackSource } from './lib/playback-source-guard'
+import { registerIpc } from './ipc/secure-handle'
 
 /** 标准化 IPC 响应（与 index.ts 其他 handler 一致） */
 export type ApiResult<T = unknown> = { success: true; data?: T } | { success: false; error?: string; filePath?: string }
@@ -95,7 +96,7 @@ export class PlaybackEngine {
   /** 注册全部 mpv:* IPC handler（模块加载期调用一次） */
   registerIpc(): void {
     // mpv 是否可用（二进制存在性检查）
-    ipcMain.handle('mpv:is-available', async () => {
+    registerIpc('mpv:is-available', async () => {
       try {
         return { success: true, data: this.getController().isAvailable() }
       } catch (err) {
@@ -105,7 +106,7 @@ export class PlaybackEngine {
 
     // 嵌入：创建 mpv 渲染窗口（主窗口身后打孔架构）并启动 mpv（--wid 只能在启动时传入）；
     // 已运行时仅更新渲染窗口位置。坐标为渲染端视口 DIP（主进程换算屏幕物理像素）
-    ipcMain.handle('mpv:embed', async (_event, x: number, y: number, width: number, height: number) => {
+    registerIpc('mpv:embed', async (_event, x: number, y: number, width: number, height: number) => {
       try {
         const win = this.host.getMainWindow()
         if (!win) return { success: false, error: '主窗口未创建' }
@@ -132,7 +133,7 @@ export class PlaybackEngine {
     })
 
     // 更新嵌入窗口位置/大小（窗口缩放、全屏、布局变化；DIP 视口坐标）
-    ipcMain.handle('mpv:update-embed', async (_event, x: number, y: number, width: number, height: number) => {
+    registerIpc('mpv:update-embed', async (_event, x: number, y: number, width: number, height: number) => {
       if (this.controller && this.controller.isMpvRunning()) {
         this.controller.updateChildWindowPosition(x, y, width, height)
       }
@@ -140,7 +141,7 @@ export class PlaybackEngine {
     })
 
     // 加载并播放（URL 或本地路径；未嵌入时以独立窗口模式启动）
-    ipcMain.handle('mpv:play', async (_event, url: string) => {
+    registerIpc('mpv:play', async (_event, url: string) => {
       try {
         // L1 scheme 白名单 + L1.5 有效 StreamProxy session + L2 路径授权
         // 统一走 PlaybackSourceGuard（见 ./lib/playback-source-guard）
@@ -159,7 +160,7 @@ export class PlaybackEngine {
     })
 
     // 离开播放页：销毁子窗口与 mpv 进程（原生子窗口会覆盖其他页面，必须回收）
-    ipcMain.handle('mpv:hide', async () => {
+    registerIpc('mpv:hide', async () => {
       if (this.controller) {
         const controller = this.controller
         this.controller = null
@@ -168,27 +169,27 @@ export class PlaybackEngine {
       return { success: true }
     })
 
-    ipcMain.handle('mpv:stop', () => this.runMpv((c) => c.stop()))
-    ipcMain.handle('mpv:pause', () => this.runMpv((c) => c.pause_()))
-    ipcMain.handle('mpv:resume', () => this.runMpv((c) => c.play()))
-    ipcMain.handle('mpv:seek', (_event, position: number) => this.runMpv((c) => c.seek(position)))
-    ipcMain.handle('mpv:set-volume', (_event, volume: number) => this.runMpv((c) => c.setVolume(volume)))
-    ipcMain.handle('mpv:set-speed', (_event, speed: number) => this.runMpv((c) => c.setSpeed(speed)))
+    registerIpc('mpv:stop', () => this.runMpv((c) => c.stop()))
+    registerIpc('mpv:pause', () => this.runMpv((c) => c.pause_()))
+    registerIpc('mpv:resume', () => this.runMpv((c) => c.play()))
+    registerIpc('mpv:seek', (_event, position: number) => this.runMpv((c) => c.seek(position)))
+    registerIpc('mpv:set-volume', (_event, volume: number) => this.runMpv((c) => c.setVolume(volume)))
+    registerIpc('mpv:set-speed', (_event, speed: number) => this.runMpv((c) => c.setSpeed(speed)))
 
     // 嵌入模式下全屏由 Electron 页面控制（子窗口跟随几何更新）；
     // 独立窗口模式才切换 mpv 自身全屏
-    ipcMain.handle('mpv:toggle-fullscreen', () => {
+    registerIpc('mpv:toggle-fullscreen', () => {
       // 打孔架构下不能 cycle mpv 自身 fullscreen（--wid 下 mpv 会调整渲染窗口尺寸导致错位），
       // 嵌入与否都统一切换 Electron 主窗口的窗口级全屏
       return { success: true, data: this.host.toggleWindowFullscreen() }
     })
 
-    ipcMain.handle('mpv:get-state', () => this.runMpv((c) => c.getState()))
-    ipcMain.handle('mpv:get-tracks', () => this.runMpv((c) => c.getTrackList()))
-    ipcMain.handle('mpv:select-track', (_event, trackId: number) => this.runMpv((c) => c.selectTrack(trackId)))
-    ipcMain.handle('mpv:select-subtitle', (_event, trackId: number) => this.runMpv((c) => c.selectSubtitle(trackId)))
-    ipcMain.handle('mpv:disable-subtitle', () => this.runMpv((c) => c.disableSubtitle()))
-    ipcMain.handle('mpv:load-subtitle', (_event, subtitlePath: string) => {
+    registerIpc('mpv:get-state', () => this.runMpv((c) => c.getState()))
+    registerIpc('mpv:get-tracks', () => this.runMpv((c) => c.getTrackList()))
+    registerIpc('mpv:select-track', (_event, trackId: number) => this.runMpv((c) => c.selectTrack(trackId)))
+    registerIpc('mpv:select-subtitle', (_event, trackId: number) => this.runMpv((c) => c.selectSubtitle(trackId)))
+    registerIpc('mpv:disable-subtitle', () => this.runMpv((c) => c.disableSubtitle()))
+    registerIpc('mpv:load-subtitle', (_event, subtitlePath: string) => {
       // 字幕路径同样是文件读取原语，必须经 PathAccessService 校验
       if (!this.host.isPathAllowed(subtitlePath)) {
         console.warn('[mpv:load-subtitle] rejected path:', subtitlePath)
@@ -196,11 +197,11 @@ export class PlaybackEngine {
       }
       return this.runMpv((c) => c.loadExternalSubtitle(subtitlePath))
     })
-    ipcMain.handle('mpv:get-property', (_event, name: string) => this.runMpv((c) => c.getProperty(name)))
+    registerIpc('mpv:get-property', (_event, name: string) => this.runMpv((c) => c.getProperty(name)))
     // 画布引擎（preload mpvRender.play）的播放源预检：与 mpv:play 走同一条
     // PlaybackSourceGuard，校验通过后 preload 才会把源交给 libmpv 加载。
     // 这样画布链路同样被 L1.5（有效 session URL）与 L2（本地路径授权）覆盖
-    ipcMain.handle('mpv:validate-playback-source', (_event, url: string) => {
+    registerIpc('mpv:validate-playback-source', (_event, url: string) => {
       const guard = this.validatePlaybackSource(url)
       if (guard.ok) return { success: true }
       return guard.response
@@ -230,7 +231,7 @@ export class PlaybackEngine {
       aid: isTrackId,
       vid: isTrackId
     }
-    ipcMain.handle('mpv:set-property', (_event, name: string, value: unknown) => {
+    registerIpc('mpv:set-property', (_event, name: string, value: unknown) => {
       const validate = typeof name === 'string' ? MPV_SET_PROPERTY_SCHEMA[name] : undefined
       if (!validate || !validate(value)) {
         console.warn('[mpv:set-property] rejected property or value:', name, typeof value)
@@ -238,7 +239,7 @@ export class PlaybackEngine {
       }
       return this.runMpv((c) => c.setProperty(name, value))
     })
-    ipcMain.handle('mpv:screenshot', (_event, filePath: string) => {
+    registerIpc('mpv:screenshot', (_event, filePath: string) => {
       // 截图是任意路径写原语，只允许写入已授权目录 / userData
       if (!this.host.isPathAllowed(filePath)) {
         console.warn('[mpv:screenshot] rejected path:', filePath)
@@ -249,7 +250,7 @@ export class PlaybackEngine {
 
     // 截图保存 — 弹保存对话框；mpv 运行中由 mpv 原生截图，
     // 否则返回 use-canvas-fallback 让渲染端走 Canvas 截图
-    ipcMain.handle('mpv:screenshot-save', async () => {
+    registerIpc('mpv:screenshot-save', async () => {
       const win = this.host.getMainWindow()
       if (!win) return { success: false, error: '主窗口未创建' }
       try {
@@ -275,7 +276,7 @@ export class PlaybackEngine {
     })
 
     // 画布引擎（方案 C）截图保存：preload 取当前帧（已转 BGRA）→ nativeImage 存 PNG
-    ipcMain.handle('mpv:save-frame-png', async (_event, payload: { width: number; height: number; pixels: Uint8Array }) => {
+    registerIpc('mpv:save-frame-png', async (_event, payload: { width: number; height: number; pixels: Uint8Array }) => {
       const win = this.host.getMainWindow()
       if (!win) return { success: false, error: '主窗口未创建' }
       try {

@@ -1,21 +1,53 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import { once } from 'events'
 import http from 'http'
+import crypto from 'crypto'
 import { StreamProxyService } from './stream-proxy-service'
 
-const UPSTREAM_URL = 'http://127.0.0.1:9876'
-const UPSTREAM_SERVER = http.createServer((req, res) => {
-  // 代理只转发 GET/HEAD（播放语义），GET 返回固定 payload 供断言；
-  // 其余方法原样回环（仅用于手动验证）
-  if (req.method === 'GET') {
-    res.end('test data')
-    return
-  }
-  req.pipe(res)
-}).listen(9876)
+/** 取一个随机空闲端口后立即释放，用于构造「端口上无服务监听」的上游地址 */
+function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = http.createServer()
+    srv.once('error', reject)
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address()
+      if (!addr || typeof addr === 'string') {
+        srv.close()
+        reject(new Error('invalid free port'))
+        return
+      }
+      const port = addr.port
+      srv.close(() => resolve(port))
+    })
+  })
+}
 
-afterEach(() => {
-  UPSTREAM_SERVER.closeAllConnections()
+let UPSTREAM_URL = ''
+let upstreamServer: http.Server | null = null
+
+beforeAll(async () => {
+  // 上游测试服务器：动态随机端口（不固定 9876），避免 CI EADDRINUSE
+  upstreamServer = http.createServer((req, res) => {
+    // 代理只转发 GET/HEAD（播放语义），GET 返回固定 payload 供断言；
+    // 其余方法原样回环（仅用于手动验证）
+    if (req.method === 'GET') {
+      res.end('test data')
+      return
+    }
+    req.pipe(res)
+  })
+  upstreamServer.listen(0, '127.0.0.1')
+  await once(upstreamServer, 'listening')
+  const addr = upstreamServer.address()
+  if (!addr || typeof addr === 'string') throw new Error('bad upstream address')
+  UPSTREAM_URL = `http://127.0.0.1:${addr.port}`
+})
+
+afterAll(async () => {
+  // 真正 close，避免 Vitest 报 open handle
+  upstreamServer?.closeAllConnections()
+  await new Promise<void>((resolve) => upstreamServer!.close(() => resolve()))
+  upstreamServer = null
 })
 
 // 测试专用桥接：源码中 port/server/sessions 为私有，这里用最小可见类型读取
@@ -53,9 +85,9 @@ describe('StreamProxyService', () => {
     }
   })
 
-  afterEach(async () => {
+  afterEach(() => {
     svc.stop()
-    UPSTREAM_SERVER.closeAllConnections()
+    upstreamServer?.closeAllConnections()
   })
 
   it('未启动时无法创建 session', () => {
@@ -136,9 +168,11 @@ describe('StreamProxyService', () => {
   })
 
   it('upstreamTimeoutMs > 0 时，坏上游连接超时并报错', async () => {
+    // 动态取一个无服务监听的端口，避免固定端口造成 EADDRINUSE
+    const deadPort = await getFreePort()
     // 超短超时，确保可测
     const fastTimeoutSvc = new StreamProxyService(
-      () => ({ url: 'http://127.0.0.1:9999/delay', token: '' }),
+      () => ({ url: `http://127.0.0.1:${deadPort}/delay`, token: '' }),
       { upstreamTimeoutMs: 100, sessionTtlMs: 0 }
     )
     await fastTimeoutSvc.start()
@@ -179,42 +213,76 @@ describe('StreamProxyService', () => {
 
     expect(svc.sweepExpiredSessions()).toBe(1)
     expect(getSessions(svc).size).toBe(1)
-      expect(getSessions(svc).get(id)).toBeTruthy()
+    expect(getSessions(svc).get(id)).toBeTruthy()
   })
 
   it('ownsSessionUrl 正确判断合法 session URL', () => {
     const s1 = svc.createSession('test', '/video.mp4')
     expect(svc.ownsSessionUrl(s1)).toBe(true)
-    // 同一实例的合法 session（相同 id）
-    const validButInvalidUrl = s1.replace(/\/s\/.*/, '/s/' + new URL(s1).pathname.split('/')[2])
-    expect(svc.ownsSessionUrl(validButInvalidUrl)).toBe(true)
-    // 无效 session id
-    expect(svc.ownsSessionUrl(s1.replace(/\/s\/.*/, '/s/invalid'))).toBe(false)
-    // 主机或端口不匹配
-    expect(svc.ownsSessionUrl(s1.replace('127.0.0.1', 'localhost'))).toBe(false)
-    expect(svc.ownsSessionUrl(s1.replace(`:${port}`, ':9999'))).toBe(false)
     // 非 session 路径
     expect(svc.ownsSessionUrl(`http://127.0.0.1:${port}/test`)).toBe(false)
   })
 
-  it('上游错误（如 404）时代理回 502，不卡死连接', async () => {
-    // 起一个模拟上游 404 的临时服务
+  it('安全收紧：HTTPS / 错误端口 / 非 127.0.0.1 均返回 false', () => {
+    const s1 = svc.createSession('test', '/video.mp4')
+    // HTTPS URL → false
+    expect(svc.ownsSessionUrl(s1.replace('http:', 'https:'))).toBe(false)
+    // 错误端口 → false
+    expect(svc.ownsSessionUrl(s1.replace(`:${port}`, ':9999'))).toBe(false)
+    // 非 127.0.0.1 → false
+    expect(svc.ownsSessionUrl(s1.replace('127.0.0.1', 'localhost'))).toBe(false)
+    expect(svc.ownsSessionUrl(s1.replace('127.0.0.1', '10.0.0.1'))).toBe(false)
+    expect(svc.ownsSessionUrl(s1.replace('127.0.0.1', '0.0.0.0'))).toBe(false)
+  })
+
+  it('安全收紧：/s/id/extra、query/hash、随机不存在的 id 均返回 false', () => {
+    const s1 = svc.createSession('test', '/video.mp4')
+    // /s/id/extra → false（额外路径段）
+    expect(svc.ownsSessionUrl(`${s1}/extra`)).toBe(false)
+    // query / hash → false
+    expect(svc.ownsSessionUrl(`${s1}?foo=bar`)).toBe(false)
+    expect(svc.ownsSessionUrl(`${s1}#frag`)).toBe(false)
+    // 随机不存在 session ID → false
+    const randomId = crypto.randomUUID()
+    expect(svc.ownsSessionUrl(s1.replace(/\/s\/[^/]+/, `/s/${randomId}`))).toBe(false)
+  })
+
+  it('安全收紧：已过期 session 返回 false', async () => {
+    const sessionUrl = svc.createSession('test', '/video.mp4')
+    expect(svc.ownsSessionUrl(sessionUrl)).toBe(true)
+    // TTL=100ms，等待过期
+    await new Promise(r => setTimeout(r, 150))
+    expect(svc.ownsSessionUrl(sessionUrl)).toBe(false)
+  })
+
+  it('上游返回错误状态码时按透传状态码返回，不卡死连接', async () => {
+    // 动态端口的临时上游，返回 404
     const brokenUpstream = http.createServer((_req, res) => {
       res.writeHead(404)
       res.end('Not Found')
-    }).listen(9877)
+    })
+    brokenUpstream.listen(0, '127.0.0.1')
     await once(brokenUpstream, 'listening')
+    const addr = brokenUpstream.address()
+    if (!addr || typeof addr === 'string') {
+      brokenUpstream.close()
+      throw new Error('bad broken upstream address')
+    }
 
     const fastTimeoutSvc = new StreamProxyService(
-      () => ({ url: 'http://127.0.0.1:9877/test', token: '' }),
+      () => ({ url: `http://127.0.0.1:${addr.port}/test`, token: '' }),
       { upstreamTimeoutMs: 100, sessionTtlMs: 0 }
     )
     await fastTimeoutSvc.start()
-    const sessionUrl = fastTimeoutSvc.createSession('s', '/test')
-    const resp = await fetch(sessionUrl, { redirect: 'manual' })
-    expect(resp.status).toBe(404)
-    await resp.text() // 确保结束
-    brokenUpstream.close()
-    fastTimeoutSvc.stop()
+    try {
+      const sessionUrl = fastTimeoutSvc.createSession('s', '/test')
+      const resp = await fetch(sessionUrl, { redirect: 'manual' })
+      expect(resp.status).toBe(404)
+      await resp.text() // 确保结束
+    } finally {
+      brokenUpstream.closeAllConnections()
+      await new Promise<void>((resolve) => brokenUpstream.close(() => resolve()))
+      fastTimeoutSvc.stop()
+    }
   })
 }, { timeout: 10000 })

@@ -1,6 +1,7 @@
 import * as http from 'http'
 import * as https from 'https'
 import * as crypto from 'crypto'
+import { pipeline } from 'stream'
 
 export interface StreamProxyTarget {
   /** 上游真实地址（含 scheme/host/path/query），由调用方解析，代理本身不持有服务器状态 */
@@ -133,7 +134,14 @@ export class StreamProxyService {
   }
 
   /**
-   * 校验 URL 是否为当前实例签发且未过期的有效 session URL。
+   * 校验 URL 是否为当前实例签发、且（若配置了 TTL）未过期的有效 session URL。
+   * 收紧规则：
+   * - 仅允许 http:（拒绝 https 等其它 scheme）
+   * - hostname 必须精确为 127.0.0.1（拒绝 localhost / IPv6 / 任意主机）
+   * - 端口必须等于当前代理实际监听端口
+   * - pathname 必须精确匹配 /s/<sessionId>，不允许额外路径段
+   * - 拒绝任何 query / hash
+   * - 必须存在且未过期（过期即失效并清除）
    * （playback-source-guard 的 L1.5 组件可复用此收紧校验）
    */
   ownsSessionUrl(raw: string): boolean {
@@ -143,14 +151,18 @@ export class StreamProxyService {
     } catch {
       return false
     }
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
-    // 主机不是 127.0.0.1 或 port 不匹配，直接拒绝（防假冒回环）
-    if (u.hostname.toLowerCase() !== '127.0.0.1' || u.port !== String(this.port)) {
-      return false
-    }
-    const m = u.pathname.match(/^\/s\/([^/?]+)/)
-    if (!m) return false
-    return this.sessions.has(m[1])
+    if (u.protocol !== 'http:') return false
+    // hostname 精确 127.0.0.1 且端口必须等于实际端口（防假冒回环 / 固定错误端口）
+    if (u.hostname !== '127.0.0.1' || u.port !== String(this.port)) return false
+    // 拒绝额外 query / hash
+    if (u.search !== '' || u.hash !== '') return false
+    // pathname 精确匹配 /s/<id>：不允许子路径段 / 空 id
+    const prefix = '/s/'
+    if (!u.pathname.startsWith(prefix)) return false
+    const id = u.pathname.slice(prefix.length)
+    if (id === '' || id.includes('/')) return false
+    // 必须存在且未过期
+    return this.getValidSession(id) !== null
   }
 
   /** 为指定服务器的某个内网路径创建不透明会话，返回可交给渲染端的回环 URL */
@@ -184,7 +196,8 @@ export class StreamProxyService {
     this.sessions.clear()
   }
 
-  private takeSession(id: string): StreamSession | null {
+  /** 获取仍有效的会话；不存在或已过期时返回 null（过期会顺手清除） */
+  private getValidSession(id: string): StreamSession | null {
     const s = this.sessions.get(id)
     if (!s) return null
     if (this.sessionTtlMs > 0 && Date.now() - s.createdAt > this.sessionTtlMs) {
@@ -210,7 +223,7 @@ export class StreamProxyService {
       fail(404, 'Not Found')
       return
     }
-    const session = this.takeSession(m[1])
+    const session = this.getValidSession(m[1])
     if (!session) {
       fail(404, 'Session Not Found')
       return
@@ -248,15 +261,13 @@ export class StreamProxyService {
               if (v !== undefined) out[key] = v
             }
             res.writeHead(upstream.statusCode || 502, out)
-            upstream.pipe(res)
-            // upstream stream 事件必须放在 pipe 回调内，确保真正有响应
-            upstream.on('aborted', () => {
-              this.log.error('[stream-proxy] upstream aborted, destroying request')
-              res.destroy()
-            })
-            upstream.on('error', (err) => {
-              this.log.error('[stream-proxy] upstream error after headers:', err)
-              res.destroy()
+            // 统一经 stream.pipeline 传播上游错误：upstream 的 error / aborted /
+            // res 侧写入失败都会汇聚到回调，避免手动拆多个事件监听导致遗漏销毁
+            pipeline(upstream, res as NodeJS.WritableStream, (err) => {
+              if (err) {
+                this.log.error('[stream-proxy] upstream stream error:', err)
+                if (!res.destroyed) res.destroy()
+              }
             })
           }
         )
@@ -268,10 +279,13 @@ export class StreamProxyService {
       })
     }
     proxyReq.on('error', (err) => {
-      // 上游错误已在 proxyReq.setTimeout 时处理（destroy），
-      // 正常情况下此分支不应触发
-      this.log.error('[stream-proxy] internal proxy error:', err)
-      fail(502, 'Bad Gateway')
+      this.log.error('[stream-proxy] proxy request error:', err)
+      // headers 尚未发送 → 可安全返回 502；已发送 → 只能销毁响应避免悬挂
+      if (!res.headersSent) {
+        fail(502, 'Bad Gateway')
+      } else {
+        res.destroy(err)
+      }
     })
     res.on('close', () => proxyReq.destroy())
     proxyReq.end()

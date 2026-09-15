@@ -11,7 +11,7 @@ export interface PlayerStoreState {
   loading: boolean
 }
 
-interface PlayerStoreActions {
+export interface PlayerStoreActions {
   setCurrentTime: (time: number) => void
   forceNotifyCurrentTime: () => void
   setDuration: (duration: number) => void
