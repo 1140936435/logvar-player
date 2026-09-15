@@ -54,21 +54,30 @@ function resetRaf(): void {
   rafCounter = 0
 }
 
+/** 可控时钟：stub performance.now，逐帧/事件推进 nowMs 以精确断言节流窗口（150ms） */
+let nowMs = 0
+function advanceNow(ms: number): void {
+  nowMs += ms
+}
+
 beforeEach(() => {
   resetRaf()
+  nowMs = 0
   vi.stubGlobal('requestAnimationFrame', (cb: () => void) => {
     rafCallbacks.push(cb)
     return ++rafCounter
   })
   vi.stubGlobal('cancelAnimationFrame', () => { rafCallbacks = [] })
+  vi.spyOn(performance, 'now').mockImplementation(() => nowMs)
 })
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
-describe('MediaTimeBus.attachVideo', () => {
-  it('attach 已播放的 video：立即自举 currentTime/isPlaying/buffered，启动 RAF 推进，并 notify 观察者', () => {
+describe('MediaTimeBus.attachVideo 自举（不受节流影响）', () => {
+  it('attach 已播放的 video：立即 notify bootstrap 值，启动 RAF 推进，且 loop 首帧不重复普通通知', () => {
     const bus = createMediaTimeBus()
     const video = createMockVideo({ currentTime: 42, duration: 120, paused: false, ended: false })
     const seen: Array<{ time: number; isPlaying: boolean }> = []
@@ -76,21 +85,15 @@ describe('MediaTimeBus.attachVideo', () => {
 
     bus.attachVideo(video as unknown as HTMLVideoElement)
 
-    // 自举：subscribe 之后 attach 也能立刻拿到当前时间（不等到下一个 rAF/事件）。
-    // start() 会同步跑 loop 首帧，因此首个回调即 bootstrap 值 42（可能随后紧跟同值帧）
+    // 自举：subscribe 之后 attach 也能立刻拿到当前时间，不等到下一个 rAF/事件。
+    // notify() 同步刷新节流窗口 → loop 首帧（同帧 now）被节流跳过，seen 仅 bootstrap 一条
     expect(bus.getCurrentTime()).toBe(42)
     expect(bus.getState().isPlaying).toBe(true)
     expect(bus.getState().duration).toBe(120)
-    expect(seen.length).toBeGreaterThanOrEqual(1)
-    expect(seen[0]).toEqual({ time: 42, isPlaying: true })
+    expect(seen).toEqual([{ time: 42, isPlaying: true }])
 
-    // 已播放 → RAF 循环立即启动（loop 注册），时间从 video.currentTime 推进
+    // 已播放 → RAF 循环立即启动
     expect(rafCallbacks.length).toBe(1)
-    video.currentTime = 42.25
-    runRafFrame()
-    expect(bus.getCurrentTime()).toBe(42.25)
-    expect(seen.at(-1)?.time).toBe(42.25)
-    expect(seen.at(-1)?.isPlaying).toBe(true)
 
     bus.destroy()
   })
@@ -120,6 +123,87 @@ describe('MediaTimeBus.attachVideo', () => {
 
     expect(bus.getState().isPlaying).toBe(false)
     expect(rafCallbacks.length).toBe(0)
+    bus.destroy()
+  })
+})
+
+describe('MediaTimeBus 普通 observer 节流（约 5~10Hz）', () => {
+  it('loop 每帧只喂 RAF observer；普通 observer 至少间隔 150ms 才收到一次', () => {
+    const bus = createMediaTimeBus()
+    const video = createMockVideo({ currentTime: 0, paused: false })
+    const seen: Array<number> = []
+    bus.subscribe((time) => seen.push(time))
+    const rafSeen: Array<number> = []
+    bus.subscribeRAF((time) => rafSeen.push(time))
+
+    bus.attachVideo(video as unknown as HTMLVideoElement)
+    // attach 自举 1 条（不受节流）；loop 首帧同步执行时普通通知被节流跳过，RAF 首帧拿到 0
+    expect(seen).toEqual([0])
+    expect(rafSeen).toEqual([0])
+
+    // 帧1：+200ms → 普通 observer 收到（200 - 0 >= 150）
+    advanceNow(200)
+    video.currentTime = 0.5
+    runRafFrame()
+    expect(rafSeen).toEqual([0, 0.5])
+    expect(seen).toEqual([0, 0.5])
+
+    // 帧2：+50ms（距上次 200ms 通知仅 50ms）→ 普通 observer 跳过，RAF 每帧仍收到
+    advanceNow(50)
+    video.currentTime = 0.6
+    runRafFrame()
+    expect(rafSeen).toEqual([0, 0.5, 0.6])
+    expect(seen).toEqual([0, 0.5])
+
+    // 帧3：再 +100ms（距上次通知共 150ms）→ 普通 observer 收到
+    advanceNow(100)
+    video.currentTime = 0.7
+    runRafFrame()
+    expect(rafSeen).toEqual([0, 0.5, 0.6, 0.7])
+    expect(seen).toEqual([0, 0.5, 0.7])
+
+    bus.destroy()
+  })
+
+  it('subscribeRAF 是唯一每帧高频通道：连续驱动多帧每帧都通知', () => {
+    const bus = createMediaTimeBus()
+    const video = createMockVideo({ currentTime: 10, paused: false })
+    const rafSeen: Array<number> = []
+    bus.subscribeRAF((time) => rafSeen.push(time))
+    // 不订阅普通 observer，验证 RAF 通道独立每帧触发
+
+    bus.attachVideo(video as unknown as HTMLVideoElement)
+    expect(rafSeen).toEqual([10]) // loop 首帧
+
+    for (let i = 1; i <= 3; i++) {
+      advanceNow(16)
+      video.currentTime = 10 + i * 0.2
+      runRafFrame()
+    }
+    expect(rafSeen).toEqual([10, 10.2, 10.4, 10.6])
+
+    bus.destroy()
+  })
+
+  it('事件驱动通知（seeked 等）不受节流限制，窗口内仍立即通知', () => {
+    const bus = createMediaTimeBus()
+    const video = createMockVideo({ currentTime: 30, paused: false })
+    const seen: Array<number> = []
+    bus.subscribe((time) => seen.push(time))
+
+    bus.attachVideo(video as unknown as HTMLVideoElement)
+    expect(seen).toEqual([30])
+
+    // 距上次通知仅 50ms（< 150ms）：loop 不通知普通 observer，但 seeked 事件必须立即通知
+    advanceNow(50)
+    video.currentTime = 5
+    video.dispatch('seeked')
+    expect(seen).toEqual([30, 5])
+
+    // 事件驱动的 notify 同时刷新节流窗口：随后 loop 首帧不再重复通知同值
+    runRafFrame()
+    expect(seen).toEqual([30, 5])
+
     bus.destroy()
   })
 })

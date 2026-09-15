@@ -19,6 +19,11 @@ export class MediaTimeBus {
   private animationFrameId: number | null = null
   private isSeeking: boolean = false
 
+  // 普通 observer 通知节流：最近一次 notify 时间戳（ms）。
+  // 时间推进通知降至约 5~10Hz（100~200ms 间隔），高频（逐帧）通道只保留 subscribeRAF。
+  private lastNotifyTime = 0
+  private readonly notifyThrottleMs = 150
+
   // 手动时钟模式（mpv 引擎）：不绑定 <video>，由外部事件同步锚点，
   // RAF 循环按 wall-clock + 播放速率外推，保证弹幕动画平滑
   private manualMode: boolean = false
@@ -185,10 +190,24 @@ export class MediaTimeBus {
     return () => this.rafObservers.delete(observer)
   }
 
+  /**
+   * 立即通知所有普通 observer（事件驱动 / attach 自举 / 手动 sync 使用）。
+   * 调用即刷新节流窗口，避免紧随的 loop 首帧重复通知同值。
+   */
   private notify(): void {
+    this.lastNotifyTime = performance.now()
     this.observers.forEach((observer) => {
       observer(this.state.currentTime, { ...this.state })
     })
+  }
+
+  /** loop 内节流通知：距上次 notify 超过阈值才通知普通 observer（约 5~10Hz）；RAF observer 不受限 */
+  private notifyThrottled(): void {
+    const now = performance.now()
+    if (now - this.lastNotifyTime >= this.notifyThrottleMs) {
+      this.lastNotifyTime = now
+      this.notify()
+    }
   }
 
   private start(): void {
@@ -221,7 +240,8 @@ export class MediaTimeBus {
       this.rafObservers.forEach((observer) => {
         observer(this.state.currentTime, this.state.playbackRate)
       })
-      this.notify()
+      // 普通观察者（UI 更新）节流：约 5~10Hz，避免每帧 notify 推高渲染
+      this.notifyThrottled()
 
       this.animationFrameId = requestAnimationFrame(this.loop)
       return
@@ -245,8 +265,8 @@ export class MediaTimeBus {
       observer(this.state.currentTime, this.state.playbackRate)
     })
 
-    // 常规观察者（UI 更新，由 store 层节流）
-    this.notify()
+    // 常规观察者（UI 更新）节流：约 5~10Hz，避免每帧 notify 推高渲染
+    this.notifyThrottled()
 
     this.animationFrameId = requestAnimationFrame(this.loop)
   }
