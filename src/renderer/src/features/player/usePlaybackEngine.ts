@@ -4,6 +4,7 @@ import { usePlayerStore } from '../../utils/playerStore'
 import type { DanmakuEngine } from '../../utils/danmakuEngine'
 import { parseVTT, type SubtitleCue, type SubtitleTrack } from '../../player'
 import { createPlaybackEngine, type EngineMode, type PlaybackEngine, type PlaybackEvent } from './engines'
+import { resolveEngineMode } from './engines/select'
 
 export type { EngineMode } from './engines'
 
@@ -62,6 +63,8 @@ export function usePlaybackEngine(options: {
 
   const [engineMode, setEngineMode] = useState<EngineMode>('html5')
   const engineModeRef = useRef<EngineMode>('html5')
+  // 引擎探测是否完成（完成前不得把视频源交给引擎，避免用未定型的 html5 抢跑）
+  const [engineReady, setEngineReady] = useState(false)
   const [mpvAvailable, setMpvAvailable] = useState(false)
   // mpv 已实际出画（file-loaded 后主进程揭示渲染窗口）；此期间视频区域必须切透明
   const [mpvActive, setMpvActive] = useState(false)
@@ -102,21 +105,21 @@ export function usePlaybackEngine(options: {
           hdrToneMapping: savedPlayer?.hdrToneMapping === true
         }
         const pref = savedPlayer?.engine
-        let engine: EngineMode = 'html5'
-        if (pref === 'mpv-canvas') {
-          engine = canvasAvail ? 'mpv-canvas' : avail ? 'mpv' : 'html5'
-        } else if (pref === 'mpv') {
-          engine = avail ? 'mpv' : canvasAvail ? 'mpv-canvas' : 'html5'
-        } else {
-          engine = canvasAvail ? 'mpv-canvas' : avail ? 'mpv' : 'html5'
-        }
+        // 选择逻辑收敛为纯函数：显式 html5 偏好优先；默认 canvas > mpv > html5；不可用自动降级
+        const engine = resolveEngineMode(pref, avail, canvasAvail)
         if ((pref === 'mpv-canvas' && !canvasAvail) || (pref === 'mpv' && !avail)) {
           console.warn(`[Player] 偏好引擎 ${pref} 不可用，降级为 ${engine}`)
         }
         console.log(`[Player] 播放引擎就绪: ${engine}（偏好=${pref ?? '默认'}, mpv可用=${avail}, 画布可用=${canvasAvail}, 硬解=${mpvRenderOptsRef.current.hardwareDecode}）`)
         engineModeRef.current = engine
         setEngineMode(engine)
-      } catch { /* 默认 html5 */ }
+        setEngineReady(true)
+      } catch {
+        // 探测失败（IPC 不可用/超时）：兜底 html5，仍允许正常播放
+        engineModeRef.current = 'html5'
+        setEngineMode('html5')
+        setEngineReady(true)
+      }
     }
     void initEngine()
     return () => { cancelled = true }
@@ -331,9 +334,10 @@ export function usePlaybackEngine(options: {
 
   // 视频源解析 effect：本地文件 / Jellyfin 播放地址 → startPlayback
   useEffect(() => {
-    // 修复 R-S5: 切集/切源竞态保护，旧请求完成时若已取消则不再调用 startPlayback
     let cancelled = false
     playerActions.setLoading(true); playerActions.setError('')
+    // 引擎探测未完成时挂起加载：探测完成后 engineReady 变化会重跑本 effect，用定型引擎加载
+    if (!engineReady) return () => { cancelled = true }
     if (localFile) {
       window.api.file.getLocalFileUrl(localFile).then((result) => {
         if (cancelled) return
@@ -361,8 +365,8 @@ export function usePlaybackEngine(options: {
       playerActions.setError('获取播放地址失败'); playerActions.setLoading(false)
     }).catch((err) => { if (cancelled) return; playerActions.setError(`获取播放地址失败: ${String(err)}`); playerActions.setLoading(false) })
     return () => { cancelled = true }
-  // videoLoadKey：切集递增后重新加载；engineMode：引擎初始化完成/切换后重新加载
-  }, [itemId, localFile, videoLoadKey, engineMode, startPlayback, playerActions])
+  // videoLoadKey：切集递增后重新加载；engineMode：引擎初始化完成/切换后重新加载；engineReady：探测完成后才放行加载
+  }, [itemId, localFile, videoLoadKey, engineMode, engineReady, startPlayback, playerActions])
 
   // 时间总线：mpv 家族手动时钟（事件锚点 + RAF 外推）；HTML5 直接 attach <video>
   // （数据管道适配：不属于引擎控制细节，保留双路径以维持原有性能特征与缓冲计算）

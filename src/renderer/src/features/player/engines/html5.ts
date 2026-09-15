@@ -5,67 +5,94 @@ import type { MediaSource, PlaybackEngine, PlaybackEvent, PlaybackEventHandler }
  * 事件归一化：DOM 事件 + rAF 帧时钟 → 统一 PlaybackEvent。
  * - 'frame' 每帧发射（弹幕引擎 / 竖屏模糊背景消费）
  * - 'time' 节流发射（约 5Hz，驱动 store 节流更新，不带动整页重绘）
+ *
+ * 修复点：
+ * - 不缓存 null ref：constructor 时 ref 未挂载也合法，load() 时再解析真实 DOM ref 并延迟绑定事件/rAF
+ * - setVolume 按 DOM 0~100 语义 clamp（写 volume=1.0 上限），杜绝 150 → 1.5 越界
+ * - muted 时归一化 volume 事件恒为 0（volumechange 与 toggleMute 双路对齐）
+ * - load() 后自动 play（浏览器手势策略由 play() 内部 catch 忽略拒绝）
  */
 export class Html5PlaybackEngine implements PlaybackEngine {
-  private readonly video: HTMLVideoElement | null
   private readonly listeners = new Set<PlaybackEventHandler>()
   private rafId = 0
   private disposed = false
   private lastTimeEmit = 0
   private frameCount = 0
+  /** 已绑定事件/rAF 的真实 <video> 元素（ref 挂载后第一次访问时绑定） */
+  private boundVideo: HTMLVideoElement | null = null
 
   constructor(private readonly videoRef: React.RefObject<HTMLVideoElement | null>) {
-    this.video = videoRef.current
-    if (!this.video) return
-    this.video.addEventListener('loadedmetadata', this.onLoadedMetadata)
-    this.video.addEventListener('waiting', this.onWaiting)
-    this.video.addEventListener('canplay', this.onCanPlay)
-    this.video.addEventListener('error', this.onError)
-    this.video.addEventListener('volumechange', this.onVolumeChange)
-    this.video.addEventListener('ratechange', this.onRateChange)
-    this.video.addEventListener('play', this.onPlay)
-    this.video.addEventListener('pause', this.onPause)
-    this.video.addEventListener('seeked', this.onSeeked)
+    const video = this.videoRef.current
+    if (video) this.bind(video)
+  }
+
+  /** 解析当前真实 <video>；首次访问且未绑定时补绑定（ref 延迟挂载场景） */
+  private getVideo(): HTMLVideoElement | null {
+    if (this.disposed) return null
+    const video = this.videoRef.current
+    if (video && this.boundVideo !== video) this.bind(video)
+    return video
+  }
+
+  private bind(video: HTMLVideoElement): void {
+    if (this.boundVideo === video) return
+    this.boundVideo = video
+    video.addEventListener('loadedmetadata', this.onLoadedMetadata)
+    video.addEventListener('waiting', this.onWaiting)
+    video.addEventListener('canplay', this.onCanPlay)
+    video.addEventListener('error', this.onError)
+    video.addEventListener('volumechange', this.onVolumeChange)
+    video.addEventListener('ratechange', this.onRateChange)
+    video.addEventListener('play', this.onPlay)
+    video.addEventListener('pause', this.onPause)
+    video.addEventListener('seeked', this.onSeeked)
     this.rafId = requestAnimationFrame(this.onFrame)
   }
 
   async load(source: MediaSource): Promise<void> {
-    const video = this.video
+    if (this.disposed) return
+    const video = this.getVideo()
     if (!video) return
     const oldTracks = video.querySelectorAll('track')
     oldTracks.forEach(t => t.remove())
     video.src = source.url
     video.load()
+    // HTML5 引擎 loaded 后自播放（原 Player 行为）：浏览器 autoplay 策略拒绝时静默忽略
+    void this.play()
   }
 
   async play(): Promise<void> {
     try {
-      await this.video?.play()
+      await this.getVideo()?.play()
     } catch { /* 用户手势外的 play 拒绝，忽略 */ }
   }
 
   async pause(): Promise<void> {
-    this.video?.pause()
+    this.getVideo()?.pause()
   }
 
   async seek(seconds: number): Promise<void> {
-    if (this.video) this.video.currentTime = Math.max(0, seconds)
+    const video = this.getVideo()
+    if (video) video.currentTime = Math.max(0, seconds)
   }
 
   async setVolume(volume: number): Promise<void> {
-    if (!this.video) return
-    const v = Math.max(0, Math.min(150, Math.round(volume)))
-    this.video.volume = v / 100
-    this.video.muted = v === 0
+    const video = this.getVideo()
+    if (!video) return
+    // DOM <video> 音量语义为 0~100（volume 属性 0~1），与 mpv 的 150 上限不同，此处 clamp 到 100
+    const v = Math.max(0, Math.min(100, Math.round(volume)))
+    video.volume = v / 100
+    video.muted = v === 0
   }
 
   async setSpeed(speed: number): Promise<void> {
-    if (this.video) this.video.playbackRate = speed
+    const video = this.getVideo()
+    if (video) video.playbackRate = speed
   }
 
   /** 静音切换：muted 变化触发 volumechange → 归一化 volume 事件回 UI */
   toggleMute(): void {
-    const video = this.video
+    const video = this.getVideo()
     if (!video) return
     video.muted = !video.muted
     this.emit({ type: 'volume', volume: video.muted ? 0 : Math.round(video.volume * 100) })
@@ -85,7 +112,7 @@ export class Html5PlaybackEngine implements PlaybackEngine {
   async dispose(): Promise<void> {
     this.disposed = true
     cancelAnimationFrame(this.rafId)
-    const video = this.video
+    const video = this.boundVideo
     if (video) {
       video.removeEventListener('loadedmetadata', this.onLoadedMetadata)
       video.removeEventListener('waiting', this.onWaiting)
@@ -99,6 +126,7 @@ export class Html5PlaybackEngine implements PlaybackEngine {
       video.src = ''
       video.load()
     }
+    this.boundVideo = null
     this.listeners.clear()
   }
 
@@ -109,7 +137,7 @@ export class Html5PlaybackEngine implements PlaybackEngine {
 
   private onFrame = (): void => {
     if (this.disposed) return
-    const video = this.video
+    const video = this.getVideo()
     if (video) {
       const t = video.currentTime || 0
       this.frameCount++
@@ -130,7 +158,7 @@ export class Html5PlaybackEngine implements PlaybackEngine {
   }
 
   private onLoadedMetadata = (): void => {
-    const video = this.video
+    const video = this.getVideo()
     if (!video) return
     this.emit({ type: 'duration', duration: video.duration || 0 })
     this.emit({ type: 'loaded', active: false })
@@ -142,22 +170,22 @@ export class Html5PlaybackEngine implements PlaybackEngine {
   private onPause = (): void => this.emit({ type: 'pause' })
 
   private onSeeked = (): void => {
-    const video = this.video
+    const video = this.getVideo()
     if (video) this.emit({ type: 'seeked', currentTime: video.currentTime || 0 })
   }
 
   private onVolumeChange = (): void => {
-    const video = this.video
-    if (video) this.emit({ type: 'volume', volume: Math.round(video.volume * 100) })
+    const video = this.getVideo()
+    if (video) this.emit({ type: 'volume', volume: video.muted ? 0 : Math.round(video.volume * 100) })
   }
 
   private onRateChange = (): void => {
-    const video = this.video
+    const video = this.getVideo()
     if (video) this.emit({ type: 'speed', speed: video.playbackRate })
   }
 
   private onError = (): void => {
-    const video = this.video
+    const video = this.getVideo()
     const message = (() => {
       switch (video?.error?.code) {
         case 1: return '视频加载中止'
