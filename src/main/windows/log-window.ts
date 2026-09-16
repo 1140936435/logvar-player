@@ -63,7 +63,8 @@ export class LogWindowController {
       webPreferences: {
         // 日志窗口只需要 onLogEntry/onLogHistory，用极小的专用 preload，
         // 避免把播放器/文件/服务器等高权限 IPC 面暴露给它
-        preload: join(__dirname, '../../preload/log-preload.js'),
+        // out/main/main.js 与 out/preload/log-preload.js 同级目录结构：上一级即 out/
+        preload: join(__dirname, '../preload/log-preload.js'),
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true
@@ -71,7 +72,8 @@ export class LogWindowController {
     })
     this.window = win
 
-    win.loadFile(join(__dirname, '../log-window.html'))
+    // log-window.html 与 main.js 同处 out/main/，直接同级引用
+    win.loadFile(join(__dirname, 'log-window.html'))
 
     win.on('ready-to-show', () => {
       win.show()

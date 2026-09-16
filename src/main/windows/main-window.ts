@@ -68,7 +68,8 @@ export class MainWindowController {
       frame: false,
       hasShadow: false,
       webPreferences: {
-        preload: join(__dirname, '../../preload/preload.js'),
+        // out/main/main.js 与 out/preload/preload.js 同级目录结构：上一级即 out/
+        preload: join(__dirname, '../preload/preload.js'),
         sandbox: false,
         contextIsolation: true,
         nodeIntegration: false
@@ -144,7 +145,7 @@ export class MainWindowController {
     if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
       win.loadURL(process.env['ELECTRON_RENDERER_URL'])
     } else {
-      win.loadFile(join(__dirname, '../../renderer/index.html'))
+      win.loadFile(join(__dirname, '../renderer/index.html'))
     }
     return win
   }

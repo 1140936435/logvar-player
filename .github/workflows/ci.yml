@@ -28,3 +28,23 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # 打包后 preload/renderer/日志窗口 HTML 的相对路径依赖 out/ 目录结构，
+      # 一旦构建产物缺失或改名，会导致应用启动但无窗口；此处硬校验 5 个关键产物。
+      - name: Verify build artifacts
+        shell: pwsh
+        run: |
+          $files = @(
+            'out/main/main.js',
+            'out/main/log-window.html',
+            'out/preload/preload.js',
+            'out/preload/log-preload.js',
+            'out/renderer/index.html'
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path -Path $file -PathType Leaf)) {
+              throw "Missing artifact: $file"
+            }
+            Write-Host "OK: $file"
+          }
+          Write-Host "All build artifacts verified."
