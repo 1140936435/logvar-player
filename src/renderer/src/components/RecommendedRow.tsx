@@ -17,7 +17,6 @@ interface RecommendedRowProps {
   items: RecommendationItem[]
   hasMore: boolean
   isLoading: boolean
-  isColdStart: boolean
   /** 服务器 ID：serverId 格式协议 URL（精确匹配服务器，无 host 冲突） */
   serverId?: string
   serverType: 'jellyfin' | 'emby'
@@ -30,7 +29,6 @@ interface RecommendedRowProps {
 
 // 推荐原因标签映射
 const REASON_LABELS: Record<string, string> = {
-  '新入库影片': '最新',
   '偏好题材': '同题材',
   '偏好导演': '同导演',
   '偏好演员': '同演员',
@@ -235,7 +233,6 @@ export function RecommendedRow({
   items,
   hasMore,
   isLoading,
-  isColdStart,
   serverId,
   serverType,
   connectedServer,
@@ -288,7 +285,7 @@ export function RecommendedRow({
         <div className="flex items-center justify-center py-12 gap-3">
           <Loader2 size={18} className="text-[var(--accent)] animate-spin" />
           <span className="text-[13px] text-[var(--text-tertiary)]">
-            {isColdStart ? '正在为您准备最新入库...' : '正在分析您的观影偏好...'}
+            正在分析您的观影偏好...
           </span>
         </div>
       </section>
@@ -314,8 +311,8 @@ export function RecommendedRow({
               <Sparkles size={16} />
             </motion.div>
           </div>
-          {isColdStart ? '最新入库' : '为您推荐'}
-          {!isColdStart && items.length > 0 && (
+          为您推荐
+          {items.length > 0 && (
             <span className="text-[12px] font-normal text-[var(--text-tertiary)] ml-1">
               ({items.length}+)
             </span>
@@ -423,7 +420,7 @@ export function RecommendedRow({
       </div>
 
       {/* 提示文字 */}
-      {!isColdStart && items.length > 0 && (
+      {items.length > 0 && (
         <p className="text-[11px] text-[var(--text-quaternary)] mt-2 flex items-center gap-1">
           <Sparkles size={10} />
           根据您的观影历史智能推荐 · 右键卡片可调整偏好

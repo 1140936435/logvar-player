@@ -422,38 +422,6 @@ function isPreferenceMatched(
 }
 
 /**
- * 冷启动处理：获取最新入库影片
- */
-export function getColdStartRecommendations(
-  allItems: JellyfinItem[],
-  limit: number = 20
-): RecommendationItem[] {
-  // 按添加时间排序，取最新入库
-  const sorted = [...allItems]
-    .filter(item => item.Type === 'Movie' || item.Type === 'Series')
-    .sort((a, b) => {
-      const yearA = a.ProductionYear || 0
-      const yearB = b.ProductionYear || 0
-      return yearB - yearA // 年份倒序
-    })
-    .slice(0, limit)
-
-  return sorted.map((item, index) => ({
-    itemId: item.Id,
-    name: item.Name,
-    type: item.Type as 'Movie' | 'Series',
-    score: 1.0 - (index * 0.05), // 逐渐降低的基础分
-    reasons: ['新入库影片'],
-    posterUrl: item.ImageTags?.PrimaryImageTag,
-    productionYear: item.ProductionYear,
-    genres: item.Genres,
-    actors: item.People?.filter(p => p.Type === 'Actor').map(p => p.Name),
-    directors: item.People?.filter(p => p.Type === 'Director').map(p => p.Name),
-    seriesName: item.SeriesName
-  }))
-}
-
-/**
  * 生成每日更新时间戳
  */
 export function shouldUpdateToday(lastUpdate: number): boolean {

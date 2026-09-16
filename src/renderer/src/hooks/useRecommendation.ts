@@ -16,7 +16,6 @@ import {
   buildPreferenceWeights,
   calculateItemScore,
   layeredSort,
-  getColdStartRecommendations,
   shouldUpdateToday,
   addDislikedItem,
   getActiveDislikedItems,
@@ -132,12 +131,9 @@ export function useRecommendation(
       setIsColdStart(isCold)
 
       if (isCold) {
-        // 冷启动：展示最新入库影片
-        const allItems = await getAllLibraryItems()
-        const coldStartRecs = getColdStartRecommendations(allItems, DEFAULT_CONFIG.maxItems)
-        setRecommendations(coldStartRecs)
-        setDisplayedCount(Math.min(DEFAULT_CONFIG.itemsPerPage, coldStartRecs.length))
-        generatedRef.current = true
+        // 冷启动：首页不再展示“最新入库”区块（推荐行整体隐藏），无需生成推荐数据
+        setRecommendations([])
+        setDisplayedCount(0)
         return
       }
 

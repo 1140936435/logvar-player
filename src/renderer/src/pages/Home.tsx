@@ -1318,12 +1318,11 @@ function Home(): ReactElement {
         )}
 
         {/* 智能推荐 */}
-        {!isSearching && !activeLibrary && drillStack.length === 0 && (
+        {!isSearching && !activeLibrary && drillStack.length === 0 && !isColdStart && (
           <RecommendedRow
             items={recommendations}
             hasMore={hasMore}
             isLoading={recommendationLoading}
-            isColdStart={isColdStart}
             serverId={activeServerId || undefined}
             serverType={serverType}
             connectedServer={connectedServer}
