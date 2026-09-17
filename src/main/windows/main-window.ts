@@ -67,6 +67,13 @@ export class MainWindowController {
       transparent: true,
       frame: false,
       hasShadow: false,
+      // 透明底（alpha=0）：必须为 '#00000000'。严禁改成不透明 '#000000'，
+      // 否则会盖住 mpv native 打孔层，mpv 模式整屏黑屏。
+      // 与 html/body 的 background: transparent 配合，圆角由 CSS 决定。
+      backgroundColor: '#00000000',
+      // 关闭 Windows DWM 原生圆角（Win11 默认裁剪），窗口圆角完全交给 CSS：
+      // 普通窗口 #root 12px，全屏 body.app-fullscreen 归零
+      roundedCorners: false,
       webPreferences: {
         // out/main/main.js 与 out/preload/preload.js 同级目录结构：上一级即 out/
         preload: join(__dirname, '../preload/preload.js'),

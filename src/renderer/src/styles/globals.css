@@ -151,7 +151,14 @@ html {
   background: transparent;
 }
 
-/* ── 播放页窗口级全屏：隐藏顶栏，主内容占满窗口（透明度保持，打孔自动对齐） ── */
+/* ── 播放页窗口级全屏：去掉窗口圆角 + 隐藏顶栏，主内容占满窗口（透明度保持，打孔自动对齐） ──
+   普通窗口保持 #root 的 12px 圆角；全屏时圆角必须归零，否则四角会透出桌面/白底。
+   圆角统一由 CSS 控制（主窗口已关 roundedCorners，DWM 不再二次裁剪）。 */
+body.app-fullscreen #root,
+body.app-fullscreen .app-shell {
+  border-radius: 0 !important;
+}
+
 body.app-fullscreen .app-shell > header {
   display: none;
 }
