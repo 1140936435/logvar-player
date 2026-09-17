@@ -1,5 +1,6 @@
 // 修复点 1.15: utils 目录下深一层
 import type { DanmakuComment, DanmakuMatchMeta, DanmakuMatchCandidate } from '../../../shared/types'
+import type { DanmakuMatchV2Response, DanmakuCommentsResponse } from '../../../shared/preload-types'
 
 interface MatchResult {
   episodeId: number
@@ -27,13 +28,22 @@ interface CommentsCacheEntry {
 
 const MATCH_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
 const COMMENTS_CACHE_TTL = 30 * 24 * 60 * 60 * 1000
-const REQUEST_TIMEOUT = 15000
-// 弹幕内容接口专用：自建 LogVar API 单次响应实测 ~10s（1.6MB，Tailscale 链路），
-// 主进程 dandanRequest 内置重试（2 次 × 25s + 退避 ≈ 50.3s 最坏），
-// 渲染端单次超时需覆盖主进程最坏情况，且不再叠加渲染端重试
-const COMMENTS_REQUEST_TIMEOUT = 55000
-// 修复点 3.2: 指数退避重试
+// 主进程 dandanRequest 现为「单次 15s + 1 次指数退避重试」= 最坏约 30.6s，
+// 渲染端单次超时必须覆盖该最坏值：原 15s 会先于主进程结果触发超时，
+// 把服务端只是慢、但本可成功的响应直接丢掉（日志表现为 Request timeout）
+// 45s 取值依据：主进程一次匹配最坏链路 = hash 层 10s + metadata 搜索层 30.6s
+const REQUEST_TIMEOUT = 45000
+// 本地 XML 探测是纯文件系统操作，用较短超时，不与远程请求共用长阈值
+const LOCAL_XML_TIMEOUT = 10000
+// 弹幕内容接口专用：自建 LogVar API 单次响应实测最慢 ~7s（1.6MB），
+// 主进程最坏 ≈ 30.6s（15s × 2 次尝试 + 退避），渲染端单次超时覆盖之，
+// 且不叠加渲染端重试 —— 双重重试会叠加成最多 6 个请求并拉长失败反馈
+const COMMENTS_REQUEST_TIMEOUT = 40000
+// 修复点 3.2: 指数退避重试（用于匹配/list 等短请求的 IPC 层瞬时异常）
 const MAX_RETRIES = 2
+// 匹配请求在渲染端不再叠加重试（0）：主进程 dandanRequest 已做指数退避有限重试，
+// 渲染端再重试会把同一集打成最多 6 次请求并拉长失败反馈；渲染端只负责"等得够久"
+const MATCH_MAX_RETRIES = 0
 const RETRY_BASE_DELAY = 600
 
 export class DanmakuRequestManager {
@@ -43,6 +53,12 @@ export class DanmakuRequestManager {
   // 修复点 2.2 / 2.7: 用递增的"请求代次"替代 token，每次 cancel/重新加载都会递增。
   // 所有异步 await 返回后都必须比对当前代次，失效则直接丢弃结果，绝不写入 UI/缓存。
   private requestEpoch = 0
+
+  // 单飞（in-flight 去重）：同一 cacheKey 的并发请求复用同一个进行中的 IPC Promise。
+  // 背景：切集 / 元数据就绪 / epoch 变更会连续触发多次 loadDanmaku，
+  // 每次都会发出内容相同的 match-episode IPC，在服务端冷缓存时互相拖慢。
+  private matchInFlight = new Map<string, Promise<DanmakuMatchV2Response>>()
+  private commentsInFlight = new Map<string, Promise<DanmakuCommentsResponse>>()
 
   private nextEpoch(): number {
     this.requestEpoch += 1
@@ -100,6 +116,40 @@ export class DanmakuRequestManager {
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
   }
 
+  // 匹配请求单飞：同一集（同一 cacheKey）并发时复用同一个进行中的 IPC Promise，
+  // 避免同一 matchEpisode 在短时间内重复打到主进程/弹幕服务
+  private fetchMatchOnce(meta: DanmakuMatchMeta, cacheKey: string): Promise<DanmakuMatchV2Response> {
+    const existing = this.matchInFlight.get(cacheKey)
+    if (existing) {
+      console.log(`[DanmakuRequestManager:matchEpisode] 复用进行中的匹配请求（单飞去重）: ${cacheKey}`)
+      return existing
+    }
+    const task = window.api.danmaku.matchEpisode(meta)
+    this.matchInFlight.set(cacheKey, task)
+    const cleanup = (): void => {
+      if (this.matchInFlight.get(cacheKey) === task) this.matchInFlight.delete(cacheKey)
+    }
+    // then(onFulfilled, onRejected) 形式：失败也走清理，且不产生未捕获拒绝
+    task.then(cleanup, cleanup)
+    return task
+  }
+
+  // 弹幕内容请求单飞：同一 episodeId+source 并发时复用同一个进行中的 IPC Promise
+  private fetchCommentsOnce(episodeId: string, source: string | undefined, cacheKey: string): Promise<DanmakuCommentsResponse> {
+    const existing = this.commentsInFlight.get(cacheKey)
+    if (existing) {
+      console.log(`[DanmakuRequestManager:getComments] 复用进行中的请求（单飞去重）: ${cacheKey}`)
+      return existing
+    }
+    const task = window.api.danmaku.getComments(episodeId, source)
+    this.commentsInFlight.set(cacheKey, task)
+    const cleanup = (): void => {
+      if (this.commentsInFlight.get(cacheKey) === task) this.commentsInFlight.delete(cacheKey)
+    }
+    task.then(cleanup, cleanup)
+    return task
+  }
+
   // 结构化元数据 cacheKey：mediaSourceId + seriesId + season + episode + filePath（一集一条，杜绝串集）
   // 本地文件无 seriesName/indexNumber，恒为 S0E0，必须追加 filePath 才能按文件隔离
   private metaCacheKey(meta: DanmakuMatchMeta): string {
@@ -134,14 +184,11 @@ export class DanmakuRequestManager {
     }
 
     try {
+      const opName = `danmaku:match-episode(${meta.seriesName} S${meta.parentIndexNumber ?? '?'}E${meta.indexNumber ?? '?'})`
       const resp = await this.withRetry(() => {
         if (!this.isEpochValid(safeEpoch)) return Promise.reject(new Error('cancelled'))
-        return this.withTimeout(
-          window.api.danmaku.matchEpisode(meta),
-          REQUEST_TIMEOUT,
-          `danmaku:match-episode(${meta.seriesName} S${meta.parentIndexNumber ?? '?'}E${meta.indexNumber ?? '?'})`
-        )
-      }, `matchEpisode:${cacheKey}`)
+        return this.withTimeout(this.fetchMatchOnce(meta, cacheKey), REQUEST_TIMEOUT, opName)
+      }, `matchEpisode:${cacheKey}`, MATCH_MAX_RETRIES)
 
       if (!this.isEpochValid(safeEpoch)) {
         console.log(`[DanmakuRequestManager:matchEpisode] ❌ 结果已过期（用户切集/取消），丢弃`)
@@ -170,7 +217,9 @@ export class DanmakuRequestManager {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err)
       if (errMsg === 'cancelled') return { result: null }
-      console.error(`[DanmakuRequestManager:matchEpisode] 异常: ${errMsg}`)
+      // 匹配失败只记录一条清晰日志（含总耗时），不抛给播放链路：
+      // 上层 loadDanmaku 会降级为「无弹幕/候选手动选择」，不影响视频播放
+      console.error(`[DanmakuRequestManager:matchEpisode] ❌ 匹配失败（耗时 ${Date.now() - startTime}ms，已降级为无弹幕，不影响播放）: ${errMsg}`)
       return { result: null }
     }
   }
@@ -193,10 +242,10 @@ export class DanmakuRequestManager {
     }
 
     try {
-      // 单次长超时（55s），不叠加渲染端重试 —— 主进程 dandanRequest 已内置
-      // 重试（2 次 × 25s），双重重试会叠加成最多 6 个请求且拉长失败反馈
+      // 单次长超时（40s，覆盖主进程 15s×2 + 退避的最坏情况），不叠加渲染端重试 ——
+      // 主进程 dandanRequest 已内置指数退避重试，双重重试会叠加成最多 6 个请求并拉长失败反馈
       const result = await this.withTimeout(
-        window.api.danmaku.getComments(episodeId, source),
+        this.fetchCommentsOnce(episodeId, source, cacheKey),
         COMMENTS_REQUEST_TIMEOUT,
         `danmaku:getComments(${episodeId})`
       )
@@ -257,7 +306,7 @@ export class DanmakuRequestManager {
       try {
         const xmlResult = await this.withTimeout(
           window.api.danmaku.findLocalXml(localFile),
-          REQUEST_TIMEOUT,
+          LOCAL_XML_TIMEOUT,
           `danmaku:findLocalXml`
         )
         if (!this.isEpochValid(epoch)) return null
@@ -335,12 +384,12 @@ export class DanmakuRequestManager {
   // 弹幕搜索（带超时，避免主进程请求挂起时 UI 无限转圈）
   // 注意：search 是独立的查询操作，不递增 epoch —— 否则会静默取消正在进行的弹幕加载，
   // 导致加载停摆且 UI 无提示（用户只是打开搜索面板，并不想取消当前加载）
-  // 超时 22s：覆盖主进程 search 重试最坏情况（2 × 10s + 退避），不叠加渲染端重试
+  // 超时 35s：覆盖主进程 search 重试最坏情况（15s × 2 + 退避 ≈ 30.6s），不叠加渲染端重试
   async search(keyword: string): Promise<{ success: boolean; data?: unknown; error?: string }> {
     try {
       return await this.withTimeout(
         window.api.danmaku.search(keyword),
-        22000,
+        REQUEST_TIMEOUT,
         `danmaku:search("${keyword}")`
       )
     } catch (err) {

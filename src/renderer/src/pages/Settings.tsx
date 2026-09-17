@@ -991,6 +991,17 @@ function Settings(): ReactElement {
     </>
   )
 
+  // 自建 / 第三方弹幕源（非 dandanplay 官方域）通常不需要 App-ID，
+  // 用于把「appId=missing」的正确含义告诉用户，避免误以为配置有故障
+  const isSelfHostedDanmaku = (() => {
+    try {
+      const host = new URL(danmakuPrimary.trim() || 'https://api.dandanplay.net').hostname.toLowerCase()
+      return !(host === 'dandanplay.net' || host.endsWith('.dandanplay.net'))
+    } catch {
+      return false
+    }
+  })()
+
   const renderDanmakuModule = () => (
     <>
       <div className="space-y-5">
@@ -1040,7 +1051,9 @@ function Settings(): ReactElement {
 
         <div className="px-4 py-3 rounded-[var(--radius-md)] bg-[var(--bg-elevated)]">
           <p className="text-[12px] text-[var(--text-tertiary)] mb-3">
-            DandanPlay API 需要认证。前往 <span className="text-[var(--accent)]">api.dandanplay.net/registerApp</span> 免费注册获取 App-ID 和 App-Secret。
+            {isSelfHostedDanmaku
+              ? '当前是自建 / 第三方弹幕源：App-ID 与 App-Secret 通常可留空（以你所部署服务的要求为准），留空不影响匹配；只有服务端要求鉴权时才需填写。'
+              : <>DandanPlay API 需要认证。前往 <span className="text-[var(--accent)]">api.dandanplay.net/registerApp</span> 免费注册获取 App-ID 和 App-Secret。</>}
           </p>
           <Field label="App-ID">
             <input
