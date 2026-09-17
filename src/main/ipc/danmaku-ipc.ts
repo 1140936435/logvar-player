@@ -15,6 +15,14 @@ import type {
   DanmakuMatchLevel
 } from '../../shared/types'
 import { maskSecret, resolveAppSecretInput } from '../lib/security'
+import {
+  DANMAKU_HASH_TIMEOUT_MS,
+  DANMAKU_MAX_RETRIES,
+  DANMAKU_TIMEOUT_MS,
+  computeRetryDelayMs,
+  isRetryableError,
+  normalizeMirrorList
+} from '../lib/danmaku-retry'
 import { registerIpc } from './secure-handle'
 
 export interface DanmakuIpcHost {
@@ -67,13 +75,15 @@ export function registerDanmakuIpc(host: DanmakuIpcHost): void {
 
 function getDanmakuApiConfig(): { primary: string; mirrors: string[]; appId: string; appSecret: string } {
   const storePrimary = danmakuCfg()['danmaku:api-primary'] as string | undefined
-  const storeMirrors = danmakuCfg()['danmaku:api-mirrors'] as string[] | undefined
+  const storeMirrors = danmakuCfg()['danmaku:api-mirrors']
   const storeAppId = danmakuCfg()['danmaku:app-id'] as string | undefined
   const storeAppSecret = danmakuCfg()['danmaku:app-secret'] as string | undefined
 
   return {
     primary: storePrimary || 'https://api.dandanplay.net',
-    mirrors: (storeMirrors && storeMirrors.length > 0) ? storeMirrors : [],
+    // 归一化：兼容 string[] 与「每行一个」的字符串写法（设置页 textarea 保存的是数组，
+    // 但历史/手工写入的配置文件可能是字符串），空列表时保持为空 —— 不内置任何默认备用源
+    mirrors: normalizeMirrorList(storeMirrors),
     appId: storeAppId || '',
     appSecret: storeAppSecret || ''
   }
@@ -274,13 +284,33 @@ async function readResponseBody(response: { text(): Promise<string> }): Promise<
   return response.text()
 }
 
-async function dandanRequest<T>(path: string, retries = 1, body?: unknown, timeoutMs = 5000): Promise<T> {
+// 超时 / 重试策略集中定义在 ../lib/danmaku-retry（纯函数，可单测）：
+// 单次 15s（原 5s）、最多 1 次重试、指数退避 600ms 起（原固定 300ms×attempt）。
+// 变更原因：自建弹幕服务冷缓存 / 上游拉取时单次响应实测最慢 ~7s，
+// 5s 超时会丢弃本可成功的响应，进而误报「搜不到弹幕」。
+// appId 缺省时区分「官方源缺配置」与「自建源本就不需要 App-ID」，避免日志被误读成故障
+function describeAppIdState(config: { primary: string; appId: string }): string {
+  if (config.appId) return 'configured'
+  try {
+    const host = new URL(config.primary).hostname.toLowerCase()
+    if (host === 'dandanplay.net' || host.endsWith('.dandanplay.net')) {
+      return 'missing(官方 API 需配置 App-ID)'
+    }
+  } catch {
+    // primary 不是合法 URL：按自建源处理
+  }
+  return 'missing(自建源无需 App-ID)'
+}
+
+async function dandanRequest<T>(path: string, retries = DANMAKU_MAX_RETRIES, body?: unknown, timeoutMs = DANMAKU_TIMEOUT_MS): Promise<T> {
   let lastError: Error | null = null
   const config = getDanmakuApiConfig()
   const allUrls = [config.primary, ...config.mirrors]
 
   const isPost = body !== undefined
-  console.log(`[danmaku] Using primary=${config.primary}, mirrors=${config.mirrors.join(',')}, appId=${config.appId ? 'configured' : 'missing'}, method=${isPost ? 'POST' : 'GET'}, timeoutMs=${timeoutMs}`)
+  const startedAt = Date.now()
+  // 单条摘要日志：不再逐次请求 / 逐个响应体打印，避免慢服务下日志刷屏
+  console.log(`[danmaku] ${isPost ? 'POST' : 'GET'} ${path} | primary=${config.primary} | mirrors=${config.mirrors.length}${config.mirrors.length === 0 ? '(无备用源)' : ''} | appId=${describeAppIdState(config)} | timeout=${timeoutMs}ms | retries=${retries}`)
 
   const authHeaders: Record<string, string> = {
     'Accept': 'application/json',
@@ -294,11 +324,12 @@ async function dandanRequest<T>(path: string, retries = 1, body?: unknown, timeo
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         if (attempt > 0) {
-          console.log(`[danmaku] 重试 ${baseUrl} (第${attempt}次)`)
-          await new Promise(r => setTimeout(r, 300 * attempt))
+          const delay = computeRetryDelayMs(attempt)
+          console.warn(`[danmaku] ${baseUrl} 第 ${attempt}/${retries} 次重试，${delay}ms 后发起`)
+          await new Promise(r => setTimeout(r, delay))
         }
         const url = `${baseUrl}${path}`
-        console.log(`[danmaku] ${isPost ? 'POST' : 'GET'} ${url}`)
+        const reqStart = Date.now()
 
         const fetchOpts: { headers: Record<string, string>; timeoutMs: number; method?: string; body?: string } = {
           headers: authHeaders,
@@ -311,8 +342,6 @@ async function dandanRequest<T>(path: string, retries = 1, body?: unknown, timeo
 
         const response = await nodeFetch(url, fetchOpts)
 
-        console.log(`[danmaku] ${baseUrl} → HTTP ${response.status}, content-type=${response.headers.get('content-type')}`)
-
         if (!response.ok) {
           const bodyText = await readResponseBody(response).catch(() => '')
           const errMsg = response.headers.get('x-error-message') || ''
@@ -321,7 +350,6 @@ async function dandanRequest<T>(path: string, retries = 1, body?: unknown, timeo
           if (response.status === 403 && !config.appId) {
             msg = `DandanPlay API 需要认证 (HTTP 403)。请在设置中配置 App-ID 和 App-Secret（在 https://api.dandanplay.net/registerApp 免费注册）`
           }
-          console.error(`[danmaku] ${msg}`)
           lastError = new Error(msg)
           continue
         }
@@ -330,33 +358,32 @@ async function dandanRequest<T>(path: string, retries = 1, body?: unknown, timeo
         const bodyText = await readResponseBody(response)
 
         if (!contentType.includes('application/json')) {
-          const msg = `DandanPlay ${baseUrl} 返回非 JSON (Content-Type: ${contentType}): ${bodyText.slice(0, 500)}`
-          console.error(`[danmaku] ${msg}`)
-          lastError = new Error(msg)
+          lastError = new Error(`DandanPlay ${baseUrl} 返回非 JSON (Content-Type: ${contentType}): ${bodyText.slice(0, 500)}`)
           continue
         }
 
-        const data = JSON.parse(bodyText) as T
-        console.log(`[danmaku] ${baseUrl} 响应: ${bodyText.slice(0, 400)}`)
-        return data
+        console.log(`[danmaku] ${baseUrl} → HTTP ${response.status}, ${Date.now() - reqStart}ms, ${bodyText.length}B`)
+        return JSON.parse(bodyText) as T
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
-        const isRetryable = errMsg.includes('socket hang up') || errMsg.includes('timeout') || errMsg.includes('ECONNRESET')
-        if (isRetryable && attempt < retries) {
-          console.warn(`[danmaku] ${baseUrl} 可重试错误 (${errMsg})，准备重试...`)
-          continue
-        }
         if (err instanceof SyntaxError) {
           lastError = new Error(`DandanPlay JSON 解析失败: ${String(err)}`)
         } else {
           lastError = err instanceof Error ? err : new Error(String(err))
         }
-        console.error(`[danmaku] ${baseUrl} 错误:`, lastError.message)
+        // 仅对可重试错误（超时 / 连接重置）继续重试，其余直接换下一个源
+        if (isRetryableError(err) && attempt < retries) {
+          console.warn(`[danmaku] ${baseUrl} 可重试错误: ${errMsg}`)
+          continue
+        }
+        console.warn(`[danmaku] ${baseUrl} 请求失败: ${errMsg}`)
         break // 跳出重试循环，尝试下一个 URL
       }
     }
   }
 
+  // 失败汇总只打一条（含总耗时），避免同一失败在多处重复打印刷屏
+  console.error(`[danmaku] ❌ 请求失败: ${path} | 耗时 ${Date.now() - startedAt}ms | 候选源 ${allUrls.length} 个 | 最后错误: ${lastError?.message ?? 'unknown'}`)
   throw lastError || new Error('DandanPlay 所有 API 镜像均不可用')
 }
 
@@ -542,14 +569,11 @@ registerIpc('danmaku:bilibili-comments', async (_event, cid: number) => {
 
 registerIpc('danmaku:search', async (_event, keyword: string) => {
   try {
-    // 预加载系列弹幕期间自建 API 繁忙（每集 comment ~10s），search 默认 5s 会
-    // 超时落入 Bilibili fallback（其结果 episodes 全空，导致 UI 显示"搜不到"），
-    // 放宽到 10s 优先拿到真实搜索结果
+    // 预加载系列弹幕期间自建 API 繁忙（每集 comment 可达数秒），原 5s/10s 超时会
+    // 超时落入 Bilibili fallback（其结果 episodes 全空，导致 UI 显示"搜不到"）。
+    // 统一走 dandanRequest 默认策略：15s 单次 + 指数退避有限重试
     const result = await dandanRequest<DanmakuSearchResponse>(
-      `/api/v2/search/episodes?anime=${encodeURIComponent(keyword)}`,
-      1,
-      undefined,
-      10000
+      `/api/v2/search/episodes?anime=${encodeURIComponent(keyword)}`
     )
     return { success: true, data: result }
   } catch (err) {
@@ -842,10 +866,7 @@ registerIpc('danmaku:get-comments', async (_event, episodeId: string, source?: s
       return { success: true, data: cached }
     }
     const result = await dandanRequest<{ count: number; comments: DanmakuCommentRaw[] }>(
-      `/api/v2/comment/${episodeId}`,
-      1,
-      undefined,
-      25000
+      `/api/v2/comment/${episodeId}`
     )
     // 解析 p 字段为结构化数据
     const parsed = (result.comments || []).map((c: DanmakuCommentRaw) => {
@@ -876,10 +897,7 @@ registerIpc('danmaku:get-segment-comments', async (_event, params: { episodeId: 
   }
   try {
     const result = await dandanRequest<{ count: number; comments: DanmakuCommentRaw[] }>(
-      `/api/v2/comment/${episodeId}`,
-      1,
-      undefined,
-      25000
+      `/api/v2/comment/${episodeId}`
     )
     const parsed = (result.comments || []).map((c: DanmakuCommentRaw) => {
       const parts = c.p.split(',')
@@ -933,10 +951,7 @@ registerIpc('danmaku:prefetch-series', async (_event, animeId: number, currentEp
       }
       try {
         const result = await dandanRequest<{ count: number; comments: DanmakuCommentRaw[] }>(
-          `/api/v2/comment/${ep.episodeId}`,
-          1,
-          undefined,
-          25000
+          `/api/v2/comment/${ep.episodeId}`
         )
         const parsed = (result.comments || []).map((c: DanmakuCommentRaw) => {
           const parts = c.p.split(',')
@@ -1255,14 +1270,16 @@ async function matchEpisodeEngine(meta: DanmakuMatchMeta): Promise<DanmakuMatchR
     if (hashResult) {
       pushLog(`③ hash: ${hashResult.hash}, size=${hashResult.size}`)
       try {
+        // hash 层是快速通道：10s 单次、不重试（失败仍有 metadata 搜索层兜底），
+        // 不继承默认的 15s×2，避免它独自把匹配链路拖长
         const matchResp = await dandanRequest<{
           isMatched: boolean
           matches: Array<{ animeId: number; episodeId: number; animeTitle: string; episodeTitle: string; type: string }>
-        }>('/api/v2/match', 1, {
+        }>('/api/v2/match', 0, {
           fileName: meta.fileName || meta.title || '',
           fileHash: hashResult.hash,
           fileSize: String(hashResult.size)
-        })
+        }, DANMAKU_HASH_TIMEOUT_MS)
         if (matchResp.isMatched && matchResp.matches && matchResp.matches.length > 0) {
           const m = matchResp.matches[0]
           pushLog(`③ hash 命中: animeId=${m.animeId}, episodeId=${m.episodeId}, title="${m.animeTitle} - ${m.episodeTitle}"`)
@@ -1441,32 +1458,68 @@ async function matchEpisodeEngine(meta: DanmakuMatchMeta): Promise<DanmakuMatchR
 }
 
 // ---------- IPC: 多级匹配 ----------
+
+// 同一剧集的匹配请求单飞（in-flight 去重）：
+// 渲染进程在元数据就绪 / 切集 / epoch 变更时会多次触发 loadDanmaku，
+// 若不做单飞，同一集的匹配请求会在短时间内并发打到弹幕服务，既浪费配额也拖慢首集加载。
+// key 使用「源 + 剧集标识 + 季集号 + 文件路径」，保证同集请求合并、不同集互不干扰。
+const matchInFlight = new Map<string, Promise<DanmakuMatchResultV2>>()
+
+function matchInFlightKey(meta: DanmakuMatchMeta): string {
+  const safe = (v: unknown): string => String(v ?? '').replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')
+  return [
+    meta.mediaSourceId,
+    meta.seriesId || meta.seriesName || '',
+    meta.seasonId || '',
+    meta.parentIndexNumber ?? '',
+    meta.indexNumber ?? '',
+    meta.filePath || meta.itemId
+  ].map(safe).join('__')
+}
+
 registerIpc('danmaku:match-episode', async (_event, meta: DanmakuMatchMeta): Promise<DanmakuMatchResultV2> => {
-  try {
-    // 查结构化匹配缓存（按 season+episode 隔离）
-    // 关键：有本地文件路径（hash-eligible）时，仅信任 hash/manual 级缓存；
-    // 弱结果（metadata/regex）缓存必须跳过，让 hash 分支有机会执行更精准匹配
-    const cached = getCachedMatchV2(meta)
-    if (cached) {
-      const isHashEligible = !!meta.filePath
-      const isHighConfidence = cached.matchLevel === 'hash' || cached.matchLevel === 'manual'
-      if (!isHashEligible || isHighConfidence) {
-        console.log(`[danmaku:match-episode] 命中结构化缓存: episodeId=${cached.episodeId}, level=${cached.matchLevel}`)
-        return {
-          success: true,
-          data: {
-            episodeId: cached.episodeId, animeId: cached.animeId, animeTitle: cached.animeTitle,
-            episodeTitle: cached.episodeTitle, source: cached.source, matchLevel: cached.matchLevel, confidence: cached.confidence
-          },
-          log: [`命中结构化匹配缓存 (episodeId=${cached.episodeId})`]
+  const key = matchInFlightKey(meta)
+  const pending = matchInFlight.get(key)
+  if (pending) {
+    console.log(`[danmaku:match-episode] 复用进行中的匹配请求（单飞去重）: ${key}`)
+    return await pending
+  }
+
+  const task = (async (): Promise<DanmakuMatchResultV2> => {
+    try {
+      // 查结构化匹配缓存（按 season+episode 隔离）
+      // 关键：有本地文件路径（hash-eligible）时，仅信任 hash/manual 级缓存；
+      // 弱结果（metadata/regex）缓存必须跳过，让 hash 分支有机会执行更精准匹配
+      const cached = getCachedMatchV2(meta)
+      if (cached) {
+        const isHashEligible = !!meta.filePath
+        const isHighConfidence = cached.matchLevel === 'hash' || cached.matchLevel === 'manual'
+        if (!isHashEligible || isHighConfidence) {
+          console.log(`[danmaku:match-episode] 命中结构化缓存: episodeId=${cached.episodeId}, level=${cached.matchLevel}`)
+          return {
+            success: true,
+            data: {
+              episodeId: cached.episodeId, animeId: cached.animeId, animeTitle: cached.animeTitle,
+              episodeTitle: cached.episodeTitle, source: cached.source, matchLevel: cached.matchLevel, confidence: cached.confidence
+            },
+            log: [`命中结构化匹配缓存 (episodeId=${cached.episodeId})`]
+          }
         }
+        console.log(`[danmaku:match-episode] 跳过弱缓存(level=${cached.matchLevel})，有本地文件路径，优先尝试 hash 匹配`)
       }
-      console.log(`[danmaku:match-episode] 跳过弱缓存(level=${cached.matchLevel})，有本地文件路径，优先尝试 hash 匹配`)
+      return await matchEpisodeEngine(meta)
+    } catch (err) {
+      // 匹配失败只记录一次，不影响播放（由渲染端降级为无弹幕提示）
+      console.error('[danmaku:match-episode] 致命错误:', err)
+      return { success: false, error: String(err) }
     }
-    return await matchEpisodeEngine(meta)
-  } catch (err) {
-    console.error('[danmaku:match-episode] 致命错误:', err)
-    return { success: false, error: String(err) }
+  })()
+
+  matchInFlight.set(key, task)
+  try {
+    return await task
+  } finally {
+    matchInFlight.delete(key)
   }
 })
 
