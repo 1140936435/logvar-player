@@ -386,6 +386,10 @@ export function usePlaybackEngine(options: {
 
       // 性能优化：弹幕引擎使用 RAF 订阅，每帧更新不经过 React state，避免 60fps 重渲染
       let frameCount = 0
+      // 竖屏模糊背景画布尺寸缓存：尺寸未变时不再重设 canvas.width/height
+      // （重设会重新分配 backing store 并重置上下文状态，代价远高于一次 drawImage）
+      let blurCanvasW = 0
+      let blurCanvasH = 0
       const unsubRAF = timeBusRef.current.subscribeRAF((time, playbackRate) => {
         if (danmakuEnabledRef.current && engineRef.current) {
           engineRef.current.update(time, playbackRate)
@@ -395,8 +399,14 @@ export function usePlaybackEngine(options: {
           const blurCanvas = blurBgCanvasRef.current
           const blurCtx = blurCanvas?.getContext('2d')
           if (blurCanvas && blurCtx && video.videoWidth > 0) {
-            blurCanvas.width = video.videoWidth / 4
-            blurCanvas.height = video.videoHeight / 4
+            const w = Math.floor(video.videoWidth / 4)
+            const h = Math.floor(video.videoHeight / 4)
+            if (blurCanvasW !== w || blurCanvasH !== h) {
+              blurCanvas.width = w
+              blurCanvas.height = h
+              blurCanvasW = w
+              blurCanvasH = h
+            }
             blurCtx.drawImage(video, 0, 0, blurCanvas.width, blurCanvas.height)
           }
         }

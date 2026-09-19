@@ -32,6 +32,21 @@ interface Space {
   bottom: CollisionRange[]
 }
 
+/**
+ * 弹幕画布 DPR 上限（性能红线）。
+ * 弹幕层是覆盖在视频之上的透明 canvas，每帧整屏重绘并让合成器重新上传纹理；
+ * 其光栅化 + 合成开销与 backing store 面积成正比，而面积 = CSS 面积 × dpr²。
+ * 3x 屏（dpr=3）即 9 倍像素量，全屏 4K 下每帧清屏/绘制/上传可达千万像素级，
+ * 是弹幕掉帧的主因之一。上限取 2：文字清晰度与 3 肉眼几乎无差，像素量降到 44%。
+ */
+export const DANMAKU_MAX_DPR = 2
+
+/** 计算弹幕画布实际 DPR（纯函数，便于单测）：非法值兜底 1，并 clamp 到 [1, DANMAKU_MAX_DPR] */
+export function resolveDanmakuDpr(devicePixelRatio: number): number {
+  const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1
+  return Math.max(1, Math.min(DANMAKU_MAX_DPR, dpr))
+}
+
 const colorCache = new Map<number, string>()
 function decToRgb(dec: number): string {
   const cached = colorCache.get(dec)
@@ -103,6 +118,8 @@ export class DanmakuEngine {
 
   // 修复点 2.10: HiDPI 支持
   private dpr = 1
+  // 性能优化：画布上是否可能留有内容（用于跳过空闲帧的整屏清屏 + 纹理重传）
+  private canvasDirty = false
   // CSS 像素尺寸（不乘 DPR）
   private cssWidth = 0
   private cssHeight = 0
@@ -155,16 +172,19 @@ export class DanmakuEngine {
   }
 
   // 修复点 2.10: 真实尺寸乘以 DPR，ctx 上再 scale，保证 Retina 屏不糊
+  // 性能红线：DPR 上限压到 DANMAKU_MAX_DPR（见 resolveDanmakuDpr），避免高 DPR 屏整屏重绘像素量爆炸
   resize(): void {
     const parent = this.canvas.parentElement
     if (!parent) return
     this.cssWidth = parent.clientWidth
     this.cssHeight = parent.clientHeight
-    this.dpr = Math.max(1, Math.min(3, typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1))
+    this.dpr = resolveDanmakuDpr(typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1)
     this.canvas.style.width = `${this.cssWidth}px`
     this.canvas.style.height = `${this.cssHeight}px`
     this.canvas.width = Math.floor(this.cssWidth * this.dpr)
     this.canvas.height = Math.floor(this.cssHeight * this.dpr)
+    // 设置 canvas.width/height 会重置画布（内容清空），同步复位脏标记
+    this.canvasDirty = false
     if (this.ctx) {
       this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
     }
@@ -225,6 +245,7 @@ export class DanmakuEngine {
     if (this.ctx) {
       this.ctx.clearRect(0, 0, this.cssWidth, this.cssHeight)
     }
+    this.canvasDirty = false
   }
 
   setOpacity(opacity: number): void {
@@ -282,6 +303,7 @@ export class DanmakuEngine {
     this.visible = false
     this.pause()
     if (this.ctx) this.ctx.clearRect(0, 0, this.cssWidth, this.cssHeight)
+    this.canvasDirty = false
   }
 
   isEnabled(): boolean {
@@ -340,6 +362,17 @@ export class DanmakuEngine {
     return allocatedY
   }
 
+  /**
+   * 清屏的唯一兜底入口：仅在画布可能留有内容（canvasDirty）时执行。
+   * 空闲帧（无弹幕可画）若每帧都 clearRect，会让合成器反复重传整张高 DPR 纹理，
+   * 白白占用光栅化与合成带宽 —— 这是"无弹幕时也掉帧"的来源之一。
+   */
+  private clearCanvasIfDirty(ctx: CanvasRenderingContext2D): void {
+    if (!this.canvasDirty) return
+    ctx.clearRect(0, 0, this.cssWidth, this.cssHeight)
+    this.canvasDirty = false
+  }
+
   private createActiveComment(cmt: EngineDanmakuComment, videoTime: number): ActiveComment {
     const duration = cmt.mode === 'top' || cmt.mode === 'bottom'
       ? this.stillDuration
@@ -362,8 +395,11 @@ export class DanmakuEngine {
   // 这样 pause / resume / seek / ratechange / 缓冲卡顿后全都天然与视频对齐。
   update(videoTime: number, playbackRate: number = 1): void {
     const ctx = this.ctx
-    if (!ctx || !this.visible || this.allComments.length === 0) {
-      if (ctx) ctx.clearRect(0, 0, this.cssWidth, this.cssHeight)
+    if (!ctx) return
+    // 性能优化：无弹幕可画时不每帧整屏清屏（清屏会让合成器重新上传整张高 DPR 纹理），
+    // 只在画布确实留有内容时清一次
+    if (!this.visible || this.allComments.length === 0) {
+      this.clearCanvasIfDirty(ctx)
       return
     }
     // 修复点 3.9: 单帧执行时的异常不能导致后续帧永远停画，try/catch 兜底并输出可追踪错误
@@ -371,6 +407,13 @@ export class DanmakuEngine {
     if (this.cssWidth <= 0 || this.cssHeight <= 0) {
       this.resize()
       if (this.cssWidth <= 0 || this.cssHeight <= 0) return
+    }
+
+    // 快速路径：后续已无待入场弹幕且当前无活跃弹幕（如无弹幕的长片段），
+    // 本帧无需做离屏移除 / 轨道清理 / 入场扫描，脏则清一次屏即可
+    if (this.position >= this.allComments.length && this.runningList.length === 0) {
+      this.clearCanvasIfDirty(ctx)
+      return
     }
 
     const ct = videoTime - this.timeOffset
@@ -422,12 +465,10 @@ export class DanmakuEngine {
       this.runningList.shift()
     }
 
-    // 4. 清屏 + 按当前 videoTime 计算坐标并绘制（全部由 ct 单一时钟驱动）
-    ctx.clearRect(0, 0, this.cssWidth, this.cssHeight)
-    ctx.font = this.fontString
-    ctx.textBaseline = 'middle'
-    ctx.globalAlpha = this.opacity
-
+    // 4. 绘制（全部由 ct 单一时钟驱动）
+    // 性能优化：先把本帧真正可见的弹幕算出来，只在确有可见弹幕时才整屏清屏 + 重绘，
+    // 并复用同一帧内一次 ctx 状态设置；无可见弹幕时最多清一次残留屏。
+    let painted = 0
     for (const cmt of this.runningList) {
       const elapsedVideo = ct - cmt.startVideoTime
       let x = 0
@@ -445,11 +486,27 @@ export class DanmakuEngine {
       }
 
       if (x >= -cmt.width && x <= this.cssWidth) {
+        if (painted === 0) {
+          // 本帧首次绘制：整屏清屏并设置本帧唯一的 ctx 状态
+          ctx.clearRect(0, 0, this.cssWidth, this.cssHeight)
+          ctx.font = this.fontString
+          ctx.textBaseline = 'middle'
+          ctx.globalAlpha = this.opacity
+        }
         ctx.fillStyle = cmt.color
         ctx.fillText(cmt.text, x, cmt.y + cmt.height / 2)
+        painted++
       }
     }
-    ctx.globalAlpha = 1
+
+    if (painted > 0) {
+      ctx.globalAlpha = 1
+      this.canvasDirty = true
+    } else if (this.canvasDirty) {
+      // 本帧无可见弹幕：清掉上一帧残留后停笔，后续空闲帧不再重复整屏清屏
+      ctx.clearRect(0, 0, this.cssWidth, this.cssHeight)
+      this.canvasDirty = false
+    }
     } catch (err) {
       // 修复点 3.9: 单帧异常兜底，避免后续帧永远不绘制。使用 warn 级别避免刷屏。
       console.warn('[DanmakuEngine:update] 单帧绘制异常，已跳过:', err instanceof Error ? err.message : String(err))
@@ -461,6 +518,8 @@ export class DanmakuEngine {
     this.runningList = []
     resetSpace(this.space)
     this.trackAllocator.clear()
+    // 屏幕上可能仍留有 seek 前的弹幕，标记为脏，由下一帧统一清屏
+    this.canvasDirty = true
     if (!this.ctx) return
     // 修复 M4: 与 update() 的 ct = videoTime - timeOffset 保持同一时钟，
     // 用偏移后的时间做二分定位。否则正偏移时 position 会越过
