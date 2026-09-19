@@ -23,6 +23,15 @@ import {
   isRetryableError,
   normalizeMirrorList
 } from '../lib/danmaku-retry'
+import {
+  DANMAKU_AUTO_MATCH_MIN_SCORE,
+  DANMAKU_EMPTY_RESULT_RETRY_DELAY_MS,
+  DANMAKU_VARIANT_MAX_ATTEMPTS,
+  buildSearchVariants,
+  cn2num,
+  locateEpisodeIndex,
+  rankAnimeCandidates
+} from '../lib/danmaku-name'
 import { registerIpc } from './secure-handle'
 
 export interface DanmakuIpcHost {
@@ -1011,15 +1020,8 @@ registerIpc('danmaku:get-cached-comments', async (_event, episodeId: string) => 
 // ====================================================================
 
 // ---------- 中文数字转阿拉伯 ----------
-function cn2num(s: string): number {
-  const map: Record<string, number> = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 }
-  if (/^\d+$/.test(s)) return parseInt(s, 10)
-  if (s === '十') return 10
-  if (s.startsWith('十')) return 10 + (map[s[1]] || 0)
-  if (s.endsWith('十')) return (map[s[0]] || 0) * 10
-  if (s.includes('十')) { const parts = s.split('十'); return (map[parts[0]] || 0) * 10 + (map[parts[1]] || 0) }
-  return map[s] || 0
-}
+// cn2num / buildSearchVariants / rankAnimeCandidates / locateEpisodeIndex 等纯函数
+// 统一由 ../lib/danmaku-name 提供（见文件顶部 import），便于单测与回归。
 
 // ---------- 文件名/标题 清洗 ----------
 function cleanName(s: string): string {
@@ -1067,55 +1069,12 @@ function parseSeasonEpisode(input: string): { season: number | null; episode: nu
   return { season, episode, animeName }
 }
 
-// ---------- 从 animeTitle 推断季号（如 "庆余年 第二季" → 2, "Xxx Season 3" → 3） ----------
-function inferSeasonFromTitle(title: string): number | null {
-  if (!title) return null
-  let m = title.match(/第\s*([0-9一二三四五六七八九十]+)\s*季/)
-  if (m) return cn2num(m[1])
-  m = title.match(/Season\s*(\d{1,2})/i)
-  if (m) return +m[1]
-  return null
-}
-
-// ---------- 标题归一化（去"第X季/Season X"后比较） ----------
-function normalizeTitle(t: string): string {
-  return (t || '')
-    .replace(/第\s*[0-9一二三四五六七八九十]+\s*季/g, '')
-    .replace(/Season\s*\d{1,2}/gi, '')
-    .replace(/[\s\-_·:：]+/g, '')
-    .toLowerCase()
-    .trim()
-}
-
-// ---------- 标题相似度打分（0-1） ----------
-function scoreTitleSimilarity(a: string, b: string): number {
-  const na = normalizeTitle(a), nb = normalizeTitle(b)
-  if (!na || !nb) return 0
-  if (na === nb) return 1
-  if (na.includes(nb) || nb.includes(na)) return 0.85
-  // 字符重叠率（兜底模糊）
-  let common = 0
-  for (const ch of na) if (nb.includes(ch)) common++
-  return Math.min(0.6, common / Math.max(na.length, nb.length))
-}
-
-// ---------- anime 候选打分（标题 + 季号严格配对 + 年份） ----------
-function scoreAnimeCandidate(
-  meta: DanmakuMatchMeta,
-  anime: { animeId: number; animeTitle: string }
-): { score: number; seasonHint: number | null } {
-  const titleScore = scoreTitleSimilarity(meta.seriesName || meta.title || '', anime.animeTitle)
-  const seasonHint = inferSeasonFromTitle(anime.animeTitle)
-  let score = titleScore
-  // 季号严格配对：元数据有 parentIndexNumber 且能从 animeTitle 推断季号
-  if (meta.parentIndexNumber != null && seasonHint != null) {
-    if (seasonHint === meta.parentIndexNumber) score += 0.15   // 季号吻合，加分
-    else score -= 0.3                                          // 季号不符，重罚（防止跨季串弹幕）
-  }
-  // 元数据是第1季且 animeTitle 无季号标记（默认第1季），轻微加分
-  if (meta.parentIndexNumber === 1 && seasonHint == null) score += 0.05
-  return { score: Math.max(0, Math.min(1, score)), seasonHint }
-}
+// ---------- 名称归一化 / 候选打分 ----------
+// 已迁移至 ../lib/danmaku-name：
+//   normalizeTitleForCompare / titleSimilarity / inferSeasonFromTitle /
+//   scoreAnimeCandidate / rankAnimeCandidates
+// 相比旧实现，新打分额外做了：去括号年份与来源标记（如「田耕纪(2023)【电视剧】from 360」）、
+// 繁简归一、类型词剔除、年份吻合加分 / 不符减分。
 
 // ---------- 结构化匹配缓存 V2 ----------
 // Key = mediaSourceId + seriesId + season + episode（一集一条独立缓存，杜绝按剧名单键串集）
@@ -1322,23 +1281,66 @@ async function matchEpisodeEngine(meta: DanmakuMatchMeta): Promise<DanmakuMatchR
   }
 
   // ④ metadata：结构化元数据匹配（主力层）
-  pushLog(`④ metadata 搜索: anime="${searchName}", season=${season ?? '?'}, ep=${episode ?? '?'}`)
-  let searchResult: DanmakuSearchResponse
-  try {
-    searchResult = await dandanRequest<DanmakuSearchResponse>(
-      `/api/v2/search/episodes?anime=${encodeURIComponent(searchName)}`
-    )
-  } catch (err) {
-    pushLog(`❌ 搜索请求失败: ${err instanceof Error ? err.message : String(err)}`)
-    return { success: false, error: String(err), log: logs }
+  // 服务端 /api/v2/search/episodes 的 anime 参数是「清理标题后做前缀匹配」，实测（100.66.1.2:9321）：
+  //   anime=田耕纪 → 命中；anime=田耕纪(2023) / 田耕纪 第一季 / 电视剧 田耕纪 → 0 候选。
+  // 因此按归一化变体（原名 → 去括号噪音 → 去季号年份 → 主标题首段 → 简体/繁体）依次尝试，命中即停。
+  // 另：服务端偶发「请求成功但 animes 为空」（上游瞬时失败），同一变体做一次短延迟重试，
+  // 避免把瞬时失败误判成「名称不存在」而直接判定无弹幕。
+  const variants = buildSearchVariants(searchName)
+  pushLog(
+    `④ metadata 搜索: anime="${searchName}", season=${season ?? '?'}, ep=${episode ?? '?'}, ` +
+      `变体=[${variants.map((v) => `${v.name}(${v.kind})`).join(' → ')}]`
+  )
+
+  let animes: NonNullable<DanmakuSearchResponse['animes']> = []
+  let usedSearchName = ''
+  let searchFailed = false
+  for (const variant of variants) {
+    // 仅第一个变体（原名）做空结果重试：它承载「服务端瞬时失败 / 冷缓存」场景；
+    // 后续变体是语义上的备选名，返回 0 就应立即换下一个，避免把链路拖长
+    const maxAttempts = variants[0] === variant ? DANMAKU_VARIANT_MAX_ATTEMPTS : 1
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const resp = await dandanRequest<DanmakuSearchResponse>(
+          `/api/v2/search/episodes?anime=${encodeURIComponent(variant.name)}`
+        )
+        const list = resp.animes || []
+        if (list.length > 0) {
+          animes = list
+          usedSearchName = variant.name
+          if (variant.name !== searchName || attempt > 0) {
+            pushLog(`④ 变体命中: anime="${variant.name}" (${variant.kind}, 第 ${attempt + 1} 次请求) → ${list.length} 个候选`)
+          }
+          break
+        }
+        pushLog(
+          attempt + 1 < maxAttempts
+            ? `④ 变体 "${variant.name}" (${variant.kind}) 返回 0 候选，${DANMAKU_EMPTY_RESULT_RETRY_DELAY_MS}ms 后重试一次`
+            : `④ 变体 "${variant.name}" (${variant.kind}) 返回 0 候选，尝试下一个变体`
+        )
+      } catch (err) {
+        // 请求异常（超时/网络）：属服务端不可用，继续换变体只会拖长链路 → 直接失败
+        searchFailed = true
+        pushLog(`❌ 搜索请求失败 (anime="${variant.name}"): ${err instanceof Error ? err.message : String(err)}`)
+        break
+      }
+      if (attempt + 1 < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, DANMAKU_EMPTY_RESULT_RETRY_DELAY_MS))
+      }
+    }
+    if (animes.length > 0 || searchFailed) break
   }
 
-  const animes = searchResult.animes || []
-  pushLog(`搜索返回 ${animes.length} 个番剧候选`)
+  if (searchFailed) {
+    return { success: false, error: '搜索请求失败（服务端不可用或超时）', log: logs }
+  }
+
+  pushLog(`搜索返回 ${animes.length} 个番剧候选${usedSearchName ? `（命中变体 "${usedSearchName}"）` : ''}`)
   if (animes.length === 0) {
-    // B站回退
-    pushLog(`未找到动漫，尝试 B站回退`)
-    const bl = await bilibiliAutoMatch(meta.title || searchName)
+    // B站回退：优先用归一化后的核心名（B站搜索对「第X季/年份后缀」同样不友好）
+    const biliKeyword = variants.find((v) => v.kind === 'core')?.name || searchName
+    pushLog(`未找到动漫，尝试 B站回退: keyword="${biliKeyword}"`)
+    const bl = await bilibiliAutoMatch(biliKeyword)
     if (bl) {
       pushLog(`B站回退命中: cid=${bl.cid}, title="${bl.animeTitle}"`)
       const entry = { episodeId: bl.cid, animeTitle: bl.animeTitle, episodeTitle: bl.episodeTitle, source: 'bilibili', matchLevel: 'metadata' as DanmakuMatchLevel, confidence: 0.5 }
@@ -1348,20 +1350,20 @@ async function matchEpisodeEngine(meta: DanmakuMatchMeta): Promise<DanmakuMatchR
     return { success: false, error: '未找到匹配弹幕', log: logs }
   }
 
-  // 对每个 anime 候选打分排序
-  const scored = animes.map((a) => {
-    const { score, seasonHint } = scoreAnimeCandidate(meta, a)
-    return { anime: a, score, seasonHint }
-  }).sort((x, y) => y.score - x.score)
+  // 对每个 anime 候选打分排序（名称相似度 + 季号 + 年份，实现见 lib/danmaku-name）
+  const scored = rankAnimeCandidates(meta, animes)
 
   for (const s of scored.slice(0, 8)) {
-    pushLog(`候选: animeId=${s.anime.animeId}, title="${s.anime.animeTitle}", score=${s.score.toFixed(2)}, seasonHint=${s.seasonHint ?? '?'}`)
+    pushLog(
+      `候选: animeId=${s.anime.animeId}, title="${s.anime.animeTitle}", score=${s.score.toFixed(2)}, ` +
+        `seasonHint=${s.seasonHint ?? '?'}, yearHint=${s.yearHint ?? '?'}`
+    )
   }
 
   const best = scored[0]
   // 最高分过低 → 返回候选列表供手动选择（⑥ candidates）
-  if (!best || best.score < 0.4) {
-    pushLog(`⚠️ 最高分 ${best?.score.toFixed(2) ?? 'N/A'} < 0.4，返回候选列表供手动选择`)
+  if (!best || best.score < DANMAKU_AUTO_MATCH_MIN_SCORE) {
+    pushLog(`⚠️ 最高分 ${best?.score.toFixed(2) ?? 'N/A'} < ${DANMAKU_AUTO_MATCH_MIN_SCORE}，返回候选列表供手动选择`)
     const candidates: DanmakuMatchCandidate[] = []
     for (const s of scored.slice(0, 10)) {
       for (const ep of (s.anime.episodes || [])) {
@@ -1379,23 +1381,35 @@ async function matchEpisodeEngine(meta: DanmakuMatchMeta): Promise<DanmakuMatchR
   pushLog(`最优番剧: "${best.anime.animeTitle}" (${episodes.length} 集)，用 ep=${episode ?? '?'} 定位`)
   let matchedEp: typeof episodes[0] | null = null
   let confidence = best.score
-  if (episode != null && episodes.length > 0) {
-    const epIndex = episode - 1
-    if (epIndex >= 0 && epIndex < episodes.length) {
-      matchedEp = episodes[epIndex]
-      pushLog(`集号定位: ep#${episode} → "${matchedEp.episodeTitle}"`)
+  // 集号定位：优先按 episodeTitle 内解析出的集号（服务端集列表顺序不保证与集号一致），
+  // 所有标题都解析不出集号时才退化为「第 N 集 = 第 N 项」的下标定位
+  const located = locateEpisodeIndex(episodes, episode)
+  if (located) {
+    matchedEp = episodes[located.index]
+    if (located.byTitle) {
+      pushLog(`集号定位（标题）: ep#${episode} → "${matchedEp.episodeTitle}"`)
     } else {
-      // 集号超出范围：按 episodeTitle 中的数字兜底匹配
-      pushLog(`⚠️ 集号 #${episode} 超出范围 (1-${episodes.length})，按 episodeTitle 数字匹配`)
-      const byTitle = episodes.find((e) => {
-        const m = e.episodeTitle.match(/(\d{1,3})/)
-        return m && +m[1] === episode
-      })
-      if (byTitle) {
-        matchedEp = byTitle
+      confidence = best.score * 0.95
+      pushLog(`集号定位（下标）: ep#${episode} → "${matchedEp.episodeTitle}"`)
+    }
+  } else if (episode != null && usedSearchName) {
+    // 回退：服务端支持 episode 参数收窄（实测 &episode=N 只返回第 N 集，N 越界则整体 0 候选）。
+    // 当本地季集号与候选集列表对不上（如服务端把多季合并编号 / 列表截断）时，用它做一次精准请求。
+    pushLog(`⚠️ 集号 #${episode} 在 ${episodes.length} 集中未定位到，尝试 &episode=${episode} 收窄请求`)
+    try {
+      const narrowed = await dandanRequest<DanmakuSearchResponse>(
+        `/api/v2/search/episodes?anime=${encodeURIComponent(usedSearchName)}&episode=${episode}`
+      )
+      const narrowedEp = narrowed.animes?.[0]?.episodes?.[0]
+      if (narrowedEp) {
+        matchedEp = narrowedEp
         confidence = best.score * 0.9
-        pushLog(`按标题匹配: "${byTitle.episodeTitle}"`)
+        pushLog(`集号收窄命中: ep#${episode} → "${narrowedEp.episodeTitle}"`)
+      } else {
+        pushLog(`集号收窄未命中（服务端返回 0 集）`)
       }
+    } catch (err) {
+      pushLog(`集号收窄请求失败: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
