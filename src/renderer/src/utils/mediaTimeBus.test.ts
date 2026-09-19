@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createMediaTimeBus } from './mediaTimeBus'
+import { createMediaTimeBus, extrapolateVideoTime } from './mediaTimeBus'
 
 /**
  * 可控 <video> mock：记录属性并提供事件注册/触发，对齐 DOM EventTarget 最小子集。
@@ -205,6 +205,100 @@ describe('MediaTimeBus 普通 observer 节流（约 5~10Hz）', () => {
     // 事件驱动的 notify 同时刷新节流窗口：随后 loop 首帧不再重复通知同值
     runRafFrame()
     expect(seen).toEqual([30, 5])
+
+    bus.destroy()
+  })
+})
+
+describe('extrapolateVideoTime（HTML5 视频时间平滑纯函数）', () => {
+  const base = { playbackRate: 1, isPlaying: true }
+
+  it('采样未变化且播放中：按 wall-clock × 倍速外推，帧间线性推进', () => {
+    const a = extrapolateVideoTime({ ...base, rawTime: 10, nowMs: 1000, anchorTime: 10, anchorAtMs: 1000 })
+    expect(a.time).toBeCloseTo(10, 6)
+
+    const b = extrapolateVideoTime({ ...base, rawTime: 10, nowMs: 1016, anchorTime: a.anchorTime, anchorAtMs: a.anchorAtMs })
+    expect(b.time).toBeCloseTo(10.016, 6)
+    // 锚点保持不动（采样未前进），仅输出随 wall-clock 前进
+    expect(b.anchorTime).toBe(10)
+    expect(b.anchorAtMs).toBe(1000)
+
+    const c = extrapolateVideoTime({ ...base, playbackRate: 2, rawTime: 10, nowMs: 1032, anchorTime: b.anchorTime, anchorAtMs: b.anchorAtMs })
+    expect(c.time).toBeCloseTo(10.064, 6)
+  })
+
+  it('采样前进（媒体帧呈现）立即重锚到原始值，保证与视频时间轴不失同步', () => {
+    const anchored = extrapolateVideoTime({ ...base, rawTime: 10, nowMs: 1000, anchorTime: 10, anchorAtMs: 1000 })
+    const next = extrapolateVideoTime({
+      ...base,
+      rawTime: 10.0417, // 24fps：41.7ms 后新帧呈现
+      nowMs: 1041.7,
+      anchorTime: anchored.anchorTime,
+      anchorAtMs: anchored.anchorAtMs
+    })
+    expect(next.time).toBe(10.0417)
+    expect(next.anchorTime).toBe(10.0417)
+    expect(next.anchorAtMs).toBe(1041.7)
+  })
+
+  it('采样回退（seek）立即重锚，不产生外推残留', () => {
+    const next = extrapolateVideoTime({ ...base, rawTime: 3, nowMs: 2000, anchorTime: 120, anchorAtMs: 1500 })
+    expect(next.time).toBe(3)
+    expect(next.anchorTime).toBe(3)
+  })
+
+  it('非播放态（暂停/结束）不外推，与视频冻结行为一致', () => {
+    const next = extrapolateVideoTime({ ...base, isPlaying: false, rawTime: 5, nowMs: 5000, anchorTime: 5, anchorAtMs: 1000 })
+    expect(next.time).toBe(5)
+    expect(next.anchorAtMs).toBe(5000)
+  })
+
+  it('外推量封顶（默认 80ms）：采样长期停滞后不无限超前', () => {
+    const capped = extrapolateVideoTime({ ...base, rawTime: 7, nowMs: 5000, anchorTime: 7, anchorAtMs: 1000 })
+    // 停滞 4000ms，仍只外推 80ms
+    expect(capped.time).toBeCloseTo(7.08, 6)
+    // 封顶后锚点同步前移：下一次调用不会在封顶值之上继续叠加
+    const again = extrapolateVideoTime({ ...base, rawTime: 7, nowMs: 5016, anchorTime: capped.anchorTime, anchorAtMs: capped.anchorAtMs })
+    expect(again.time).toBeCloseTo(7.08, 6)
+  })
+
+  it('非法播放倍速兜底为 1（不产生 NaN 时间）', () => {
+    const next = extrapolateVideoTime({ ...base, playbackRate: Number.NaN, rawTime: 1, nowMs: 1100, anchorTime: 1, anchorAtMs: 1000 })
+    expect(next.time).toBeCloseTo(1.08, 6)
+  })
+})
+
+describe('HTML5 loop 用平滑时间驱动 RAF 通道（弹幕位移不再呈阶梯）', () => {
+  it('24fps 采样阶梯下 RAF 每帧线性推进，新采样到来即对齐原始值', () => {
+    const bus = createMediaTimeBus()
+    const video = createMockVideo({ currentTime: 1.0, paused: false })
+    const rafSeen: Array<number> = []
+    const uiSeen: Array<number> = []
+    bus.subscribeRAF((time) => rafSeen.push(time))
+    bus.subscribe((time) => uiSeen.push(time))
+
+    bus.attachVideo(video as unknown as HTMLVideoElement)
+
+    // 帧1：+16.7ms，媒体帧尚未呈现（采样仍 1.0）→ 平滑外推
+    advanceNow(16.7)
+    runRafFrame()
+    // 帧2：再 +16.7ms，采样仍 1.0 → 继续线性推进（旧实现此处会原地不动 = 阶梯停顿）
+    advanceNow(16.7)
+    runRafFrame()
+    // 帧3：+8.3ms，24fps 新帧呈现（1.0417）→ 立即对齐原始值
+    advanceNow(8.3)
+    video.currentTime = 1.0417
+    runRafFrame()
+
+    expect(rafSeen).toHaveLength(3)
+    expect(rafSeen[0]).toBeCloseTo(1.0167, 4)
+    expect(rafSeen[1]).toBeCloseTo(1.0334, 4)
+    expect(rafSeen[2]).toBe(1.0417)
+    // 相邻帧严格前进：无"两帧不动再跳一下"的顿挫
+    expect(rafSeen[1] - rafSeen[0]).toBeGreaterThan(0.015)
+    expect(rafSeen[2] - rafSeen[1]).toBeGreaterThan(0.005)
+    // 平滑通道与真实视频时间最大偏差不超过一个媒体帧间隔
+    expect(Math.abs(rafSeen[1] - 1.0)).toBeLessThan(1 / 24)
 
     bus.destroy()
   })

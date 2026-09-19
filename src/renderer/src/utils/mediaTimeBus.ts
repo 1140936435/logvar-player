@@ -11,6 +11,45 @@ interface MediaTimeState {
   buffered: number
 }
 
+/**
+ * HTML5 路径视频时间平滑（纯函数，便于单测）。
+ *
+ * 背景：<video>.currentTime 只在媒体帧被呈现时才跳变（24fps ≈ 41.7ms 一跳、30fps ≈ 33.3ms 一跳、
+ * 60fps ≈ 16.7ms 一跳），而 rAF 恒为约 16.7ms 一帧。若弹幕位移直接取自原始 currentTime，
+ * 24/30fps 片源下会出现"每 2~3 帧才前进一次"的阶梯推进 —— 肉眼即规律性一顿一顿（掉帧感）。
+ *
+ * 策略：以最后一次原始采样为锚点，用 wall-clock 差值 × 播放倍速线性外推；
+ * 一旦原始采样前进（新帧呈现）或回退（seek）立刻重新锚定，保证与视频时间轴不失同步。
+ *
+ * 约束：
+ * - 非播放态（暂停/结束）不外推，与视频冻结行为一致；
+ * - 外推量封顶 maxExtrapolationMs（默认 80ms，约两个 24fps 帧间隔），采样长时间停滞时不无限超前；
+ * - 封顶后锚点同步前移，输出时间停在封顶值而非持续增长。
+ */
+export function extrapolateVideoTime(params: {
+  rawTime: number
+  nowMs: number
+  anchorTime: number
+  anchorAtMs: number
+  playbackRate: number
+  isPlaying: boolean
+  maxExtrapolationMs?: number
+}): { time: number; anchorTime: number; anchorAtMs: number } {
+  const { rawTime, nowMs, isPlaying } = params
+  const maxMs = params.maxExtrapolationMs ?? 80
+  // 非播放态，或采样值相对锚点发生变化（新帧呈现 / seek 回退）→ 重新锚定，不做任何平滑滤波
+  if (!isPlaying || rawTime !== params.anchorTime) {
+    return { time: rawTime, anchorTime: rawTime, anchorAtMs: nowMs }
+  }
+  const elapsedMs = Math.max(0, Math.min(nowMs - params.anchorAtMs, maxMs))
+  const rate = Number.isFinite(params.playbackRate) && params.playbackRate > 0 ? params.playbackRate : 1
+  return {
+    time: params.anchorTime + (elapsedMs / 1000) * rate,
+    anchorTime: params.anchorTime,
+    anchorAtMs: nowMs - elapsedMs
+  }
+}
+
 export class MediaTimeBus {
   private videoElement: HTMLVideoElement | null = null
   private observers: Set<TimeObserver> = new Set()
@@ -29,6 +68,12 @@ export class MediaTimeBus {
   private manualMode: boolean = false
   private manualWallTime: number = 0
 
+  // HTML5 模式视频时间锚点：video.currentTime 只在媒体帧呈现时跳变（24fps ≈ 41.7ms 一跳），
+  // 直接用原始值驱动弹幕位移会呈现规律性一顿一顿；这里记录最后一次采样值与采样时刻，
+  // 在两次采样之间用 wall-clock 外推平滑（见 extrapolateVideoTime）
+  private videoAnchorTime = 0
+  private videoAnchorAtMs = 0
+
   private state: MediaTimeState = {
     currentTime: 0,
     duration: 0,
@@ -44,6 +89,9 @@ export class MediaTimeBus {
     this.state.currentTime = video.currentTime || 0
     this.state.playbackRate = video.playbackRate || 1
     this.state.buffered = video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0
+    // 平滑外推锚点：以 attach 时刻的采样为起点，避免首帧误用上一个 video 的陈旧锚点
+    this.videoAnchorTime = this.state.currentTime
+    this.videoAnchorAtMs = performance.now()
     this.setupVideoListeners()
     // P1-2: attach 前已播放 / 已有 currentTime 的 video 立即自举，不等到下一个 rAF/事件：
     // - isPlaying 自举：play 事件在 attach 之前已触发过，若不回填 true 则 RAF 永不启动、进度停滞
@@ -255,16 +303,31 @@ export class MediaTimeBus {
     }
 
     const video = this.videoElement
-    this.state.currentTime = video.currentTime
+    const rawTime = video.currentTime
+    this.state.currentTime = rawTime
     this.state.playbackRate = video.playbackRate || 1
 
     if (video.buffered.length > 0) {
       this.state.buffered = video.buffered.end(video.buffered.length - 1)
     }
 
+    // 弹幕/逐帧动画用平滑时间：原始 currentTime 是媒体帧粒度的阶梯
+    //（24fps ≈ 41.7ms 一跳），直接驱动位移会呈现规律性一顿一顿。
+    // 普通观察者（UI 进度）继续使用原始精确值，仅 RAF 通道做 wall-clock 外推。
+    const smoothed = extrapolateVideoTime({
+      rawTime,
+      nowMs: performance.now(),
+      anchorTime: this.videoAnchorTime,
+      anchorAtMs: this.videoAnchorAtMs,
+      playbackRate: this.state.playbackRate,
+      isPlaying: this.state.isPlaying
+    })
+    this.videoAnchorTime = smoothed.anchorTime
+    this.videoAnchorAtMs = smoothed.anchorAtMs
+
     // 每帧调用 RAF 观察者（弹幕引擎需要平滑更新，不经过 React state）
     this.rafObservers.forEach((observer) => {
-      observer(this.state.currentTime, this.state.playbackRate)
+      observer(smoothed.time, this.state.playbackRate)
     })
 
     // 常规观察者（UI 更新）节流：约 5~10Hz，避免每帧 notify 推高渲染
