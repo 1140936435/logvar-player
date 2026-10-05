@@ -24,7 +24,8 @@ import { PlaybackEngine } from './playback-engine'
 import { registerIpc } from './ipc/secure-handle'
 import { MainWindowController } from './windows/main-window'
 import { LogWindowController, type LogEntry, registerLogIpc } from './windows/log-window'
-import { registerFileIpc, restorePathAccess, isPathAllowed, denyPath } from './ipc/file-ipc'
+import { registerFileIpc, restorePathAccess, isPathAllowed, denyPath, authorizePathRoot } from './ipc/file-ipc'
+import { extractMediaPathFromArgv } from './lib/argv-media-path'
 import { registerSettingsIpc } from './ipc/settings-ipc'
 import { registerHistoryIpc, migrateHistoryPosters } from './ipc/history-ipc'
 import { registerDanmakuIpc } from './ipc/danmaku-ipc'
@@ -1027,6 +1028,70 @@ function createTray(): void {
   })
 }
 
+// ==================== 单实例 + 文件关联打开 ====================
+// Windows「右键视频 → 打开方式 → 环影」：系统把文件路径作为 argv 传给应用。
+// 修复前主进程不解析 argv、无 requestSingleInstanceLock，表现为"只开窗不播放"。
+// 方案：
+//   1) 单实例锁：二次实例的 argv 经 second-instance 转发给首个实例；
+//   2) 媒体路径提取：兼容裸路径 / 带引号 / file:// URL（见 lib/argv-media-path.ts）；
+//   3) 播放投递：主进程不直接驱动渲染端路由，而是把路径排入队列，
+//      did-finish-load 后 webContents.send('file:open-external') 或由
+//      renderer invoke app:take-pending-file 拉取，避免窗口未就绪时消息丢失。
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  // 已有实例在运行：本实例直接退出（second-instance 事件会在首个实例触发）
+  app.quit()
+}
+
+/** 待播放的外部文件队列（首启 argv / 二次实例转发统一入口） */
+const externalFileQueue: string[] = []
+
+/** 将外部文件入队：先授权其所在目录（M1 纵深防御），窗口就绪后投递 */
+function queueExternalFile(filePath: string): void {
+  try {
+    authorizePathRoot(dirname(filePath))
+  } catch (err) {
+    console.warn('[external-open] authorizePathRoot failed:', err)
+  }
+  externalFileQueue.push(filePath)
+  flushExternalFileQueue()
+}
+
+/** 窗口加载完成前不投递（webContents.send 在加载前会被丢弃）；逐条 flush */
+function flushExternalFileQueue(): void {
+  const win = mainWindowController.getMainWindow()
+  if (!win || win.webContents.isLoading()) return
+  while (externalFileQueue.length > 0) {
+    const p = externalFileQueue.shift()
+    if (p) {
+      console.log('[external-open] send file:open-external', p)
+      win.webContents.send('file:open-external', p)
+    }
+  }
+}
+
+// 二次实例：转发 argv（媒体路径入队）并聚焦已有窗口
+app.on('second-instance', (_event, argv) => {
+  console.log('[external-open] second-instance argv:', argv.slice(1))
+  const mediaPath = extractMediaPathFromArgv(argv)
+  if (mediaPath) {
+    console.log('[external-open] 二次实例携带媒体文件:', mediaPath)
+    queueExternalFile(mediaPath)
+  }
+  const win = mainWindowController.getMainWindow()
+  if (win) {
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+  }
+})
+
+// renderer 兜底拉取：主进程 send 若因时序丢失，渲染端挂载时主动取一次
+registerIpc('app:take-pending-file', () => {
+  const p = externalFileQueue.shift()
+  return p ? { success: true, data: { filePath: p } } : { success: true, data: null }
+})
+
 // ==================== 应用生命周期 ====================
 
 // 注册自定义协议为 privileged，使渲染进程的 <img> 标签可以加载
@@ -1036,6 +1101,9 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 app.whenReady().then(() => {
+  // 未取得单实例锁（已有实例运行）时，本实例已被 app.quit()，不执行初始化
+  if (!gotSingleInstanceLock) return
+
   // 最先初始化配置：safeStorage 检测 + 加载 config.json 必须在 app ready 后，
   // 否则 Windows DPAPI 未就绪会导致凭据被误清空（服务器信息存不住）
   initConfig()
@@ -1059,6 +1127,17 @@ app.whenReady().then(() => {
 
   createWindow()
   createTray()
+
+  // ===== 文件关联打开：首启 argv 携带媒体路径 =====
+  // 窗口尚在加载时不能直接 send（会被丢弃），先入队，did-finish-load 后统一 flush
+  const mediaPath = extractMediaPathFromArgv(process.argv)
+  if (mediaPath) {
+    console.log('[external-open] 启动参数携带媒体文件:', mediaPath)
+    queueExternalFile(mediaPath)
+  }
+  mainWindowController.getMainWindow()?.webContents.on('did-finish-load', () => {
+    flushExternalFileQueue()
+  })
 
   // 一次性迁移：清理旧历史记录海报 URL 中内嵌的 api_key/token 明文
   migrateHistoryPosters()

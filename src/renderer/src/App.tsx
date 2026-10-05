@@ -1,4 +1,4 @@
-import { HashRouter, Routes, Route, Link, useLocation } from 'react-router-dom'
+import { HashRouter, Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom'
 import { Settings, Home as HomeIcon, History as HistoryIcon, Minus, X as XIcon, Copy, Sun, Moon } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useState, useEffect, lazy, Suspense, type ReactElement } from 'react'
@@ -171,6 +171,7 @@ function useTheme(): { dark: boolean; toggle: () => void } {
 /* Router 内部布局 — useLocation 必须在 BrowserRouter 内 */
 function AppLayout(): ReactElement {
   const location = useLocation()
+  const navigate = useNavigate()
   const { dark, toggle } = useTheme()
 
   // 修复: Electron loadFile 产生的 file:// 路径泄漏为 pathname（如 /C:/...）
@@ -181,6 +182,21 @@ function AppLayout(): ReactElement {
       window.location.hash = '#/'
     }
   }, [])
+
+  // 文件关联打开（右键视频 → 打开方式 → 环影）：主进程投递外部文件路径，
+  // 复用现有 /player?file= 播放链路；同一 URL 重复导航不会重载（可接受）。
+  useEffect(() => {
+    const openExternal = (filePath: string): void => {
+      const fname = filePath.split(/[/\\]/).pop() || '本地视频'
+      navigate(`/player?file=${encodeURIComponent(filePath)}&name=${encodeURIComponent(fname)}`)
+    }
+    const unsubscribe = window.api.file.onOpenExternal(openExternal)
+    // 兜底：主进程 did-finish-load 前的 send 若丢失，挂载后主动拉取一次
+    void window.api.file.takePendingOpen().then((res) => {
+      if (res.success && res.data?.filePath) openExternal(res.data.filePath)
+    })
+    return unsubscribe
+  }, [navigate])
 
   return (
     <div className="app-shell h-screen flex flex-col overflow-hidden relative">

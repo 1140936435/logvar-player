@@ -152,7 +152,13 @@ const api: Api = {
     openFile: () => ipcRenderer.invoke('file:open-file'),
     openFolder: () => ipcRenderer.invoke('file:open-folder'),
     scanFolder: (folderPath: string) => ipcRenderer.invoke('file:scan-folder', folderPath),
-    getLocalFileUrl: (filePath: string) => ipcRenderer.invoke('file:get-url', filePath)
+    getLocalFileUrl: (filePath: string) => ipcRenderer.invoke('file:get-url', filePath),
+    takePendingOpen: () => ipcRenderer.invoke('app:take-pending-file'),
+    onOpenExternal: (callback: (filePath: string) => void) => {
+      const listener = (_event: unknown, filePath: string): void => callback(filePath)
+      ipcRenderer.on('file:open-external', listener)
+      return () => { ipcRenderer.removeListener('file:open-external', listener) }
+    }
   },
 
   // 视频文件信息

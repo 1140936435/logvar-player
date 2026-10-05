@@ -58,6 +58,24 @@ extraResources:
 win:
   executableName: 环影
   icon: build/icon.ico
+  # 文件关联（右键视频 → 打开方式 → 环影）：安装态注册扩展名关联，
+  # role: Video 声明 Windows 感知类型，右键菜单归入"视频"分组
+  fileAssociations:
+    - ext:
+        - mp4
+        - mkv
+        - avi
+        - mov
+        - wmv
+        - flv
+        - webm
+        - m4v
+        - ts
+        - m2ts
+        - rmvb
+      name: 环影视频
+      description: 环影支持的视频文件
+      role: Video
   target:
     - target: nsis
       arch:

@@ -7,6 +7,7 @@ import { promisify } from 'util'
 import { PathAccessService } from '../services/path-access-service'
 import { secureHandleRaw } from './secure-handle'
 import { V } from './secure-schema'
+import { VIDEO_EXTENSION_SET } from '../../shared/video-extensions'
 
 export interface FileIpcHost {
   getMainWindow(): BrowserWindow | null
@@ -17,9 +18,7 @@ export interface FileIpcHost {
 }
 
 // ==================== IPC: 文件 ====================
-const VIDEO_EXTENSIONS = new Set([
-  '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts', '.m2ts', '.rmvb'
-])
+// 支持扩展名单一真源见 ../../shared/video-extensions.ts（main/renderer 共用）
 
 async function scanVideoFolder(folderPath: string): Promise<{ success: boolean; data?: { files: string[]; folderPath: string }; error?: string }> {
   try {
@@ -29,7 +28,7 @@ async function scanVideoFolder(folderPath: string): Promise<{ success: boolean; 
     for (const entry of entries) {
       if (entry.isFile()) {
         const ext = entry.name.slice(entry.name.lastIndexOf('.')).toLowerCase()
-        if (VIDEO_EXTENSIONS.has(ext)) {
+        if (VIDEO_EXTENSION_SET.has(ext)) {
           files.push(join(folderPath, entry.name))
         }
       }
@@ -152,6 +151,17 @@ export function denyPath(reason = '路径不在允许目录内（请通过"打�
 /** app ready 后由 initConfig 调用：从持久化配置恢复允许目录根清单 */
 export function restorePathAccess(): void {
   if (_pathAccess) _pathAccess.restore()
+}
+
+/**
+ * 主动授权某目录根（M1 纵深防御配套）：
+ * 文件关联打开（右键 → 打开方式）不经系统对话框，路径类 IPC（file:get-url 等）
+ * 会因目录未授权被拒绝。主进程在收到关联文件时调用本函数授权其所在目录，
+ * 语义与「用户通过打开文件对话框选中该目录内文件」等价（仅目录本身被放行）。
+ */
+export function authorizePathRoot(dirPath: string): void {
+  if (!_pathAccess || !dirPath) return
+  _pathAccess.authorizeRoot(dirPath)
 }
 
 /** 注册 file:* / video:get-info 本地文件/目录 IPC 通道（含路径访问控制服务初始化） */

@@ -396,6 +396,10 @@ export interface Api {
     openFolder: () => Promise<OpenFolderResponse>
     scanFolder: (folderPath: string) => Promise<ScanFolderResponse>
     getLocalFileUrl: (filePath: string) => Promise<ApiResponse<{ url: string }>>
+    /** 文件关联打开（右键 → 打开方式）：拉取主进程待播放的外部文件（可能为空） */
+    takePendingOpen: () => Promise<ApiResponse<{ filePath: string } | null>>
+    /** 文件关联打开：订阅主进程推送（did-finish-load 后 / 二次实例转发）；返回退订函数 */
+    onOpenExternal: (callback: (filePath: string) => void) => () => void
   }
 
   server: {
